@@ -692,7 +692,6 @@ async fn run_instance<P>(
 
     let mut window_manager = WindowManager::new();
     let mut is_window_opening = !is_daemon;
-    let mut is_suspended = false;
 
     let mut compositor = None;
     let mut events = Vec::new();
@@ -949,10 +948,6 @@ async fn run_instance<P>(
                         event: event::WindowEvent::RedrawRequested,
                         ..
                     } => {
-                        if is_suspended {
-                            continue;
-                        }
-
                         let Some(mut current_compositor) = compositor.as_mut()
                         else {
                             continue;
@@ -963,6 +958,12 @@ async fn run_instance<P>(
                         else {
                             continue;
                         };
+
+                        // No surface: the native window is gone (Android,
+                        // between `Suspended` and `Resumed`).
+                        if window.surface.is_none() {
+                            continue;
+                        }
 
                         let physical_size = window.state.physical_size();
                         let mut logical_size = window.state.logical_size();
@@ -1194,6 +1195,11 @@ async fn run_instance<P>(
                                         window.state.physical_size();
 
                                     if error == compositor::SurfaceError::Lost {
+                                        // Drop the lost surface before its
+                                        // replacement is built: a native
+                                        // window may take only one surface
+                                        // at a time (Android).
+                                        window.surface = None;
                                         window.surface = Some(
                                             current_compositor.create_surface(
                                                 window.raw.clone(),
@@ -1458,23 +1464,25 @@ async fn run_instance<P>(
                         }
                     }
                     event::Event::Suspended => {
-                        is_suspended = true;
-
                         // The native window is about to be destroyed: winit
                         // requires every surface on it to be dropped before
                         // `suspended` returns, which this does, since the
-                        // runner polls this future until it waits again.
+                        // runner polls this future until it waits again. A
+                        // window without a surface is not drawn until
+                        // `Resumed`.
                         for (_id, window) in window_manager.iter_mut() {
                             window.surface = None;
                         }
                     }
                     event::Event::Resumed => {
-                        is_suspended = false;
-
                         // A new native window: build a surface on it for
-                        // every window.
+                        // every window that has none.
                         if let Some(compositor) = compositor.as_mut() {
                             for (_id, window) in window_manager.iter_mut() {
+                                if window.surface.is_some() {
+                                    continue;
+                                }
+
                                 let size = window.state.physical_size();
 
                                 window.surface =

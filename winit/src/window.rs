@@ -173,7 +173,9 @@ where
     pub state: State<P>,
     pub exit_on_close_request: bool,
     pub mouse_interaction: mouse::Interaction,
-    /// `None` between `Suspended` and `Resumed` (Android).
+    /// `None` while the native window is gone (Android, between `Suspended`
+    /// and `Resumed`). The shell keeps no other record of it: a window
+    /// without a surface is not drawn.
     pub surface: Option<C::Surface>,
     pub surface_version: u64,
     pub renderer: P::Renderer,
