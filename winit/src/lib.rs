@@ -141,7 +141,31 @@ where
     #[cfg(target_os = "ios")]
     scene::adopt();
 
+    #[cfg(not(target_os = "android"))]
     let event_loop = builder.build().expect("Create event loop");
+
+    // winit allows one event loop per process, and Android keeps the process
+    // alive after `android_main` returns, so a second `android_main` cannot
+    // build one.
+    #[cfg(target_os = "android")]
+    let event_loop = builder.build().unwrap_or_else(|error| match error {
+        winit::error::EventLoopError::RecreationAttempt => panic!(
+            "Create event loop: android_main ran a second time in this \
+            process, and winit allows one event loop per process. Either the \
+            previous event loop exited (iced::exit, a crash, or `run` \
+            returning) and Android kept the process alive, or the Activity \
+            was destroyed and created again by a configuration change \
+            (rotation, dark mode, locale, font scale, ...). Declare the full \
+            list on the activity in AndroidManifest.xml: \
+            android:configChanges=\"mcc|mnc|locale|touchscreen|keyboard|\
+            keyboardHidden|navigation|orientation|screenLayout|uiMode|\
+            screenSize|smallestScreenSize|density|layoutDirection|colorMode|\
+            grammaticalGender|fontScale|fontWeightAdjustment\"; do not call \
+            iced::exit on Android; and end the process with \
+            std::process::exit once `run` returns."
+        ),
+        error => panic!("Create event loop: {error:?}"),
+    });
 
     let graphics_settings = settings.clone().into();
     let display_handle = event_loop.owned_display_handle();
@@ -550,8 +574,18 @@ where
                                 break;
                             }
                             Control::Crash(error) => {
-                                self.error = Some(error);
-                                event_loop.exit();
+                                log::error!("{error}: {error:?}");
+
+                                // iOS: `run` never returns its error, and
+                                // the window stays black.
+                                #[cfg(target_os = "ios")]
+                                panic!("{error}: {error:?}");
+
+                                #[cfg(not(target_os = "ios"))]
+                                {
+                                    self.error = Some(error);
+                                    event_loop.exit();
+                                }
                             }
                             Control::SetAutomaticWindowTabbing(_enabled) => {
                                 #[cfg(target_os = "macos")]
