@@ -1681,15 +1681,32 @@ fn run_action<'a, P, C>(
             window::Action::Close(id) => {
                 // Mobile winit never reports a window destroyed, which is
                 // when iced exits: closing the last window would leave the
-                // application running with nothing on screen.
+                // application running with nothing on screen. On iOS a
+                // window already being opened takes its place, as in
+                // `Task::batch([window::open(..), window::close(old)])`, so
+                // the close stands; Android refuses a second window.
+                #[cfg(target_os = "android")]
+                let is_replaced = false;
+
+                #[cfg(target_os = "ios")]
+                let is_replaced = *is_window_opening;
+
                 #[cfg(any(target_os = "android", target_os = "ios"))]
-                if window_manager.is_last(id) {
+                if window_manager.is_last(id) && !is_replaced {
                     log::warn!(
                         "window::close of the last window is ignored on {}: \
                         the system, not the application, ends a mobile \
                         application, and with no window left it would show \
-                        a black screen.",
+                        a black screen.{}",
                         std::env::consts::OS,
+                        if cfg!(target_os = "ios") {
+                            " To replace the window, open the new one first: \
+                            window::open(..) before window::close(old) in \
+                            the same batch, or window::close(old) once the \
+                            task window::open returned has its id."
+                        } else {
+                            ""
+                        },
                     );
 
                     return;
