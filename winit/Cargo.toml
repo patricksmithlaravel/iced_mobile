@@ -36,6 +36,14 @@ winit.workspace = true
 sysinfo.workspace = true
 sysinfo.optional = true
 
+[target.'cfg(target_os = "ios")'.dependencies]
+block2.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-foundation.features = ["NSNotification", "NSOperation", "NSString", "NSThread", "block2"]
+objc2-ui-kit.workspace = true
+objc2-ui-kit.features = ["UIResponder", "UIScene", "UIView", "UIWindow", "UIWindowScene"]
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys.workspace = true
 web-sys.features = ["Document", "Window", "HtmlCanvasElement"]

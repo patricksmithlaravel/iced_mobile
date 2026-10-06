@@ -2580,10 +2580,14 @@ dependencies = [
 name = "iced_winit"
 version = "0.14.1"
 dependencies = [
+ "block2 0.5.1",
  "iced_debug",
  "iced_program",
  "log",
  "mundy",
+ "objc2 0.5.2",
+ "objc2-foundation 0.2.2",
+ "objc2-ui-kit",
  "rustc-hash 2.1.1",
  "sysinfo",
  "thiserror 2.0.17",

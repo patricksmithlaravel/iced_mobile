@@ -64,6 +64,9 @@ use std::mem::ManuallyDrop;
 use std::slice;
 use std::sync::Arc;
 
+#[cfg(target_os = "ios")]
+mod scene;
+
 #[cfg(target_os = "android")]
 static ANDROID_APP: std::sync::Mutex<
     Option<winit::platform::android::activity::AndroidApp>,
@@ -132,6 +135,11 @@ where
 
         let _ = builder.with_android_app(app);
     }
+
+    // Before winit's `UIApplicationMain`, so that the scene's connection is
+    // heard.
+    #[cfg(target_os = "ios")]
+    scene::adopt();
 
     let event_loop = builder.build().expect("Create event loop");
 
