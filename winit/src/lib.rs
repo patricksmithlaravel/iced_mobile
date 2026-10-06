@@ -128,9 +128,20 @@ where
     {
         use winit::platform::android::EventLoopBuilderExtAndroid;
 
-        let app =
-            ANDROID_APP.lock().expect("Lock AndroidApp").take().expect(
-                "Call iced_winit::set_android_app in android_main first",
+        let app = ANDROID_APP
+            .lock()
+            .expect("Lock AndroidApp")
+            .take()
+            .expect(
+                "No AndroidApp: define the entry point with \
+                iced::android_main!(run), or call iced::mobile::set_android_app \
+                (iced_winit::set_android_app) with the AndroidApp that \
+                android_main receives before running the application. If \
+                that is done, the build holds two copies of iced_winit and \
+                the call filled the other one: depend on iced_winit from \
+                exactly the same source as iced (the same git URL and rev, \
+                character for character), or not at all (`cargo tree -d` lists \
+                both copies).",
             );
 
         let _ = builder.with_android_app(app);
@@ -151,18 +162,22 @@ where
     let event_loop = builder.build().unwrap_or_else(|error| match error {
         winit::error::EventLoopError::RecreationAttempt => panic!(
             "Create event loop: android_main ran a second time in this \
-            process, and winit allows one event loop per process. Either the \
-            previous event loop exited (iced::exit, a crash, or `run` \
-            returning) and Android kept the process alive, or the Activity \
-            was destroyed and created again by a configuration change \
-            (rotation, dark mode, locale, font scale, ...). Declare the full \
+            process, and winit allows one event loop per process. An earlier \
+            android_main returned and Android kept the process alive: its \
+            application stopped (an error such as no usable graphics \
+            backend, or a panic; the log above it says which), or its \
+            Activity was destroyed and the event loop ended with it. \
+            iced::android_main! ends the process when the application stops, \
+            so this comes from a hand-written android_main: call \
+            std::process::exit once `run` returns, and catch a panic from \
+            it (std::panic::catch_unwind) to do the same. To keep the \
+            Activity from being destroyed by a configuration change \
+            (rotation, dark mode, locale, font scale, ...), declare the full \
             list on the activity in AndroidManifest.xml: \
             android:configChanges=\"mcc|mnc|locale|touchscreen|keyboard|\
             keyboardHidden|navigation|orientation|screenLayout|uiMode|\
             screenSize|smallestScreenSize|density|layoutDirection|colorMode|\
-            grammaticalGender|fontScale|fontWeightAdjustment\"; do not call \
-            iced::exit on Android; and end the process with \
-            std::process::exit once `run` returns."
+            grammaticalGender|fontScale|fontWeightAdjustment\"."
         ),
         error => panic!("Create event loop: {error:?}"),
     });
