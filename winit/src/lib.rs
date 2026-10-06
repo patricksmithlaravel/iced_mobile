@@ -1320,9 +1320,8 @@ async fn run_instance<P>(
                                 }
                             }
 
-                            for (event, status) in window_events
-                                .into_iter()
-                                .zip(statuses.into_iter())
+                            for (event, status) in
+                                window_events.into_iter().zip(statuses)
                             {
                                 runtime.broadcast(
                                     subscription::Event::Interaction {
