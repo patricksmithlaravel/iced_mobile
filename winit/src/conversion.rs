@@ -296,6 +296,9 @@ pub fn window_event(
                 ..
             } = event;
 
+            #[cfg(target_os = "ios")]
+            let (key, logical_key) = (ios_key(key), ios_key(logical_key));
+
             let key = self::key(key);
             let modified_key = self::key(logical_key);
             let physical_key = self::physical_key(physical_key);
@@ -642,6 +645,31 @@ pub fn touch_event(
         winit::event::TouchPhase::Cancelled => {
             touch::Event::FingerLost { id, position }
         }
+    }
+}
+
+/// iOS: Return and Tab as the named keys a hardware keyboard sends.
+///
+/// winit hands over every character UIKit inserts through `insertText:` as
+/// a key event of its own with a `Key::Character`, so Return is
+/// `Character("\n")` and Tab is `Character("\t")` (winit 0.30.13
+/// src/platform_impl/ios/view.rs:543-579). iced's widgets act on the named
+/// keys only: `text_input` submits and `text_editor` breaks the line on
+/// `Named::Enter`, and both drop control characters given as text. The
+/// event's `text` is left as the character, a control character the text
+/// widgets do not insert, as a desktop Return ("\r") or Tab ("\t") is.
+///
+/// UIKit inserts dictated and pasted text the same way, so a line break in
+/// it now acts as Return too: it submits a `text_input` and breaks the line
+/// in a `text_editor` ("\r\n" twice), where before it was dropped.
+#[cfg(any(target_os = "ios", test))]
+fn ios_key(key: winit::keyboard::Key) -> winit::keyboard::Key {
+    use winit::keyboard::{Key, NamedKey};
+
+    match key.as_ref() {
+        Key::Character("\n" | "\r") => Key::Named(NamedKey::Enter),
+        Key::Character("\t") => Key::Named(NamedKey::Tab),
+        _ => key,
     }
 }
 
@@ -1288,4 +1316,39 @@ pub fn ime_purpose(
 // See: https://en.wikipedia.org/wiki/Private_Use_Areas
 fn is_private_use(c: char) -> bool {
     ('\u{E000}'..='\u{F8FF}').contains(&c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use winit::keyboard::{Key, NamedKey, SmolStr};
+
+    fn character(c: &str) -> Key {
+        Key::Character(SmolStr::new(c))
+    }
+
+    #[test]
+    fn ios_return_and_tab_are_named_keys() {
+        assert_eq!(ios_key(character("\n")), Key::Named(NamedKey::Enter));
+        assert_eq!(ios_key(character("\r")), Key::Named(NamedKey::Enter));
+        assert_eq!(ios_key(character("\t")), Key::Named(NamedKey::Tab));
+
+        assert_eq!(
+            key(ios_key(character("\n"))),
+            keyboard::Key::Named(keyboard::key::Named::Enter)
+        );
+    }
+
+    #[test]
+    fn ios_other_keys_are_left_alone() {
+        for c in ["a", " ", "\r\n", "\n\n", "é", "\u{7f}"] {
+            assert_eq!(ios_key(character(c)), character(c));
+        }
+
+        assert_eq!(
+            ios_key(Key::Named(NamedKey::Backspace)),
+            Key::Named(NamedKey::Backspace)
+        );
+    }
 }
