@@ -312,7 +312,12 @@ web-sys = "0.3.69"
 web-time = "1.1"
 wgpu = { version = "27.0", default-features = false, features = ["std", "wgsl"] }
 window_clipboard = { version = "0.5", default-features = false }
-winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+# winit 0.30.13 with the Android fixes of winit PR #4739 (branch
+# iced-mobile/0.30, whose FORK.md lists them): the event loop ends when the
+# Activity is destroyed, and a new one can be built in the same process.
+# Applications reach it through `iced_winit::winit`. A winit dependency of
+# their own from crates.io would be a second copy of winit in the build.
+winit = { git = "https://github.com/patricksmithlaravel/winit", rev = "b2df976712351fcdfc64b8ec54dac4ee3f773098", version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "deny", priority = -1 }
