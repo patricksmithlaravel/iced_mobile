@@ -21,6 +21,17 @@ unconditional-rendering = []
 linux-theme-detection = ["dep:mundy", "mundy/async-io", "mundy/color-scheme"]
 x11 = ["winit/x11", "window_clipboard/x11"]
 wayland = ["winit/wayland", "winit/wayland-dlopen", "winit/wayland-csd-adwaita", "window_clipboard/wayland"]
+# Android: run in `android.app.NativeActivity` (winit's `android-native-activity`).
+# Exactly one of the two activity features must be on in an Android build:
+# android-activity refuses to compile with neither or both. Inert on other targets.
+android-native-activity = ["winit/android-native-activity"]
+# Android: run in a GameActivity (winit's `android-game-activity`). It needs
+# the androidx GameActivity classes in the APK, so a Gradle build, and its
+# C++ glue is compiled by `cc`, so even `cargo check` needs the NDK. Cannot be
+# combined with `android-native-activity`, which `iced`'s default features turn
+# on: every crate in the graph that depends on `iced` must then set
+# `default-features = false` (Cargo unifies features). Inert on other targets.
+android-game-activity = ["winit/android-game-activity"]
 
 [dependencies]
 iced_debug.workspace = true

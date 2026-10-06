@@ -22,7 +22,7 @@ all-features = true
 maintenance = { status = "actively-developed" }
 
 [features]
-default = ["wgpu", "tiny-skia", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11", "wayland"]
+default = ["wgpu", "tiny-skia", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11", "wayland", "android-native-activity"]
 # Enables the `wgpu` GPU-accelerated renderer with all its default features (Vulkan, Metal, DX12, OpenGL, and WebGPU)
 wgpu = ["wgpu-bare", "iced_renderer/wgpu"]
 # Enables the `wgpu` GPU-accelerated renderer with the minimum required features (no backends!)
@@ -89,6 +89,18 @@ linux-theme-detection = ["iced_winit/linux-theme-detection"]
 x11 = ["iced_renderer/x11", "iced_winit/x11"]
 # Enables the Unix Wayland backend
 wayland = ["iced_renderer/wayland", "iced_winit/wayland"]
+# Runs on Android in `android.app.NativeActivity`, which needs no Java code.
+# Inert on other targets. An Android build needs exactly one of the two
+# activity features.
+android-native-activity = ["iced_winit/android-native-activity"]
+# Runs on Android in a GameActivity instead. It needs the androidx GameActivity
+# classes in the APK (a Gradle build), and the NDK even for `cargo check`.
+# android-activity refuses to build with both activity features, and Cargo
+# turns a feature on for the whole build when any dependent asks for it. So
+# set `default-features = false` on `iced` in EVERY crate of the dependency
+# graph that depends on it (yours and third-party widget crates alike), or the
+# default `android-native-activity` comes back and the build fails.
+android-game-activity = ["iced_winit/android-game-activity"]
 
 [dependencies]
 iced_debug.workspace = true
