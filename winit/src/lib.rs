@@ -84,7 +84,17 @@ pub fn set_android_app(app: winit::platform::android::activity::AndroidApp) {
 
 /// What winit says of the application's life, for a shell that must act on
 /// it at once: lock a wallet, hide what is on screen.
+///
+/// | Platform | `Suspended` | `Resumed` |
+/// |---|---|---|
+/// | Android | the native window is going away, as the application leaves the screen | the native window exists, at launch and on return |
+/// | iOS | the application is about to stop being active, which also happens for Control Center, notifications and Face ID | it became active, at launch and on return |
+/// | Web | the page is hidden into the back-forward cache (`pagehide`, persisted) | at launch, and when the page comes back from that cache (`pageshow`) |
+/// | Desktop | never | once, at launch |
+///
+/// More variants may be added, so a `match` on it needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Lifecycle {
     /// winit's `Suspended`: on Android the native window is going away, as
     /// the application leaves the screen; on iOS it is about to stop being
@@ -100,9 +110,16 @@ static LIFECYCLE: std::sync::OnceLock<fn(Lifecycle)> =
 /// Calls `hook` on the event loop's thread whenever winit reports the
 /// application suspended or resumed, before iced acts on it.
 ///
-/// Set it before [`run`]; only the first call sets it.
+/// Set it before [`run`]. There is one hook: only the first call sets it,
+/// and a later call is ignored with a warning in the log.
 pub fn on_lifecycle(hook: fn(Lifecycle)) {
-    let _ = LIFECYCLE.set(hook);
+    if LIFECYCLE.set(hook).is_err() {
+        log::warn!(
+            "on_lifecycle: a hook is already set, and only the first one is \
+            called; this one is ignored. Call the second from the first \
+            instead."
+        );
+    }
 }
 
 fn lifecycle(event: Lifecycle) {
