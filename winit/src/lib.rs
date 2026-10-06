@@ -64,6 +64,48 @@ use std::mem::ManuallyDrop;
 use std::slice;
 use std::sync::Arc;
 
+#[cfg(target_os = "android")]
+static ANDROID_APP: std::sync::Mutex<
+    Option<winit::platform::android::activity::AndroidApp>,
+> = std::sync::Mutex::new(None);
+
+/// Hands the `AndroidApp` received by `android_main` to the shell.
+///
+/// Must be called before [`run`] (or `iced::application(..).run()`).
+#[cfg(target_os = "android")]
+pub fn set_android_app(app: winit::platform::android::activity::AndroidApp) {
+    *ANDROID_APP.lock().expect("Lock AndroidApp") = Some(app);
+}
+
+/// What winit says of the application's life, for a shell that must act on
+/// it at once: lock a wallet, hide what is on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+    /// winit's `Suspended`: on Android the native window is going away, as
+    /// the application leaves the screen; on iOS it is about to stop being
+    /// active.
+    Suspended,
+    /// winit's `Resumed`.
+    Resumed,
+}
+
+static LIFECYCLE: std::sync::OnceLock<fn(Lifecycle)> =
+    std::sync::OnceLock::new();
+
+/// Calls `hook` on the event loop's thread whenever winit reports the
+/// application suspended or resumed, before iced acts on it.
+///
+/// Set it before [`run`]; only the first call sets it.
+pub fn on_lifecycle(hook: fn(Lifecycle)) {
+    let _ = LIFECYCLE.set(hook);
+}
+
+fn lifecycle(event: Lifecycle) {
+    if let Some(hook) = LIFECYCLE.get() {
+        hook(event);
+    }
+}
+
 /// Runs a [`Program`] with the provided settings.
 pub fn run<P>(program: P) -> Result<(), Error>
 where
@@ -76,9 +118,22 @@ where
     let settings = program.settings();
     let window_settings = program.window();
 
-    let event_loop = EventLoop::with_user_event()
-        .build()
-        .expect("Create event loop");
+    #[allow(unused_mut)]
+    let mut builder = EventLoop::with_user_event();
+
+    #[cfg(target_os = "android")]
+    {
+        use winit::platform::android::EventLoopBuilderExtAndroid;
+
+        let app =
+            ANDROID_APP.lock().expect("Lock AndroidApp").take().expect(
+                "Call iced_winit::set_android_app in android_main first",
+            );
+
+        let _ = builder.with_android_app(app);
+    }
+
+    let event_loop = builder.build().expect("Create event loop");
 
     let graphics_settings = settings.clone().into();
     let display_handle = event_loop.owned_display_handle();
@@ -153,6 +208,11 @@ where
 
         #[cfg(target_arch = "wasm32")]
         canvas: Option<web_sys::HtmlCanvasElement>,
+
+        #[cfg(target_os = "android")]
+        has_resumed: bool,
+        #[cfg(target_os = "android")]
+        deferred: Vec<Action<Message>>,
     }
 
     let runner = Runner {
@@ -166,6 +226,11 @@ where
 
         #[cfg(target_arch = "wasm32")]
         canvas: None,
+
+        #[cfg(target_os = "android")]
+        has_resumed: false,
+        #[cfg(target_os = "android")]
+        deferred: Vec::new(),
     };
 
     boot_span.finish();
@@ -176,6 +241,8 @@ where
         F: Future<Output = ()>,
     {
         fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+            lifecycle(Lifecycle::Resumed);
+
             if let Some(sender) = self.system_theme.take() {
                 let _ = sender.send(
                     event_loop
@@ -184,6 +251,45 @@ where
                         .unwrap_or_default(),
                 );
             }
+
+            // Android: there is no native window (surface) before the first
+            // `Resumed`, and it is replaced after every `Suspended`.
+            #[cfg(target_os = "android")]
+            {
+                if self.has_resumed {
+                    self.process_event(
+                        event_loop,
+                        Event::EventLoopAwakened(winit::event::Event::Resumed),
+                    );
+                }
+
+                self.has_resumed = true;
+
+                for action in std::mem::take(&mut self.deferred) {
+                    self.process_event(
+                        event_loop,
+                        Event::EventLoopAwakened(
+                            winit::event::Event::UserEvent(action),
+                        ),
+                    );
+                }
+            }
+        }
+
+        fn suspended(
+            &mut self,
+            event_loop: &winit::event_loop::ActiveEventLoop,
+        ) {
+            lifecycle(Lifecycle::Suspended);
+
+            #[cfg(target_os = "android")]
+            self.process_event(
+                event_loop,
+                Event::EventLoopAwakened(winit::event::Event::Suspended),
+            );
+
+            #[cfg(not(target_os = "android"))]
+            let _ = event_loop;
         }
 
         fn new_events(
@@ -240,6 +346,14 @@ where
             event_loop: &winit::event_loop::ActiveEventLoop,
             action: Action<Message>,
         ) {
+            // Android: hold every action (the first one opens the window)
+            // until the first `Resumed`, when the native window exists.
+            #[cfg(target_os = "android")]
+            if !self.has_resumed {
+                self.deferred.push(action);
+                return;
+            }
+
             self.process_event(
                 event_loop,
                 Event::EventLoopAwakened(winit::event::Event::UserEvent(
@@ -512,6 +626,7 @@ async fn run_instance<P>(
 
     let mut window_manager = WindowManager::new();
     let mut is_window_opening = !is_daemon;
+    let mut is_suspended = false;
 
     let mut compositor = None;
     let mut events = Vec::new();
@@ -768,6 +883,10 @@ async fn run_instance<P>(
                         event: event::WindowEvent::RedrawRequested,
                         ..
                     } => {
+                        if is_suspended {
+                            continue;
+                        }
+
                         let Some(mut current_compositor) = compositor.as_mut()
                         else {
                             continue;
@@ -802,11 +921,13 @@ async fn run_instance<P>(
                             );
                             layout_span.finish();
 
-                            current_compositor.configure_surface(
-                                &mut window.surface,
-                                physical_size.width,
-                                physical_size.height,
-                            );
+                            if let Some(surface) = window.surface.as_mut() {
+                                current_compositor.configure_surface(
+                                    surface,
+                                    physical_size.width,
+                                    physical_size.height,
+                                );
+                            }
 
                             window.surface_version =
                                 window.state.surface_version();
@@ -978,10 +1099,14 @@ async fn run_instance<P>(
 
                         window.draw_preedit();
 
+                        let Some(surface) = window.surface.as_mut() else {
+                            continue;
+                        };
+
                         let present_span = debug::present(id);
                         match current_compositor.present(
                             &mut window.renderer,
-                            &mut window.surface,
+                            surface,
                             window.state.viewport(),
                             window.state.background_color(),
                             || window.raw.pre_present_notify(),
@@ -1003,15 +1128,16 @@ async fn run_instance<P>(
                                         window.state.physical_size();
 
                                     if error == compositor::SurfaceError::Lost {
-                                        window.surface = current_compositor
-                                            .create_surface(
+                                        window.surface = Some(
+                                            current_compositor.create_surface(
                                                 window.raw.clone(),
                                                 physical_size.width,
                                                 physical_size.height,
-                                            );
+                                            ),
+                                        );
                                     } else {
                                         current_compositor.configure_surface(
-                                            &mut window.surface,
+                                            surface,
                                             physical_size.width,
                                             physical_size.height,
                                         );
@@ -1264,6 +1390,37 @@ async fn run_instance<P>(
                             let _ = control_sender.start_send(
                                 Control::ChangeFlow(ControlFlow::Wait),
                             );
+                        }
+                    }
+                    event::Event::Suspended => {
+                        is_suspended = true;
+
+                        // The native window is about to be destroyed: winit
+                        // requires every surface on it to be dropped before
+                        // `suspended` returns, which this does, since the
+                        // runner polls this future until it waits again.
+                        for (_id, window) in window_manager.iter_mut() {
+                            window.surface = None;
+                        }
+                    }
+                    event::Event::Resumed => {
+                        is_suspended = false;
+
+                        // A new native window: build a surface on it for
+                        // every window.
+                        if let Some(compositor) = compositor.as_mut() {
+                            for (_id, window) in window_manager.iter_mut() {
+                                let size = window.state.physical_size();
+
+                                window.surface =
+                                    Some(compositor.create_surface(
+                                        window.raw.clone(),
+                                        size.width,
+                                        size.height,
+                                    ));
+
+                                window.raw.request_redraw();
+                            }
                         }
                     }
                     _ => {}

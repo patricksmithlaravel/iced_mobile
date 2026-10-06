@@ -75,7 +75,7 @@ where
                 raw: window,
                 state,
                 exit_on_close_request,
-                surface,
+                surface: Some(surface),
                 surface_version,
                 renderer,
                 mouse_interaction: mouse::Interaction::None,
@@ -167,7 +167,8 @@ where
     pub state: State<P>,
     pub exit_on_close_request: bool,
     pub mouse_interaction: mouse::Interaction,
-    pub surface: C::Surface,
+    /// `None` between `Suspended` and `Resumed` (Android).
+    pub surface: Option<C::Surface>,
     pub surface_version: u64,
     pub renderer: P::Renderer,
     pub redraw_at: Option<Instant>,
