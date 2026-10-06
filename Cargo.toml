@@ -113,12 +113,13 @@ android-native-activity = ["iced_winit/android-native-activity"]
 # widget crate, or a crates.io dependent under [patch.crates-io]) cannot use
 # GameActivity.
 android-game-activity = ["iced_winit/android-game-activity"]
-# Lets `mobile::init_logger` install a platform logger: logcat on Android, the
-# unified log (os_log) on iOS. Adds no dependency on other targets. Without it,
-# `init_logger` installs only its panic hook, and iced's `log` output, panics
-# included, goes nowhere on mobile unless the application installs a logger
-# itself.
-mobile-logger = ["dep:android_logger", "dep:oslog"]
+# Lets `mobile::init_logger` install a logger: logcat on Android, the unified
+# log (os_log) on iOS, stderr on the desktop and the browser's console on the
+# web. Adds no crate on the desktop, and only `web-sys`, which iced already
+# depends on, on the web. Without it, `init_logger` installs only its panic
+# hook, and iced's `log` output, panics included, goes nowhere unless the
+# application installs a logger itself.
+mobile-logger = ["dep:android_logger", "dep:oslog", "dep:web-sys"]
 # Android and iOS: embeds Fira Sans and makes it the default font there, as
 # `fira-sans` does on the web. It is licensed under the SIL Open Font License
 # 1.1, so an application that ships it must ship `graphics/fonts/OFL.txt`.
@@ -153,13 +154,16 @@ iced_tester.optional = true
 iced_highlighter.workspace = true
 iced_highlighter.optional = true
 
+log.workspace = true
 thiserror.workspace = true
 
 image.workspace = true
 image.optional = true
 
-[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
-log.workspace = true
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys.workspace = true
+web-sys.optional = true
+web-sys.features = ["console", "Location", "Window"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger.workspace = true
@@ -172,7 +176,6 @@ oslog.optional = true
 [dev-dependencies]
 criterion = "0.5"
 iced_wgpu.workspace = true
-log.workspace = true
 
 [[bench]]
 name = "wgpu"

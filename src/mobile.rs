@@ -24,7 +24,8 @@
 //!
 //! - `android-native-activity`: runs in Android's `NativeActivity`, which
 //!   needs no Java code. An Android build needs exactly one activity feature.
-//! - `mobile-logger`: lets [`init_logger`] install logcat or os_log.
+//! - `mobile-logger`: lets [`init_logger`] install a logger: logcat,
+//!   os_log, stderr on the desktop, the console on the web.
 //! - `mobile-fira-sans`: embeds Fira Sans and makes it the default font. It
 //!   is licensed under the SIL Open Font License 1.1: ship the notice in
 //!   `graphics/fonts/OFL.txt` of this repository with the app.
@@ -121,7 +122,7 @@
 //! ```no_run,standalone_crate
 //! # mod myapp { pub fn run() -> iced::Result { Ok(()) } }
 //! fn main() -> iced::Result {
-//!     iced::mobile::init_logger(); // os_log on iOS; nothing on the desktop
+//!     iced::mobile::init_logger(); // os_log on iOS; stderr on the desktop
 //!     myapp::run()
 //! }
 //! ```
@@ -195,6 +196,21 @@
 //!   `SIMCTL_CHILD_RUST_LOG=debug` for `debug!`, which the unified log shows
 //!   only with `--level info` or `--level debug` (`trace!` needs
 //!   `--level debug`).
+//! - Desktop: stderr, one line per record. `RUST_LOG` takes `env_logger`'s
+//!   directives (`debug`, `info,iced_wgpu=warn`, ...).
+//! - Web: the browser's console. The page's `rust_log` query parameter
+//!   takes the same directives (`?rust_log=debug`).
+//!
+//! # Events for launchers
+//!
+//! A launcher such as `icm` learns that the app started, drew its first
+//! frame, was suspended or resumed, panicked or stopped from `ICM_EVENT`
+//! lines, which the shell writes only when the run opts in: `ICM_EVENTS=1`
+//! in the environment (desktop; `SIMCTL_CHILD_ICM_EVENTS=1` on the iOS
+//! simulator), `adb shell setprop debug.icm.events 1` on Android, or
+//! `?icm_events=1` in the page's address on the web. `iced_winit::icm`
+//! describes the protocol. On Android, `adb shell setprop debug.iced.backend
+//! tiny-skia` also does what `ICED_BACKEND` does elsewhere.
 //!
 //! # Lifecycle
 //!
@@ -272,48 +288,144 @@ pub fn set_android_app(_app: AndroidApp) {}
 
 /// Installs the platform's logger for the `log` crate, so that iced's
 /// messages and your own `log` calls can be read, and a panic hook that logs
-/// every panic.
+/// every panic. Call it first thing; calling it again does nothing.
 ///
 /// - Android: logcat, under the tag `iced`, each message prefixed with its
 ///   module (`adb logcat -s iced`).
 /// - iOS: the unified log, under the subsystem `iced`, with one category per
 ///   module (`log stream --predicate 'subsystem == "iced"'`).
-/// - Other targets: nothing. Install the logger of your choice as usual.
+/// - Desktop (macOS, Linux, Windows, ...): stderr, one line per record:
+///   `[2026-10-06T12:34:56.789Z INFO  my_app] message`, the time in UTC.
+/// - Web: the browser's console, with the console method of each record's
+///   level (`console.error`, `warn`, `info`; `debug` for `debug!` and
+///   `trace!`, which the console shows at its "Verbose" level).
 ///
-/// Records up to `Info` pass. To see more, set a single level (`off`,
-/// `error`, `warn`, `info`, `debug` or `trace`) before the application
-/// starts:
+/// Records up to `Info` pass. On the desktop and the web, the shell's and
+/// the wgpu renderer's own `Info` records (the window attributes, the
+/// adapters and surface formats, more than a hundred lines at every start)
+/// are left out, and their warnings and errors kept. To see more, or less,
+/// before the application starts:
 ///
 /// - Android: `adb shell setprop log.tag.iced DEBUG` (Android's own names,
 ///   `VERBOSE` to `ERROR`, are accepted too), or a `RUST_LOG` environment
-///   variable, which takes precedence.
-/// - iOS: the `RUST_LOG` environment variable; on the simulator, launch with
-///   `SIMCTL_CHILD_RUST_LOG=debug`. The unified log hides `debug!` and
-///   `trace!` records unless asked: `log stream --level info` shows
-///   `debug!`, and `--level debug` shows `trace!` as well.
+///   variable holding a single level (`off`, `error`, `warn`, `info`,
+///   `debug` or `trace`), which takes precedence.
+/// - iOS: the `RUST_LOG` environment variable, holding a single level; on
+///   the simulator, launch with `SIMCTL_CHILD_RUST_LOG=debug`. The unified
+///   log hides `debug!` and `trace!` records unless asked: `log stream
+///   --level info` shows `debug!`, and `--level debug` shows `trace!` as
+///   well.
+/// - Desktop: `RUST_LOG`, with `env_logger`'s directives: a level for every
+///   target (`debug`), levels for the targets starting with a name
+///   (`info,iced_wgpu=warn,my_app=trace`), or a name alone for every record
+///   of those targets (`my_app`). With directives but no bare level, only
+///   the targets they name are logged. `RUST_LOG=info` brings back the
+///   start-up records.
+/// - Web: the same directives in the page's `rust_log` query parameter
+///   (`index.html?rust_log=debug`).
 ///
 /// The level is only the starting point: the application can raise or lower
-/// it later with `log::set_max_level`.
+/// it later with `log::set_max_level`. On the desktop and the web, raising
+/// it above every level the directives give lets every record up to it
+/// through.
 ///
-/// On Android and iOS, the panic hook logs each panic, with its thread and
-/// location, through `log::error!`, then runs the hook that was in place,
-/// which writes it to stderr. A panic then reaches the same log as the rest,
-/// which matters on iOS, where stderr is lost unless the app was launched
-/// from a console (`simctl launch --console-pty`).
+/// The panic hook logs each panic, with its thread and location, through
+/// `log::error!`, then runs the hook that was in place, which writes it to
+/// stderr. A panic then reaches the same log as the rest, which matters on
+/// iOS, where stderr is lost unless the app was launched from a console
+/// (`simctl launch --console-pty`), and on the web, where stderr goes
+/// nowhere. On the desktop, while the stderr logger is the one in place,
+/// the hook does not log the panic, which the previous hook already prints
+/// there.
+///
+/// When the run asked for `ICM_EVENT` lines (see the [module
+/// documentation](self)), it also installs the hook that reports a panic as
+/// one; the shell does so too when it starts.
 ///
 /// If a logger is already installed, by an earlier call or by the
 /// application, it stays in place, and the panic hook is still installed,
 /// once. Without the `mobile-logger` feature (on by default) only the panic
 /// hook is installed.
 pub fn init_logger() {
-    #[cfg(any(target_os = "android", target_os = "ios"))]
     log_panics();
+
+    crate::shell::icm::install_panic_hook();
 
     #[cfg(all(feature = "mobile-logger", target_os = "android"))]
     init_android_logger();
 
     #[cfg(all(feature = "mobile-logger", target_os = "ios"))]
     init_oslog();
+
+    #[cfg(all(
+        feature = "mobile-logger",
+        not(any(
+            target_os = "android",
+            target_os = "ios",
+            target_arch = "wasm32"
+        ))
+    ))]
+    init_stderr_logger();
+
+    #[cfg(all(feature = "mobile-logger", target_arch = "wasm32"))]
+    init_console_logger();
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "mobile-logger",
+        not(any(target_os = "android", target_os = "ios"))
+    )
+))]
+mod logger;
+
+/// Whether the stderr logger of [`init_logger`] is the one in place.
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "ios",
+    target_arch = "wasm32"
+)))]
+static STDERR_LOGGER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(
+    feature = "mobile-logger",
+    not(any(
+        target_os = "android",
+        target_os = "ios",
+        target_arch = "wasm32"
+    ))
+))]
+fn init_stderr_logger() {
+    use std::sync::OnceLock;
+    use std::sync::atomic;
+
+    static LOGGER: OnceLock<logger::Stderr> = OnceLock::new();
+
+    let logger = LOGGER.get_or_init(|| logger::Stderr {
+        filter: logger::Filter::from_env(),
+    });
+
+    if log::set_logger(logger).is_ok() {
+        log::set_max_level(logger.filter.max());
+        STDERR_LOGGER.store(true, atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(all(feature = "mobile-logger", target_arch = "wasm32"))]
+fn init_console_logger() {
+    use std::sync::OnceLock;
+
+    static LOGGER: OnceLock<logger::Console> = OnceLock::new();
+
+    let logger = LOGGER.get_or_init(|| logger::Console {
+        filter: logger::Filter::from_query(),
+    });
+
+    if log::set_logger(logger).is_ok() {
+        log::set_max_level(logger.filter.max());
+    }
 }
 
 #[cfg(all(feature = "mobile-logger", target_os = "android"))]
@@ -383,39 +495,16 @@ fn android_level(level: &str) -> Option<log::LevelFilter> {
 
 /// The value of an Android system property, if it is set.
 #[cfg(all(feature = "mobile-logger", target_os = "android"))]
-#[allow(unsafe_code)]
 fn system_property(name: &std::ffi::CStr) -> Option<String> {
-    use std::ffi::{CStr, c_char, c_int};
-
-    // bionic's <sys/system_properties.h>.
-    unsafe extern "C" {
-        fn __system_property_get(
-            name: *const c_char,
-            value: *mut c_char,
-        ) -> c_int;
-    }
-
-    // PROP_VALUE_MAX: a value and its terminating NUL fit in 92 bytes.
-    let mut value = [0 as c_char; 92];
-
-    // SAFETY: `name` is NUL-terminated, and `value` has the PROP_VALUE_MAX
-    // bytes bionic writes at most, NUL included.
-    let length =
-        unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr()) };
-
-    if length <= 0 {
-        return None;
-    }
-
-    // SAFETY: bionic NUL-terminated what it wrote.
-    let value = unsafe { CStr::from_ptr(value.as_ptr()) };
-
-    Some(value.to_string_lossy().into_owned())
+    crate::shell::icm::system_property(name)
 }
 
 /// Logs every panic through `log::error!`, then runs the hook that was in
 /// place. Installed once per process.
-#[cfg(any(target_os = "android", target_os = "ios"))]
+///
+/// On the desktop the previous hook prints the panic to stderr, so it is not
+/// logged while the stderr logger is the one in place: it would be printed
+/// twice.
 fn log_panics() {
     use std::sync::Once;
 
@@ -425,10 +514,26 @@ fn log_panics() {
         let previous = std::panic::take_hook();
 
         std::panic::set_hook(Box::new(move |info| {
-            let thread = std::thread::current();
-            let name = thread.name().unwrap_or("<unnamed>");
+            #[cfg(not(any(
+                target_os = "android",
+                target_os = "ios",
+                target_arch = "wasm32"
+            )))]
+            let log = !STDERR_LOGGER.load(std::sync::atomic::Ordering::Relaxed);
 
-            log::error!("thread '{name}' {info}");
+            #[cfg(any(
+                target_os = "android",
+                target_os = "ios",
+                target_arch = "wasm32"
+            ))]
+            let log = true;
+
+            if log {
+                let thread = std::thread::current();
+                let name = thread.name().unwrap_or("<unnamed>");
+
+                log::error!("thread '{name}' {info}");
+            }
 
             previous(info);
         }));

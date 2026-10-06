@@ -2399,6 +2399,7 @@ dependencies = [
  "log",
  "oslog",
  "thiserror 2.0.17",
+ "web-sys",
 ]
 
 [[package]]
