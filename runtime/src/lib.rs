@@ -121,6 +121,9 @@ where
 ///
 /// This will normally close any application windows and
 /// terminate the runtime loop.
+///
+/// On Android and iOS it is ignored, with a warning in the log: the system,
+/// not the application, ends a mobile application.
 pub fn exit<T>() -> Task<T> {
     task::effect(Action::Exit)
 }

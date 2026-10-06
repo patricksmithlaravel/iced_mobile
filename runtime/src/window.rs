@@ -281,6 +281,10 @@ pub fn open(settings: Settings) -> (Id, Task<Id>) {
 }
 
 /// Closes the window with `id`.
+///
+/// On Android and iOS, closing the last window is ignored, with a warning in
+/// the log, since it would leave a black screen. On iOS a window being opened
+/// can take its place: open the new window first.
 pub fn close<T>(id: Id) -> Task<T> {
     task::effect(crate::Action::Window(Action::Close(id)))
 }

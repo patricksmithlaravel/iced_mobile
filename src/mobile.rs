@@ -11,13 +11,53 @@
 //!   then your `run` function, which never returns on iOS: winit hands the
 //!   thread to UIKit.
 //!
-//! Depend on `iced` alone. Its default features select Android's
-//! `NativeActivity` (`android-native-activity`) and a platform logger
-//! (`mobile-logger`); both are inert on other targets. Everything a mobile
-//! entry point needs from the shell is re-exported here. A crate that also
-//! depends on `iced_winit` directly must take it from the same source as
-//! `iced`, character for character, or the build holds two copies of the
-//! shell and `set_android_app` fills the one `iced` does not use.
+//! Depend on `iced` alone. Everything a mobile entry point needs from the
+//! shell is re-exported here. A crate that also depends on `iced_winit`
+//! directly must take it from the same source as `iced`, character for
+//! character, or the build holds two copies of the shell and
+//! `set_android_app` fills the one `iced` does not use.
+//!
+//! # Features
+//!
+//! iced's default features include four for mobile, which do nothing on
+//! other targets:
+//!
+//! - `android-native-activity`: runs in Android's `NativeActivity`, which
+//!   needs no Java code. An Android build needs exactly one activity feature.
+//! - `mobile-logger`: lets [`init_logger`] install logcat or os_log.
+//! - `mobile-fira-sans`: embeds Fira Sans and makes it the default font. It
+//!   is licensed under the SIL Open Font License 1.1: ship the notice in
+//!   `graphics/fonts/OFL.txt` of this repository with the app.
+//! - `mobile-system-fonts`: lets text fall back to the system's fonts for
+//!   the scripts the embedded fonts lack (CJK, Arabic, Hebrew, Indic, Thai,
+//!   ...), and for serif and monospaced text.
+//!
+//! With `default-features = false`, all four are gone along with the rest,
+//! and nothing says so. List the ones the app needs:
+//!
+//! ```toml
+//! iced = { git = "...", rev = "...", default-features = false, features = [
+//!     "wgpu", "tiny-skia", "thread-pool", # a renderer and an executor
+//!     "android-native-activity",          # or "android-game-activity"
+//!     "mobile-logger",
+//!     "mobile-fira-sans",
+//!     "mobile-system-fonts",
+//! ] }
+//! ```
+//!
+//! - Without an activity feature an Android build fails inside
+//!   android-activity, with errors that never name iced:
+//!   ``error[E0583]: file not found for module `activity_impl` `` and
+//!   `Either "game-activity" or "native-activity" must be enabled as
+//!   features`, followed by advice about multiple versions and `[patch]` that
+//!   does not apply. Add `android-native-activity`.
+//! - Without `mobile-logger`, [`init_logger`] installs no logger: iced's logs
+//!   and the panics its hook logs go nowhere, unless the app installs a
+//!   logger itself.
+//! - Without `mobile-fira-sans`, the default font is the system's sans-serif
+//!   (Roboto, Helvetica Neue) if `mobile-system-fonts` is on. Without both,
+//!   text in the default font is not drawn at all: set a `default_font` the
+//!   app embeds, and load it.
 //!
 //! # Example
 //!
@@ -28,18 +68,25 @@
 //! name = "myapp"
 //! edition = "2024"
 //!
-//! [lib]
-//! # cdylib: Android loads libmyapp.so; rlib: the binary links the library.
-//! crate-type = ["cdylib", "rlib"]
-//!
-//! [[bin]]
-//! # The iOS executable, and the desktop one.
-//! name = "myapp"
-//! path = "src/main.rs"
-//!
 //! [dependencies]
 //! iced = { git = "https://github.com/patricksmithlaravel/iced_mobile", rev = "<full commit hash>" }
 //! ```
+//!
+//! With `src/lib.rs` and `src/main.rs`, Cargo builds a library and a binary,
+//! both named `myapp`. The binary is the desktop and the iOS executable.
+//! Android needs the library as a `cdylib`; ask for it in the Android build
+//! only:
+//!
+//! ```sh
+//! cargo rustc --lib --crate-type cdylib --target aarch64-linux-android
+//! ```
+//!
+//! Listing `crate-type = ["cdylib", "rlib"]` under `[lib]` works too, but
+//! then every desktop build links a `cdylib` it does not use, and on Windows
+//! (MSVC) the library's `myapp.pdb` and the binary's collide in the output
+//! directory (Cargo warns of an "output filename collision",
+//! rust-lang/cargo#6313). If you list it, give the binary another name with a
+//! `[[bin]]` section, and name the iOS bundle's executable after it.
 //!
 //! `src/lib.rs`:
 //!
@@ -50,7 +97,7 @@
 //!     iced::run(update, view)
 //! }
 //!
-//! // Android's entry point. Expands to nothing on other targets.
+//! // Android's entry point. Defines nothing on other targets.
 //! iced::android_main!(run);
 //!
 //! #[derive(Debug, Clone)]
@@ -81,24 +128,59 @@
 //!
 //! # Android
 //!
-//! - The manifest's `android.app.lib_name` meta-data must be the `[lib]`
+//! - The manifest's `android.app.lib_name` meta-data must be the library's
 //!   name (`myapp` for `libmyapp.so`), or Android finds no `android_main`.
-//! - Give the activity the full `android:configChanges` list (orientation,
-//!   screen size, `uiMode`, locale, font scale and the rest). Without it
-//!   Android recreates the activity on rotation or a dark-mode switch, and
-//!   winit 0.30 cannot start a second event loop in the same process.
-//! - `cargo check --target aarch64-linux-android` needs no NDK with the
-//!   default `NativeActivity`; `cargo build` needs the NDK's linker.
-//! - For a GameActivity, turn on `android-game-activity` and set
-//!   `default-features = false` on every `iced` dependency in the build (see
-//!   the feature's comment in iced's `Cargo.toml`).
+//! - Give the activity the full `android:configChanges` list:
+//!   `mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density|layoutDirection|colorMode|grammaticalGender|fontScale|fontWeightAdjustment`.
+//!   Without it Android destroys and recreates the activity on rotation, a
+//!   dark-mode switch and the like, which freezes the app (see the known
+//!   limitations below).
+//! - Keep Back from finishing the activity, for the same reason: set
+//!   `android:enableOnBackInvokedCallback="false"` on the `<application>`.
+//!   Back then reaches the app as a key press,
+//!   `Key::Named(Named::BrowserBack)`, and nothing else happens. To leave on
+//!   Back at the app's root, as Android does for a launcher's activity, call
+//!   `Activity.moveTaskToBack(true)` through JNI.
+//! - `cargo check --target aarch64-linux-android` needs no NDK with
+//!   `NativeActivity`; `cargo build` and `cargo rustc` need the NDK's linker.
+//! - For a GameActivity, turn on `android-game-activity`, set
+//!   `default-features = false` and list the other features as above. Cargo
+//!   turns a feature on for the whole build when any crate asks for it, so
+//!   every crate in the graph that depends on `iced` must do the same. If one
+//!   uses iced's defaults (third-party widget crates usually do, and so does
+//!   every crates.io dependent when this fork replaces iced through
+//!   `[patch.crates-io]`), `android-native-activity` comes back and
+//!   android-activity stops the build: `The "game-activity" and
+//!   "native-activity" features cannot be enabled at the same time`. Such a
+//!   graph can only use `NativeActivity`.
 //!
 //! # iOS
 //!
-//! - Apps built with the iOS 27 SDK must declare a
-//!   `UIApplicationSceneManifest` in their `Info.plist`, or UIKit refuses to
-//!   launch them. The snippet is in the documentation of
-//!   `winit/src/scene.rs` in this repository.
+//! Apps built with the iOS 27 SDK must adopt UIKit's scene life cycle, or
+//! UIKit stops them at launch and says why only in the system log. Add this
+//! to the top-level `<dict>` of the app's `Info.plist`; iced puts its windows
+//! into the scene it declares:
+//!
+//! ```xml
+//! <key>UIApplicationSceneManifest</key>
+//! <dict>
+//!     <key>UIApplicationSupportsMultipleScenes</key>
+//!     <false/>
+//!     <key>UISceneConfigurations</key>
+//!     <dict>
+//!         <key>UIWindowSceneSessionRoleApplication</key>
+//!         <array>
+//!             <dict>
+//!                 <key>UISceneConfigurationName</key>
+//!                 <string>Default</string>
+//!             </dict>
+//!         </array>
+//!     </dict>
+//! </dict>
+//! ```
+//!
+//! Without it, iced prints this block to stderr and the log at launch; in a
+//! debug build linked with the iOS 27 SDK or later it also panics.
 //!
 //! # Logs
 //!
@@ -121,7 +203,39 @@
 //! [`Lifecycle::Suspended`] means different things per platform: on iOS the
 //! application is about to stop being active, which also happens for
 //! Control Center, notifications and Face ID; on Android its window is going
-//! away. The desktop never sends it.
+//! away. On the web it fires when the page goes into the back-forward cache.
+//! The desktop never sends it. [`Lifecycle`] has the full table.
+//!
+//! # Known limitations
+//!
+//! - **Exiting.** `iced::exit` and closing the last window are ignored on
+//!   Android and iOS, with a warning in the log: the system ends a mobile
+//!   app. On iOS a window being opened can replace the last one: open the
+//!   new window before closing the old one.
+//! - **One window on Android.** Android gives an app one native window, so
+//!   a second `window::open` is refused with an error in the log, and its
+//!   task ends without an id.
+//! - **Android activity destruction.** android-activity holds the
+//!   activity's `onDestroy` until `android_main` returns, and winit 0.30 does
+//!   not end its event loop then (rust-windowing/winit#4739). So whatever
+//!   destroys the activity while the process lives on (Back with predictive
+//!   back, which targetSdk 36 turns on; a configuration change missing from
+//!   `configChanges`; "Don't keep activities") freezes the app, and the next
+//!   launch hangs until the process is killed. The manifest settings above
+//!   avoid the common causes.
+//! - **Android emulator without a GPU.** Its default headless GPU mode offers
+//!   llvmpipe (lavapipe), which cannot run iced's wgpu shaders, so iced
+//!   draws with tiny-skia on the CPU there. Boot the emulator with
+//!   `-gpu swiftshader_indirect` to exercise wgpu.
+//! - **Emoji** draw blank on both platforms: the system emoji fonts are in
+//!   formats the text stack cannot draw (COLRv1 on Android, `emjc` images
+//!   on iOS). Android's flags draw.
+//! - **Chinese on iOS.** PingFang cannot be drawn either, so Han characters
+//!   fall back to Hiragino Sans, which lacks many simplified Chinese
+//!   characters (这, 们, ...); those show the missing-glyph box. Embed a font
+//!   for Chinese text.
+//! - **Not yet available on mobile:** safe-area insets (pad the root view),
+//!   the clipboard, and detecting dark mode.
 
 pub use crate::shell::{Lifecycle, on_lifecycle};
 
@@ -130,9 +244,31 @@ pub use crate::shell::{Lifecycle, on_lifecycle};
 #[cfg_attr(docsrs, doc(cfg(target_os = "android")))]
 pub use crate::shell::winit::platform::android::activity::AndroidApp;
 
+/// Hands the `AndroidApp` that `android_main` receives to the shell; it must
+/// be called before the application runs. [`android_main!`](crate::android_main)
+/// does it for you.
 #[cfg(target_os = "android")]
 #[cfg_attr(docsrs, doc(cfg(target_os = "android")))]
 pub use crate::shell::set_android_app;
+
+/// The Android activity handle that android-activity gives `android_main`:
+/// winit's `platform::android::activity::AndroidApp`, re-exported.
+///
+/// It exists only on Android; this stands in for it in documentation built
+/// for other targets.
+#[cfg(all(docsrs, not(target_os = "android")))]
+#[doc(cfg(target_os = "android"))]
+pub struct AndroidApp(());
+
+/// Hands the `AndroidApp` that `android_main` receives to the shell; it must
+/// be called before the application runs. [`android_main!`](crate::android_main)
+/// does it for you.
+///
+/// It exists only on Android; this stands in for it in documentation built
+/// for other targets.
+#[cfg(all(docsrs, not(target_os = "android")))]
+#[doc(cfg(target_os = "android"))]
+pub fn set_android_app(_app: AndroidApp) {}
 
 /// Installs the platform's logger for the `log` crate, so that iced's
 /// messages and your own `log` calls can be read, and a panic hook that logs
