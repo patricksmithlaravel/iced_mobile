@@ -95,6 +95,37 @@ impl Compositor {
 
         log::info!("Selected: {:#?}", adapter.get_info());
 
+        // Android: the shaders unpack colors with `unpack2x16float`, which
+        // needs `SHADER_F16_IN_F32`. llvmpipe (lavapipe) lacks it unless it
+        // has native f16, and it is the emulator's GPU on a host without
+        // one. Creating the shaders would then panic in wgpu instead of
+        // failing, so the fallback renderer would never get its turn, and an
+        // Android application cannot pick another one through ICED_BACKEND.
+        // llvmpipe draws on the CPU anyway.
+        #[cfg(target_os = "android")]
+        if !adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::SHADER_F16_IN_F32)
+        {
+            let info = adapter.get_info();
+
+            log::warn!(
+                "The adapter {name:?} ({backend:?}, driver {driver:?}) \
+                cannot run iced's shaders: it lacks \
+                DownlevelFlags::SHADER_F16_IN_F32. wgpu is not used; the next \
+                renderer is tried.",
+                name = info.name,
+                backend = info.backend,
+                driver = info.driver,
+            );
+
+            return Err(Error::NoAdapterFound(format!(
+                "{name:?} lacks DownlevelFlags::SHADER_F16_IN_F32",
+                name = info.name
+            )));
+        }
+
         let (format, alpha_mode) = compatible_surface
             .as_ref()
             .and_then(|surface| {
