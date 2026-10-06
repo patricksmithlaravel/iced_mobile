@@ -159,6 +159,7 @@ oslog.optional = true
 [dev-dependencies]
 criterion = "0.5"
 iced_wgpu.workspace = true
+log.workspace = true
 
 [[bench]]
 name = "wgpu"
