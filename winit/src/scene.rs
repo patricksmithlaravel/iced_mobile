@@ -49,8 +49,10 @@
 //! Without it UIKit wraps the app in a scene of its own and puts the window
 //! in it, so nothing here acts; with the iOS 27 SDK the app is stopped.
 //! [`adopt`] checks for it first: when it is missing it prints the block
-//! above to stderr and the log, and panics in a debug build, since UIKit's
-//! stop leaves a trace only in the system log.
+//! above to stderr and the log. If the executable was linked with the iOS 27
+//! SDK or later, which UIKit stops, that is an error, and a debug build
+//! panics, since UIKit's stop leaves a trace only in the system log. Linked
+//! with an older SDK the app still runs, so it is a warning.
 
 // UIKit is reached only through Objective-C calls; each says why it is sound.
 #![allow(unsafe_code)]
@@ -175,24 +177,56 @@ fn check_manifest() {
         return;
     }
 
-    let message = format!(
-        "iced: the app's Info.plist has no UIApplicationSceneManifest. \
-         An app built with the iOS 27 SDK must adopt UIKit's scene life \
-         cycle, and without this key UIKit stops it at launch (Apple TN3187), \
-         saying why only in the system log. Add this to the top-level <dict> \
-         of the app's Info.plist:\n\n{MANIFEST}\n"
+    let fix = format!(
+        "Add this to the top-level <dict> of the app's Info.plist:\n\n\
+         {MANIFEST}\n"
     );
 
-    eprintln!("{message}");
-    log::error!("{message}");
+    match crate::ios_sdk::linked() {
+        // UIKit puts such an app in a scene of its own, and it runs.
+        Some((major, minor)) if major < REQUIRED_SDK => {
+            let message = format!(
+                "iced: the app's Info.plist has no UIApplicationSceneManifest. \
+                 Linked with the iOS {major}.{minor} SDK it still runs, but \
+                 built with the iOS {REQUIRED_SDK} SDK or later UIKit stops it \
+                 at launch (Apple TN3187). {fix}"
+            );
 
-    if cfg!(debug_assertions) {
-        panic!(
-            "iOS scene: the Info.plist has no UIApplicationSceneManifest \
-             (see the message above)"
-        );
+            eprintln!("{message}");
+            log::warn!("{message}");
+        }
+        sdk => {
+            let linked = sdk.map_or_else(
+                || String::from("an SDK whose version could not be read"),
+                |(major, minor)| format!("the iOS {major}.{minor} SDK"),
+            );
+
+            let message = format!(
+                "iced: the app's Info.plist has no UIApplicationSceneManifest. \
+                 An app built with the iOS {REQUIRED_SDK} SDK must adopt \
+                 UIKit's scene life cycle, and without this key UIKit stops \
+                 it at launch (Apple TN3187), saying why only in the system \
+                 log. This one is linked with {linked}. {fix}"
+            );
+
+            eprintln!("{message}");
+            log::error!("{message}");
+
+            // Only when the version is known: an app UIKit runs must not
+            // stop in a debug build.
+            if cfg!(debug_assertions) && sdk.is_some() {
+                panic!(
+                    "iOS scene: the Info.plist has no \
+                     UIApplicationSceneManifest (see the message above)"
+                );
+            }
+        }
     }
 }
+
+/// The first iOS SDK whose apps UIKit stops at launch without a scene
+/// manifest.
+const REQUIRED_SDK: u32 = 27;
 
 fn scene_connected(note: &NSNotification) {
     let Some(scene) = application_scene(note) else {

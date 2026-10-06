@@ -64,6 +64,8 @@ use std::mem::ManuallyDrop;
 use std::slice;
 use std::sync::Arc;
 
+#[cfg(any(target_os = "ios", test))]
+mod ios_sdk;
 #[cfg(target_os = "ios")]
 mod scene;
 
