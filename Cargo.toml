@@ -89,22 +89,35 @@ linux-theme-detection = ["iced_winit/linux-theme-detection"]
 x11 = ["iced_renderer/x11", "iced_winit/x11"]
 # Enables the Unix Wayland backend
 wayland = ["iced_renderer/wayland", "iced_winit/wayland"]
+# The four mobile features below (`android-native-activity`, `mobile-logger`,
+# `mobile-fira-sans`, `mobile-system-fonts`) are in `default` and do nothing on
+# other targets. With `default-features = false` they are all gone: list the
+# ones the application needs (see the `iced::mobile` docs).
+#
 # Runs on Android in `android.app.NativeActivity`, which needs no Java code.
 # Inert on other targets. An Android build needs exactly one of the two
-# activity features.
+# activity features; with neither, it fails inside android-activity with
+# `error[E0583]: file not found for module `activity_impl`` and `Either
+# "game-activity" or "native-activity" must be enabled as features`, which
+# never name iced.
 android-native-activity = ["iced_winit/android-native-activity"]
 # Runs on Android in a GameActivity instead. It needs the androidx GameActivity
 # classes in the APK (a Gradle build), and the NDK even for `cargo check`.
 # android-activity refuses to build with both activity features, and Cargo
 # turns a feature on for the whole build when any dependent asks for it. So
 # set `default-features = false` on `iced` in EVERY crate of the dependency
-# graph that depends on it (yours and third-party widget crates alike), or the
-# default `android-native-activity` comes back and the build fails.
+# graph that depends on it (yours and third-party widget crates alike), and
+# list `mobile-logger` and the font features again, or the default
+# `android-native-activity` comes back and the build fails with "cannot be
+# enabled at the same time". A graph with any crate on iced's defaults (a
+# widget crate, or a crates.io dependent under [patch.crates-io]) cannot use
+# GameActivity.
 android-game-activity = ["iced_winit/android-game-activity"]
 # Lets `mobile::init_logger` install a platform logger: logcat on Android, the
 # unified log (os_log) on iOS. Adds no dependency on other targets. Without it,
-# `init_logger` does nothing and iced's `log` output goes nowhere on mobile
-# unless the application installs a logger itself.
+# `init_logger` installs only its panic hook, and iced's `log` output, panics
+# included, goes nowhere on mobile unless the application installs a logger
+# itself.
 mobile-logger = ["dep:android_logger", "dep:oslog"]
 # Android and iOS: embeds Fira Sans and makes it the default font there, as
 # `fira-sans` does on the web. It is licensed under the SIL Open Font License
