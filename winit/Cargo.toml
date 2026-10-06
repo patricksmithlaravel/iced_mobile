@@ -57,7 +57,7 @@ objc2-ui-kit.features = ["UIResponder", "UIScene", "UISceneDefinitions", "UIScen
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys.workspace = true
-web-sys.features = ["Document", "Window", "HtmlCanvasElement"]
+web-sys.features = ["Document", "Window", "HtmlCanvasElement", "Location", "console"]
 wasm-bindgen-futures.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

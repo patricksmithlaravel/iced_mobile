@@ -28,6 +28,7 @@ pub use winit;
 
 pub mod clipboard;
 pub mod conversion;
+pub mod icm;
 
 mod error;
 mod proxy;
@@ -123,6 +124,11 @@ pub fn on_lifecycle(hook: fn(Lifecycle)) {
 }
 
 fn lifecycle(event: Lifecycle) {
+    icm::lifecycle(match event {
+        Lifecycle::Suspended => "suspended",
+        Lifecycle::Resumed => "resumed",
+    });
+
     if let Some(hook) = LIFECYCLE.get() {
         hook(event);
     }
@@ -135,6 +141,8 @@ where
     P::Theme: theme::Base,
 {
     use winit::event_loop::EventLoop;
+
+    icm::start();
 
     let boot_span = debug::boot();
     let settings = program.settings();
@@ -699,6 +707,8 @@ where
         let mut runner = runner;
         let _ = event_loop.run_app(&mut runner);
 
+        icm::exit(if runner.error.is_some() { 1 } else { 0 });
+
         runner.error.map(Err).unwrap_or(Ok(()))
     }
 
@@ -709,6 +719,34 @@ where
 
         Ok(())
     }
+}
+
+/// The graphics backend to ask the compositor for, or `None` for its own
+/// choice (`ICED_BACKEND`, then its defaults).
+///
+/// An Android application cannot be given environment variables, so there
+/// the system property `debug.iced.backend` stands in for `ICED_BACKEND`
+/// (`adb shell setprop debug.iced.backend tiny-skia`), which still wins.
+fn backend_preference() -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        if std::env::var_os("ICED_BACKEND").is_some() {
+            return None;
+        }
+
+        let backend = icm::system_property(c"debug.iced.backend")
+            .filter(|backend| !backend.trim().is_empty())?;
+
+        log::info!(
+            "Graphics backend from the system property debug.iced.backend: \
+            {backend:?}"
+        );
+
+        Some(backend)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    None
 }
 
 #[derive(Debug)]
@@ -834,16 +872,18 @@ async fn run_instance<P>(
                         let display_handle = display_handle.clone();
                         let proxy = proxy.clone();
                         let default_fonts = default_fonts.clone();
+                        let backend = backend_preference();
 
                         async move {
                             let shell = Shell::new(proxy.clone());
 
                             let mut compositor =
-                                <P::Renderer as compositor::Default>::Compositor::new(
+                                <P::Renderer as compositor::Default>::Compositor::with_backend(
                                     graphics_settings,
                                     display_handle,
                                     window,
                                     shell,
+                                    backend.as_deref(),
                                 ).await;
 
                             if let Ok(compositor) = &mut compositor {
@@ -1248,6 +1288,18 @@ async fn run_instance<P>(
                         ) {
                             Ok(()) => {
                                 present_span.finish();
+
+                                if icm::awaits_ready() {
+                                    use core::renderer::Headless as _;
+
+                                    icm::ready(
+                                        window.state.logical_size(),
+                                        window.state.physical_size(),
+                                        window.state.scale_factor(),
+                                        &window.renderer.name(),
+                                        &current_compositor.information(),
+                                    );
+                                }
                             }
                             Err(error) => match error {
                                 compositor::SurfaceError::OutOfMemory => {
