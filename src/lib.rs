@@ -520,6 +520,7 @@ mod error;
 
 pub mod application;
 pub mod daemon;
+pub mod mobile;
 pub mod time;
 pub mod window;
 

@@ -22,7 +22,7 @@ all-features = true
 maintenance = { status = "actively-developed" }
 
 [features]
-default = ["wgpu", "tiny-skia", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11", "wayland", "android-native-activity"]
+default = ["wgpu", "tiny-skia", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11", "wayland", "android-native-activity", "mobile-logger"]
 # Enables the `wgpu` GPU-accelerated renderer with all its default features (Vulkan, Metal, DX12, OpenGL, and WebGPU)
 wgpu = ["wgpu-bare", "iced_renderer/wgpu"]
 # Enables the `wgpu` GPU-accelerated renderer with the minimum required features (no backends!)
@@ -101,6 +101,11 @@ android-native-activity = ["iced_winit/android-native-activity"]
 # graph that depends on it (yours and third-party widget crates alike), or the
 # default `android-native-activity` comes back and the build fails.
 android-game-activity = ["iced_winit/android-game-activity"]
+# Lets `mobile::init_logger` install a platform logger: logcat on Android, the
+# unified log (os_log) on iOS. Adds no dependency on other targets. Without it,
+# `init_logger` does nothing and iced's `log` output goes nowhere on mobile
+# unless the application installs a logger itself.
+mobile-logger = ["dep:android_logger", "dep:oslog"]
 
 [dependencies]
 iced_debug.workspace = true
@@ -124,6 +129,17 @@ thiserror.workspace = true
 
 image.workspace = true
 image.optional = true
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+log.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger.workspace = true
+android_logger.optional = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+oslog.workspace = true
+oslog.optional = true
 
 [dev-dependencies]
 criterion = "0.5"
@@ -197,6 +213,7 @@ iced_wgpu = { version = "0.14.0", path = "wgpu", default-features = false }
 iced_widget = { version = "0.14.0", path = "widget" }
 iced_winit = { version = "0.14.0", path = "winit", default-features = false }
 
+android_logger = { version = "0.15.1", default-features = false }
 bincode = "1.3"
 bitflags = "2.0"
 block2 = "0.5.1"
@@ -222,6 +239,7 @@ num-traits = "0.2"
 objc2 = "0.5.2"
 objc2-foundation = "0.2.2"
 objc2-ui-kit = "0.2.2"
+oslog = "0.2"
 ouroboros = "0.18"
 png = "0.18"
 pulldown-cmark = "0.12"
