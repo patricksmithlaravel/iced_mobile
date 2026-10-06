@@ -21,6 +21,15 @@ impl Id {
 
         Self(Internal::Unique(id))
     }
+
+    /// Returns the name the [`Id`] was created from, or `None` for a
+    /// [`unique`](Self::unique) one.
+    pub fn name(&self) -> Option<&str> {
+        match &self.0 {
+            Internal::Custom(name) => Some(name),
+            Internal::Unique(_) => None,
+        }
+    }
 }
 
 impl From<&'static str> for Id {
@@ -51,5 +60,12 @@ mod tests {
         let b = Id::unique();
 
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn names_are_kept() {
+        assert_eq!(Id::new("name").name(), Some("name"));
+        assert_eq!(Id::from(String::from("owned")).name(), Some("owned"));
+        assert_eq!(Id::unique().name(), None);
     }
 }
