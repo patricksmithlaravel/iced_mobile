@@ -46,3 +46,10 @@ kamadak-exif.optional = true
 
 lyon_path.workspace = true
 lyon_path.optional = true
+
+# The system fonts on Android and iOS (`src/text/mobile.rs`): the locale that
+# picks the CJK font, and the script type of cosmic-text's `Fallback` trait.
+# Both are already dependencies of cosmic-text.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+sys-locale = "0.3"
+unicode-script = "0.5"

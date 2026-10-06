@@ -3,6 +3,9 @@ pub mod cache;
 pub mod editor;
 pub mod paragraph;
 
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+mod mobile;
+
 pub use cache::Cache;
 pub use editor::Editor;
 pub use paragraph::Paragraph;
@@ -116,20 +119,30 @@ pub const FIRA_SANS_REGULAR: &[u8] =
     include_bytes!("../fonts/FiraSans-Regular.ttf").as_slice();
 
 /// Returns the global [`FontSystem`].
+///
+/// It is created on first use. On Android and iOS this also indexes the
+/// fonts of the operating system, so that scripts the embedded fonts lack
+/// can fall back to them.
 pub fn font_system() -> &'static RwLock<FontSystem> {
     static FONT_SYSTEM: OnceLock<RwLock<FontSystem>> = OnceLock::new();
 
     FONT_SYSTEM.get_or_init(|| {
+        let embedded = [
+            cosmic_text::fontdb::Source::Binary(Arc::new(
+                include_bytes!("../fonts/Iced-Icons.ttf").as_slice(),
+            )),
+            #[cfg(feature = "fira-sans")]
+            cosmic_text::fontdb::Source::Binary(Arc::new(FIRA_SANS_REGULAR)),
+        ];
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let raw = cosmic_text::FontSystem::new_with_fonts(embedded);
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let raw = mobile::font_system(embedded);
+
         RwLock::new(FontSystem {
-            raw: cosmic_text::FontSystem::new_with_fonts([
-                cosmic_text::fontdb::Source::Binary(Arc::new(
-                    include_bytes!("../fonts/Iced-Icons.ttf").as_slice(),
-                )),
-                #[cfg(feature = "fira-sans")]
-                cosmic_text::fontdb::Source::Binary(Arc::new(
-                    include_bytes!("../fonts/FiraSans-Regular.ttf").as_slice(),
-                )),
-            ]),
+            raw,
             loaded_fonts: HashSet::new(),
             version: Version::default(),
         })
