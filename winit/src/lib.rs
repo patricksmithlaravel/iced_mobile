@@ -217,10 +217,20 @@ where
         #[cfg(target_arch = "wasm32")]
         canvas: Option<web_sys::HtmlCanvasElement>,
 
+        /// The instance has returned. Callbacks after that are ignored: iOS
+        /// keeps calling, since winit cannot stop its event loop there.
+        finished: bool,
+
+        /// Android: there is no native window, before the first `Resumed`
+        /// and between `Suspended` and `Resumed`.
         #[cfg(target_os = "android")]
-        has_resumed: bool,
+        suspended: bool,
+        /// Android: a window to create once the native window exists.
         #[cfg(target_os = "android")]
-        deferred: Vec<Action<Message>>,
+        held_window: Option<Control>,
+        /// Android: the one native window is taken by an iced window.
+        #[cfg(target_os = "android")]
+        has_window: bool,
     }
 
     let runner = Runner {
@@ -235,10 +245,14 @@ where
         #[cfg(target_arch = "wasm32")]
         canvas: None,
 
+        finished: false,
+
         #[cfg(target_os = "android")]
-        has_resumed: false,
+        suspended: true,
         #[cfg(target_os = "android")]
-        deferred: Vec::new(),
+        held_window: None,
+        #[cfg(target_os = "android")]
+        has_window: false,
     };
 
     boot_span.finish();
@@ -260,27 +274,18 @@ where
                 );
             }
 
-            // Android: there is no native window (surface) before the first
-            // `Resumed`, and it is replaced after every `Suspended`.
+            // Android: the native window arrives with `Resumed`, the first
+            // time and again after every `Suspended`. The instance builds a
+            // surface on it for every window, then a window held while
+            // suspended is created (see `next_control`).
             #[cfg(target_os = "android")]
             {
-                if self.has_resumed {
-                    self.process_event(
-                        event_loop,
-                        Event::EventLoopAwakened(winit::event::Event::Resumed),
-                    );
-                }
+                self.suspended = false;
 
-                self.has_resumed = true;
-
-                for action in std::mem::take(&mut self.deferred) {
-                    self.process_event(
-                        event_loop,
-                        Event::EventLoopAwakened(
-                            winit::event::Event::UserEvent(action),
-                        ),
-                    );
-                }
+                self.process_event(
+                    event_loop,
+                    Event::EventLoopAwakened(winit::event::Event::Resumed),
+                );
             }
         }
 
@@ -290,11 +295,17 @@ where
         ) {
             lifecycle(Lifecycle::Suspended);
 
+            // Android: the native window is going away. Every surface on it
+            // is dropped before this returns, as winit requires.
             #[cfg(target_os = "android")]
-            self.process_event(
-                event_loop,
-                Event::EventLoopAwakened(winit::event::Event::Suspended),
-            );
+            {
+                self.suspended = true;
+
+                self.process_event(
+                    event_loop,
+                    Event::EventLoopAwakened(winit::event::Event::Suspended),
+                );
+            }
 
             #[cfg(not(target_os = "android"))]
             let _ = event_loop;
@@ -354,14 +365,6 @@ where
             event_loop: &winit::event_loop::ActiveEventLoop,
             action: Action<Message>,
         ) {
-            // Android: hold every action (the first one opens the window)
-            // until the first `Resumed`, when the native window exists.
-            #[cfg(target_os = "android")]
-            if !self.has_resumed {
-                self.deferred.push(action);
-                return;
-            }
-
             self.process_event(
                 event_loop,
                 Event::EventLoopAwakened(winit::event::Event::UserEvent(
@@ -390,17 +393,23 @@ where
             event_loop: &winit::event_loop::ActiveEventLoop,
             event: Event<Action<Message>>,
         ) {
-            if event_loop.exiting() {
+            if self.finished || event_loop.exiting() {
                 return;
             }
 
             self.sender.start_send(event).expect("Send event");
 
             loop {
+                // A nested call (`WindowCreated`, `Exit`) may have seen the
+                // instance return: it must not be polled again.
+                if self.finished {
+                    break;
+                }
+
                 let poll = self.instance.as_mut().poll(&mut self.context);
 
                 match poll {
-                    task::Poll::Pending => match self.receiver.try_next() {
+                    task::Poll::Pending => match self.next_control() {
                         Ok(Some(control)) => match control {
                             Control::ChangeFlow(flow) => {
                                 use winit::event_loop::ControlFlow;
@@ -560,11 +569,60 @@ where
                         }
                     },
                     task::Poll::Ready(_) => {
+                        self.finished = true;
                         event_loop.exit();
                         break;
                     }
                 };
             }
+        }
+
+        /// The next control from the instance.
+        ///
+        /// Android has one native window, which exists only between
+        /// `Resumed` and `Suspended`: a window opened while suspended is
+        /// held until the next `Resumed`, and a second window is refused.
+        fn next_control(
+            &mut self,
+        ) -> Result<Option<Control>, mpsc::TryRecvError> {
+            #[cfg(target_os = "android")]
+            loop {
+                if !self.suspended
+                    && let Some(control) = self.held_window.take()
+                {
+                    return Ok(Some(control));
+                }
+
+                match self.receiver.try_next()? {
+                    Some(Control::CreateWindow { id, on_open, .. })
+                        if self.has_window =>
+                    {
+                        log::error!(
+                            "window::open is refused on Android: the \
+                            application has one native window, and an iced \
+                            window already uses it. Window {id:?} is not \
+                            opened, and the task window::open returned ends \
+                            without an id."
+                        );
+
+                        // The task waiting on it ends without output.
+                        drop(on_open);
+                    }
+                    Some(control @ Control::CreateWindow { .. }) => {
+                        self.has_window = true;
+
+                        if !self.suspended {
+                            return Ok(Some(control));
+                        }
+
+                        self.held_window = Some(control);
+                    }
+                    control => return Ok(control),
+                }
+            }
+
+            #[cfg(not(target_os = "android"))]
+            self.receiver.try_next()
         }
     }
 
@@ -1562,6 +1620,22 @@ fn run_action<'a, P, C>(
                 *is_window_opening = true;
             }
             window::Action::Close(id) => {
+                // Mobile winit never reports a window destroyed, which is
+                // when iced exits: closing the last window would leave the
+                // application running with nothing on screen.
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                if window_manager.is_last(id) {
+                    log::warn!(
+                        "window::close of the last window is ignored on {}: \
+                        the system, not the application, ends a mobile \
+                        application, and with no window left it would show \
+                        a black screen.",
+                        std::env::consts::OS,
+                    );
+
+                    return;
+                }
+
                 let _ = ui_caches.remove(&id);
                 let _ = interfaces.remove(&id);
 
@@ -1970,6 +2044,26 @@ fn run_action<'a, P, C>(
             }
         }
         Action::Exit => {
+            // winit cannot stop its event loop on iOS: once the instance
+            // returned, the application would run on with a frozen screen.
+            #[cfg(target_os = "ios")]
+            log::warn!(
+                "iced::exit is ignored on iOS: an iOS application does not \
+                end itself; the system ends it."
+            );
+
+            // Until winit can build its event loop again in the same process.
+            #[cfg(target_os = "android")]
+            log::warn!(
+                "iced::exit is ignored on Android: winit allows one event \
+                loop per process, and Android usually keeps the process alive \
+                after the loop exits, so the next launch would fail to create \
+                the event loop (RecreationAttempt). To leave the screen, move \
+                the task to the back (Activity.moveTaskToBack); to end the \
+                application, call std::process::exit."
+            );
+
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             control_sender
                 .start_send(Control::Exit)
                 .expect("Send control action");

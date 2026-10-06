@@ -94,6 +94,12 @@ where
         self.entries.is_empty()
     }
 
+    /// Whether `id` is the only window left.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub fn is_last(&self, id: Id) -> bool {
+        self.entries.len() == 1 && self.entries.contains_key(&id)
+    }
+
     pub fn is_idle(&self) -> bool {
         self.entries
             .values()
