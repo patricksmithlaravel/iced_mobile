@@ -2,12 +2,18 @@
 //!
 //! fontdb, which cosmic-text uses to find fonts, scans no font directory on
 //! either platform, and cosmic-text has no fallback lists for them. Fira Sans,
-//! the default font there, covers only Latin, Greek and Cyrillic, so text in
-//! any other script (CJK, Arabic, Hebrew, Indic, Thai, ...) would be drawn
-//! with nothing. This module indexes the system fonts once, when the global
-//! font system is created, and gives cosmic-text fallback lists that name
-//! them. Fira Sans stays the default family; the system fonts are only used
-//! for what it lacks.
+//! the default font there with the `mobile-fira-sans` feature, covers only
+//! Latin, Greek and Cyrillic, so text in any other script (CJK, Arabic,
+//! Hebrew, Indic, Thai, ...) would be drawn with nothing. With the
+//! `mobile-system-fonts` feature, this module indexes the system fonts once,
+//! when the global font system is created, and gives cosmic-text fallback
+//! lists that name them. Fira Sans, when embedded, stays the default family;
+//! the system fonts are only used for what it lacks. Without Fira Sans, the
+//! `SansSerif` family is the system's (Roboto, Helvetica Neue).
+//!
+//! Without `mobile-system-fonts`, only the embedded fonts and the ones the
+//! application loads are used: nothing falls back to a system font, and text
+//! with no embedded font for it is not drawn.
 //!
 //! Indexing parses only the header tables of each file (fontdb maps the file
 //! and reads its names and metrics, not its glyphs). See `font_system` for
@@ -28,11 +34,13 @@
 use cosmic_text::fontdb;
 
 /// Creates the font system with the `embedded` fonts, the fonts of the
-/// operating system, and fallback lists for them.
+/// operating system (with `mobile-system-fonts`), and fallback lists for
+/// them.
 ///
-/// It runs once, when [`super::font_system`] is first used. Measured with the
-/// font files in the page cache; the first run after a boot read them from
-/// disk and took 20 ms on Android and 120 ms on iOS (release builds):
+/// It runs once, when [`super::font_system`] is first used. Indexing the
+/// system fonts, measured with the font files in the page cache; the first
+/// run after a boot read them from disk and took 20 ms on Android and 120 ms
+/// on iOS (release builds):
 ///
 /// | Device              | System faces | Release | Debug |
 /// |---------------------|--------------|---------|-------|
@@ -55,10 +63,33 @@ pub fn font_system(
 
     // The system fonts must be in the database before the font system is
     // built: it lists the monospaced faces only then.
+    #[cfg(feature = "mobile-system-fonts")]
+    load_system_fonts(&mut db);
+
+    #[cfg(any(feature = "fira-sans", feature = "mobile-fira-sans"))]
+    db.set_sans_serif_family("Fira Sans");
+
+    #[cfg(not(any(feature = "fira-sans", feature = "mobile-fira-sans")))]
+    db.set_sans_serif_family(platform::SANS_SERIF);
+
+    db.set_serif_family(platform::SERIF);
+    db.set_monospace_family(platform::MONOSPACE);
+
+    cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
+        locale, db, Fallback,
+    )
+}
+
+/// Indexes the fonts of the operating system into `db`.
+#[cfg(all(
+    any(target_os = "android", target_os = "ios"),
+    feature = "mobile-system-fonts"
+))]
+fn load_system_fonts(db: &mut fontdb::Database) {
     let embedded_faces = db.len();
     let start = std::time::Instant::now();
 
-    platform::load_fonts(&mut db);
+    platform::load_fonts(db);
 
     if db.len() == embedded_faces {
         log::warn!(
@@ -73,20 +104,7 @@ pub fn font_system(
         );
     }
 
-    add_missing_weights(&mut db, platform::CJK);
-
-    #[cfg(feature = "fira-sans")]
-    db.set_sans_serif_family("Fira Sans");
-
-    #[cfg(not(feature = "fira-sans"))]
-    db.set_sans_serif_family(platform::SANS_SERIF);
-
-    db.set_serif_family(platform::SERIF);
-    db.set_monospace_family(platform::MONOSPACE);
-
-    cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
-        locale, db, Fallback,
-    )
+    add_missing_weights(db, platform::CJK);
 }
 
 /// The fallback lists of the platform.
@@ -163,6 +181,7 @@ impl Han {
 /// face of the locale and take whichever CJK face comes first (the Japanese
 /// one). cosmic-text draws a variable font at the requested weight, so the
 /// added face is a real bold. Other weights still take the first CJK face.
+#[cfg_attr(not(feature = "mobile-system-fonts"), allow(dead_code))]
 fn add_missing_weights(db: &mut fontdb::Database, families: &[&str]) {
     for family in families {
         for weight in [fontdb::Weight::NORMAL, fontdb::Weight::BOLD] {
@@ -203,7 +222,10 @@ mod platform {
     use cosmic_text::fontdb;
     use unicode_script::Script;
 
-    #[cfg_attr(feature = "fira-sans", allow(dead_code))]
+    #[cfg_attr(
+        any(feature = "fira-sans", feature = "mobile-fira-sans"),
+        allow(dead_code)
+    )]
     pub const SANS_SERIF: &str = "Roboto";
     pub const SERIF: &str = "Noto Serif";
     pub const MONOSPACE: &str = "Droid Sans Mono";
@@ -218,6 +240,7 @@ mod platform {
 
     pub const FORBIDDEN: &[&str] = &[];
 
+    #[cfg_attr(not(feature = "mobile-system-fonts"), allow(dead_code))]
     pub const CJK: &[&str] = &[
         "Noto Sans CJK JP",
         "Noto Sans CJK KR",
@@ -226,6 +249,7 @@ mod platform {
         "Noto Sans CJK HK",
     ];
 
+    #[cfg_attr(not(feature = "mobile-system-fonts"), allow(dead_code))]
     pub fn load_fonts(db: &mut fontdb::Database) {
         db.load_fonts_dir("/system/fonts");
     }
@@ -297,7 +321,10 @@ mod platform {
 
     use std::path::PathBuf;
 
-    #[cfg_attr(feature = "fira-sans", allow(dead_code))]
+    #[cfg_attr(
+        any(feature = "fira-sans", feature = "mobile-fira-sans"),
+        allow(dead_code)
+    )]
     pub const SANS_SERIF: &str = "Helvetica Neue";
     pub const SERIF: &str = "Times New Roman";
     pub const MONOSPACE: &str = "Menlo";
@@ -312,8 +339,10 @@ mod platform {
 
     /// Both have a regular and a bold face already; listed in case a later
     /// iOS changes that.
+    #[cfg_attr(not(feature = "mobile-system-fonts"), allow(dead_code))]
     pub const CJK: &[&str] = &["Hiragino Sans", "Apple SD Gothic Neo"];
 
+    #[cfg_attr(not(feature = "mobile-system-fonts"), allow(dead_code))]
     pub fn load_fonts(db: &mut fontdb::Database) {
         // The simulator does not remap paths: the process sees the file
         // system of the Mac, and the simulated iOS lives under this root.

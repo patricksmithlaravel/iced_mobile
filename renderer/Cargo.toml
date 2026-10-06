@@ -23,6 +23,8 @@ geometry = ["iced_graphics/geometry", "iced_tiny_skia?/geometry", "iced_wgpu?/ge
 web-colors = ["iced_wgpu?/web-colors"]
 webgl = ["iced_wgpu?/webgl"]
 fira-sans = ["iced_graphics/fira-sans"]
+mobile-fira-sans = ["iced_graphics/mobile-fira-sans"]
+mobile-system-fonts = ["iced_graphics/mobile-system-fonts"]
 strict-assertions = ["iced_wgpu?/strict-assertions"]
 x11 = ["iced_tiny_skia?/x11"]
 wayland = ["iced_tiny_skia?/wayland"]
@@ -38,10 +40,3 @@ iced_wgpu.optional = true
 
 log.workspace = true
 thiserror.workspace = true
-
-# Android and iOS have no font that the text stack finds on its own, so Fira
-# Sans is always embedded there and becomes the default font (see
-# `graphics/src/settings.rs`). It is licensed under the SIL Open Font License
-# 1.1: `graphics/fonts/OFL.txt`.
-[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
-iced_graphics = { workspace = true, features = ["fira-sans"] }

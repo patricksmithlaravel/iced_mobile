@@ -108,21 +108,29 @@ impl Text {
 /// The regular variant of the [Fira Sans] font.
 ///
 /// It is loaded as part of the default fonts when the `fira-sans`
-/// feature is enabled, which `iced_renderer` always does on Android and
-/// iOS. Every application built that way embeds it, so it must ship the
-/// font's notice: Fira Sans is licensed under the SIL Open Font License 1.1,
-/// whose text is in `graphics/fonts/OFL.txt`.
+/// feature is enabled, and on Android and iOS also with the
+/// `mobile-fira-sans` feature, which `iced` enables by default. Every
+/// application built that way embeds it, so it must ship the font's notice:
+/// Fira Sans is licensed under the SIL Open Font License 1.1, whose text is
+/// in `graphics/fonts/OFL.txt`.
 ///
 /// [Fira Sans]: https://mozilla.github.io/Fira/
-#[cfg(feature = "fira-sans")]
+#[cfg(any(
+    feature = "fira-sans",
+    all(
+        feature = "mobile-fira-sans",
+        any(target_os = "android", target_os = "ios")
+    )
+))]
 pub const FIRA_SANS_REGULAR: &[u8] =
     include_bytes!("../fonts/FiraSans-Regular.ttf").as_slice();
 
 /// Returns the global [`FontSystem`].
 ///
-/// It is created on first use. On Android and iOS this also indexes the
-/// fonts of the operating system, so that scripts the embedded fonts lack
-/// can fall back to them.
+/// It is created on first use. On Android and iOS, with the
+/// `mobile-system-fonts` feature, this also indexes the fonts of the
+/// operating system, so that scripts the embedded fonts lack can fall back
+/// to them.
 pub fn font_system() -> &'static RwLock<FontSystem> {
     static FONT_SYSTEM: OnceLock<RwLock<FontSystem>> = OnceLock::new();
 
@@ -131,7 +139,13 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
             cosmic_text::fontdb::Source::Binary(Arc::new(
                 include_bytes!("../fonts/Iced-Icons.ttf").as_slice(),
             )),
-            #[cfg(feature = "fira-sans")]
+            #[cfg(any(
+                feature = "fira-sans",
+                all(
+                    feature = "mobile-fira-sans",
+                    any(target_os = "android", target_os = "ios")
+                )
+            ))]
             cosmic_text::fontdb::Source::Binary(Arc::new(FIRA_SANS_REGULAR)),
         ];
 

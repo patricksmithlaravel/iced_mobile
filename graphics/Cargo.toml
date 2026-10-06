@@ -23,6 +23,13 @@ image = ["dep:image", "kamadak-exif"]
 svg = []
 web-colors = []
 fira-sans = []
+# Android and iOS: embeds Fira Sans and makes it the default font there, as
+# `fira-sans` does. No effect on other targets.
+mobile-fira-sans = []
+# Android and iOS: indexes the operating system's fonts and gives the text
+# stack fallback lists for them (`src/text/mobile.rs`). No effect on other
+# targets.
+mobile-system-fonts = []
 
 [dependencies]
 iced_core.workspace = true

@@ -22,7 +22,7 @@ all-features = true
 maintenance = { status = "actively-developed" }
 
 [features]
-default = ["wgpu", "tiny-skia", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11", "wayland", "android-native-activity", "mobile-logger"]
+default = ["wgpu", "tiny-skia", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11", "wayland", "android-native-activity", "mobile-logger", "mobile-fira-sans", "mobile-system-fonts"]
 # Enables the `wgpu` GPU-accelerated renderer with all its default features (Vulkan, Metal, DX12, OpenGL, and WebGPU)
 wgpu = ["wgpu-bare", "iced_renderer/wgpu"]
 # Enables the `wgpu` GPU-accelerated renderer with the minimum required features (no backends!)
@@ -106,6 +106,21 @@ android-game-activity = ["iced_winit/android-game-activity"]
 # `init_logger` does nothing and iced's `log` output goes nowhere on mobile
 # unless the application installs a logger itself.
 mobile-logger = ["dep:android_logger", "dep:oslog"]
+# Android and iOS: embeds Fira Sans and makes it the default font there, as
+# `fira-sans` does on the web. It is licensed under the SIL Open Font License
+# 1.1, so an application that ships it must ship `graphics/fonts/OFL.txt`.
+# Without it, the default `SansSerif` family is the system's sans-serif font
+# (Roboto, Helvetica Neue) when `mobile-system-fonts` is on, and nothing at
+# all otherwise: set a `default_font` the application embeds. Embeds nothing
+# on other targets.
+mobile-fira-sans = ["iced_renderer/mobile-fira-sans"]
+# Android and iOS: indexes the operating system's fonts (/system/fonts,
+# /System/Library/Fonts) once, and gives the text stack fallback lists for
+# them, so text in scripts the embedded fonts lack (CJK, Arabic, Hebrew,
+# Indic, Thai, ...) is drawn, and so are serif and monospaced text. Leave it
+# off when every font the application draws with is embedded and nothing may
+# fall back to a system font. No effect on other targets.
+mobile-system-fonts = ["iced_renderer/mobile-system-fonts"]
 
 [dependencies]
 iced_debug.workspace = true
