@@ -224,7 +224,7 @@ sha2 = "0.10"
 sipper = "0.1"
 smol = "2"
 smol_str = "0.2"
-softbuffer = { version = "0.4", default-features = false }
+softbuffer = { version = "0.4.7", default-features = false }
 sysinfo = "0.33"
 thiserror = "2"
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
@@ -239,7 +239,7 @@ web-sys = "0.3.69"
 web-time = "1.1"
 wgpu = { version = "27.0", default-features = false, features = ["std", "wgsl"] }
 window_clipboard = { version = "0.5", default-features = false }
-winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "deny", priority = -1 }
