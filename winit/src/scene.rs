@@ -6,12 +6,20 @@
 //! window with `initWithFrame:` and no scene, and in the scene life cycle a
 //! window without a scene is not shown.
 //!
-//! This puts every window winit shows into the application's window scene.
-//! It works from UIKit's notifications, so no Objective-C class is declared.
-//! The scene connects and the window is shown in either order: usually the
-//! scene first, since winit sends `Resumed`, on which iced makes its
-//! windows, from `UIApplicationDidBecomeActiveNotification`; but a window
-//! shown first is held until the scene connects.
+//! This puts winit's windows into the application's window scene. It works
+//! from UIKit's notifications, so no Objective-C class is declared.
+//!
+//! - Only winit's own windows (class `WinitUIWindow`) are placed, and only
+//!   into a scene with the application role. A window of UIKit's or of
+//!   another library, or a scene for an external display, is left alone.
+//! - The scene connects and the window is shown in either order. iced makes
+//!   its windows when it handles the `window::open` action it sends itself
+//!   at boot through winit's event loop proxy, and winit hands that over
+//!   only once its run loop turns after launch: usually after the scene has
+//!   connected. A window shown first is held until the scene connects.
+//! - When UIKit disconnects the scene (to reclaim memory, or when it is
+//!   closed), the windows in it move into the newest application scene still
+//!   connected, if there is one, or are held for the next one that connects.
 //!
 //! The application's `Info.plist` must declare the scene, which iced cannot
 //! do for it:
@@ -36,6 +44,9 @@
 //!
 //! Without it UIKit wraps the app in a scene of its own and puts the window
 //! in it, so nothing here acts; with the iOS 27 SDK the app is stopped.
+//! [`adopt`] checks for it first: when it is missing it prints the block
+//! above to stderr and the log, and panics in a debug build, since UIKit's
+//! stop leaves a trace only in the system log.
 
 // UIKit is reached only through Objective-C calls; each says why it is sound.
 #![allow(unsafe_code)]
@@ -44,31 +55,64 @@ use std::cell::RefCell;
 use std::ptr::NonNull;
 
 use block2::RcBlock;
-use objc2::rc::Retained;
-use objc2::runtime::NSObjectProtocol;
+use objc2::rc::{Retained, Weak};
+use objc2::runtime::{AnyClass, NSObjectProtocol};
 use objc2_foundation::{
-    MainThreadMarker, NSNotification, NSNotificationCenter, NSNotificationName,
-    NSOperationQueue,
+    MainThreadMarker, NSBundle, NSNotification, NSNotificationCenter,
+    NSNotificationName, NSOperationQueue, ns_string,
 };
 use objc2_ui_kit::{
-    UIScene, UISceneWillConnectNotification, UIWindow,
-    UIWindowDidBecomeVisibleNotification, UIWindowScene,
+    UIScene, UISceneDidDisconnectNotification, UISceneWillConnectNotification,
+    UIWindow, UIWindowDidBecomeVisibleNotification, UIWindowScene,
+    UIWindowSceneSessionRoleApplication,
 };
 
+/// The `UIApplicationSceneManifest` block of the module docs, which
+/// [`adopt`] prints when the `Info.plist` lacks it. Keep the two the same.
+const MANIFEST: &str = "\
+<key>UIApplicationSceneManifest</key>
+<dict>
+    <key>UIApplicationSupportsMultipleScenes</key>
+    <false/>
+    <key>UISceneConfigurations</key>
+    <dict>
+        <key>UIWindowSceneSessionRoleApplication</key>
+        <array>
+            <dict>
+                <key>UISceneConfigurationName</key>
+                <string>Default</string>
+            </dict>
+        </array>
+    </dict>
+</dict>";
+
+/// The class of winit's windows (winit 0.30.13
+/// src/platform_impl/ios/window.rs:34-43, the same in 0.30.12).
+const WINIT_WINDOW: &str = "WinitUIWindow";
+
 thread_local! {
-    /// The application's window scene, once UIKit has connected it.
+    /// The newest application scene UIKit has connected and not yet
+    /// disconnected. A window shown while it is set goes into it.
     static SCENE: RefCell<Option<Retained<UIWindowScene>>> =
         const { RefCell::new(None) };
-    /// Windows shown before the scene connected.
-    static PENDING: RefCell<Vec<Retained<UIWindow>>> =
+    /// winit's windows, once shown. Weak, since iced owns them: a window it
+    /// has closed must not be kept alive or shown again.
+    static WINDOWS: RefCell<Vec<Weak<UIWindow>>> =
+        const { RefCell::new(Vec::new()) };
+    /// winit's windows waiting for an application scene: shown before one
+    /// connected, or left behind by one that disconnected.
+    static PENDING: RefCell<Vec<Weak<UIWindow>>> =
         const { RefCell::new(Vec::new()) };
 }
 
-/// Observes the scene and the windows, for the life of the process.
+/// Checks the `Info.plist`, then observes the scenes and the windows for the
+/// life of the process.
 ///
 /// Called by [`crate::run`] on the main thread, before winit's
 /// `UIApplicationMain`.
 pub(crate) fn adopt() {
+    check_manifest();
+
     if MainThreadMarker::new().is_none() {
         log::warn!("iOS scene: not on the main thread; windows left as made");
         return;
@@ -77,9 +121,10 @@ pub(crate) fn adopt() {
     type Notice = (&'static NSNotificationName, fn(&NSNotification));
 
     // SAFETY: the notification names are UIKit's own constants.
-    let notices: [Notice; 2] = unsafe {
+    let notices: [Notice; 3] = unsafe {
         [
             (UISceneWillConnectNotification, scene_connected),
+            (UISceneDidDisconnectNotification, scene_disconnected),
             (UIWindowDidBecomeVisibleNotification, window_visible),
         ]
     };
@@ -112,27 +157,92 @@ pub(crate) fn adopt() {
     }
 }
 
+/// Says loudly that the `Info.plist` has no scene manifest: UIKit stops such
+/// an app at launch with the iOS 27 SDK, and says why only in the system log.
+fn check_manifest() {
+    let declared =
+        NSBundle::mainBundle().infoDictionary().is_some_and(|info| {
+            info.get(ns_string!("UIApplicationSceneManifest")).is_some()
+        });
+
+    if declared {
+        return;
+    }
+
+    let message = format!(
+        "iced: the app's Info.plist has no UIApplicationSceneManifest. \
+         An app built with the iOS 27 SDK must adopt UIKit's scene life \
+         cycle, and without this key UIKit stops it at launch (Apple TN3187), \
+         saying why only in the system log. Add this to the top-level <dict> \
+         of the app's Info.plist:\n\n{MANIFEST}\n"
+    );
+
+    eprintln!("{message}");
+    log::error!("{message}");
+
+    if cfg!(debug_assertions) {
+        panic!(
+            "iOS scene: the Info.plist has no UIApplicationSceneManifest \
+             (see the message above)"
+        );
+    }
+}
+
 fn scene_connected(note: &NSNotification) {
-    // SAFETY: this notification's object is the UIScene that connects.
-    let Some(scene) = (unsafe { note.object() })
-        .map(|object| unsafe { Retained::cast::<UIScene>(object) })
-    else {
+    let Some(scene) = application_scene(note) else {
         return;
     };
 
-    if !scene.is_kind_of::<UIWindowScene>() {
-        return;
-    }
-
-    // SAFETY: checked just above.
-    let scene = unsafe { Retained::cast::<UIWindowScene>(scene) };
     log::debug!("iOS scene: connected");
 
-    for window in PENDING.take() {
+    SCENE.set(Some(scene.clone()));
+
+    for window in live(&PENDING.take()) {
         place(&window, &scene);
     }
+}
 
-    SCENE.set(Some(scene));
+fn scene_disconnected(note: &NSNotification) {
+    let Some(scene) = application_scene(note) else {
+        return;
+    };
+
+    log::debug!("iOS scene: disconnected");
+
+    let current = SCENE.with_borrow(|current| {
+        current
+            .as_deref()
+            .is_some_and(|current| std::ptr::addr_eq(current, &*scene))
+    });
+
+    if current {
+        SCENE.set(None);
+    }
+
+    // The windows the scene held, or that UIKit has already taken out of it.
+    let orphans: Vec<_> = WINDOWS
+        .with_borrow(|windows| live(windows))
+        .into_iter()
+        .filter(|window| {
+            // SAFETY: a UIKit call on the main thread with a valid window.
+            unsafe { window.windowScene() }
+                .is_none_or(|held| std::ptr::addr_eq(&*held, &*scene))
+        })
+        .collect();
+
+    // Another application scene may still be connected; else the next one.
+    match SCENE.with_borrow(Clone::clone) {
+        Some(scene) => {
+            for window in orphans {
+                place(&window, &scene);
+            }
+        }
+        None => PENDING.with_borrow_mut(|pending| {
+            for window in &orphans {
+                remember(pending, window);
+            }
+        }),
+    }
 }
 
 fn window_visible(note: &NSNotification) {
@@ -143,6 +253,16 @@ fn window_visible(note: &NSNotification) {
         return;
     };
 
+    // Not a window of winit's: a system or another library's window, which
+    // must keep its own scene and must not take the key window from iced.
+    if !AnyClass::get(WINIT_WINDOW)
+        .is_some_and(|class| window.isKindOfClass(class))
+    {
+        return;
+    }
+
+    WINDOWS.with_borrow_mut(|windows| remember(windows, &window));
+
     // SAFETY: a UIKit call on the main thread with a valid window.
     if unsafe { window.windowScene() }.is_some() {
         return;
@@ -150,16 +270,67 @@ fn window_visible(note: &NSNotification) {
 
     match SCENE.with_borrow(Clone::clone) {
         Some(scene) => place(&window, &scene),
-        None => PENDING.with_borrow_mut(|pending| pending.push(window)),
+        None => PENDING.with_borrow_mut(|pending| remember(pending, &window)),
     }
+}
+
+/// The scene a scene notification is about, if it is an application scene:
+/// a window scene with the application role, and not, say, an external
+/// display's or CarPlay's.
+fn application_scene(note: &NSNotification) -> Option<Retained<UIWindowScene>> {
+    // SAFETY: a scene notification's object is the UIScene it is about.
+    let scene = unsafe { note.object() }
+        .map(|object| unsafe { Retained::cast::<UIScene>(object) })?;
+
+    if !scene.is_kind_of::<UIWindowScene>() {
+        return None;
+    }
+
+    // SAFETY: UIKit calls on the main thread with a valid scene, which has
+    // its session from the start; the role is UIKit's own constant.
+    let is_application = unsafe {
+        scene
+            .session()
+            .role()
+            .isEqualToString(UIWindowSceneSessionRoleApplication)
+    };
+
+    if !is_application {
+        log::debug!("iOS scene: ignored a scene of another role");
+        return None;
+    }
+
+    // SAFETY: a `UIWindowScene`, checked above.
+    Some(unsafe { Retained::cast::<UIWindowScene>(scene) })
+}
+
+/// Adds `window` to `windows` once, dropping the windows that are gone.
+fn remember(windows: &mut Vec<Weak<UIWindow>>, window: &Retained<UIWindow>) {
+    windows.retain(|known| known.load().is_some());
+
+    let known = windows.iter().any(|known| {
+        known
+            .load()
+            .is_some_and(|known| std::ptr::addr_eq(&*known, &**window))
+    });
+
+    if !known {
+        windows.push(Weak::from_retained(window));
+    }
+}
+
+/// The windows still alive.
+fn live(windows: &[Weak<UIWindow>]) -> Vec<Retained<UIWindow>> {
+    windows.iter().filter_map(Weak::load).collect()
 }
 
 fn place(window: &UIWindow, scene: &UIWindowScene) {
     // SAFETY: UIKit calls on the main thread with valid objects.
     unsafe {
         window.setWindowScene(Some(scene));
-        window.makeKeyAndVisible();
     }
+
+    window.makeKeyAndVisible();
 
     log::debug!("iOS scene: window placed");
 }

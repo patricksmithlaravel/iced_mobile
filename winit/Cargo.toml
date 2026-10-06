@@ -51,9 +51,9 @@ sysinfo.optional = true
 block2.workspace = true
 objc2.workspace = true
 objc2-foundation.workspace = true
-objc2-foundation.features = ["NSNotification", "NSOperation", "NSString", "NSThread", "block2"]
+objc2-foundation.features = ["NSBundle", "NSDictionary", "NSNotification", "NSOperation", "NSString", "NSThread", "block2"]
 objc2-ui-kit.workspace = true
-objc2-ui-kit.features = ["UIResponder", "UIScene", "UIView", "UIWindow", "UIWindowScene"]
+objc2-ui-kit.features = ["UIResponder", "UIScene", "UISceneDefinitions", "UISceneSession", "UIView", "UIWindow", "UIWindowScene"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys.workspace = true
