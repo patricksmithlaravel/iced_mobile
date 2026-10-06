@@ -37,8 +37,16 @@ impl Default for Settings {
 impl From<core::Settings> for Settings {
     fn from(settings: core::Settings) -> Self {
         Self {
+            // The web, Android and iOS have no system font that the text
+            // stack finds for the default `SansSerif` family, so text would
+            // render as nothing. Fira Sans is used instead; `iced_renderer`
+            // always enables `fira-sans` on Android and iOS.
             default_font: if cfg!(all(
-                target_arch = "wasm32",
+                any(
+                    target_arch = "wasm32",
+                    target_os = "android",
+                    target_os = "ios"
+                ),
                 feature = "fira-sans"
             )) && settings.default_font == Font::default()
             {

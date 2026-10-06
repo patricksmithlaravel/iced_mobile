@@ -105,7 +105,10 @@ impl Text {
 /// The regular variant of the [Fira Sans] font.
 ///
 /// It is loaded as part of the default fonts when the `fira-sans`
-/// feature is enabled.
+/// feature is enabled, which `iced_renderer` always does on Android and
+/// iOS. Every application built that way embeds it, so it must ship the
+/// font's notice: Fira Sans is licensed under the SIL Open Font License 1.1,
+/// whose text is in `graphics/fonts/OFL.txt`.
 ///
 /// [Fira Sans]: https://mozilla.github.io/Fira/
 #[cfg(feature = "fira-sans")]

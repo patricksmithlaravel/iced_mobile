@@ -38,3 +38,10 @@ iced_wgpu.optional = true
 
 log.workspace = true
 thiserror.workspace = true
+
+# Android and iOS have no font that the text stack finds on its own, so Fira
+# Sans is always embedded there and becomes the default font (see
+# `graphics/src/settings.rs`). It is licensed under the SIL Open Font License
+# 1.1: `graphics/fonts/OFL.txt`.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+iced_graphics = { workspace = true, features = ["fira-sans"] }
