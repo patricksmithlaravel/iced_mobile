@@ -1,0 +1,107 @@
+# icm.toml: what the app is, for every platform. icm generates Info.plist,
+# AndroidManifest.xml, PrivacyInfo.xcprivacy and index.html from this file on
+# every build; never write those files by hand. `icm explain config.<key>`
+# describes a key. The marketing version is Cargo.toml's `version`.
+schema = 1                             # format of this file; icm refuses formats it does not know
+min_icm = "0.14.1-mobile.1"            # oldest icm that can build this app; older ones exit 4 (config.too_new)
+
+[app]
+name = "App"                           # CFBundleDisplayName/Name, android:label, <title>, desktop product name
+id = "com.example.app"                 # permanent after the first store upload; com.example.* is a placeholder (WARN in dev)
+build = 1                              # store build number: CFBundleVersion, versionCode, deb revision; raise it per upload
+platforms = ["desktop", "web", "ios", "android"]   # what `icm check --all` builds
+package = "app"                        # the Cargo package; default: the one whose Cargo.toml sits next to this file
+lib = "app"                            # its library: Android loads lib<lib>.so (android.app.lib_name)
+bin = "app"                            # its binary: the iOS, desktop and web executable
+icon = "assets/icon.png"               # square PNG, at least 1024×1024; alpha is flattened onto `background`
+background = "#FFFFFF"                 # launch screen, icon flattening, Android adaptive-icon background, web theme colour
+orientations = ["portrait"]            # any of portrait | portrait-upside-down | landscape-left | landscape-right
+publisher = "Example Ltd"              # who publishes the app, in installer and package metadata
+copyright = "© 2026 Example Ltd"       # macOS NSHumanReadableCopyright and package metadata
+description = "A starter app."         # one line for package metadata (.deb Description, installers)
+category = "utilities"                 # LSApplicationCategoryType, .desktop Categories, deb Section
+resources = []                         # globs copied into the .app root, Android assets/, the web site and desktop packages
+agent = false                          # later: build the debug-only agent bridge into `icm run` builds (needs iced's `agent` feature)
+
+[app.permissions]                      # one vocabulary for every platform (`icm explain config.app.permissions`)
+internet = true                        # Android INTERNET; iOS, macOS and the web need no permission for it
+
+[ios]
+min_os = "16.0"                        # MinimumOSVersion and IPHONEOS_DEPLOYMENT_TARGET (App Store: 13.0 or later)
+devices = ["iphone"]                   # only iphone: iPad is not supported yet
+# team_id = "ABCDE12345"               # Apple Developer team; the owner sets it before device runs and releases
+# uses_non_exempt_encryption = false   # export compliance; the owner answers it before the first release
+# export_compliance_code = ""          # ITSEncryptionExportComplianceCode, when the answer above is true
+# asc_app_id = "1234567890"            # numeric App Store Connect app id, used in the printed upload commands
+
+[ios.signing]                          # references only: never put a password or key in this file
+development = { identity = "auto", profile = "auto" }    # identity: "auto" | SHA-1 | common name; profile: "auto" | UUID | path
+distribution = { identity = "auto", profile = "auto" }   # same, for App Store builds
+
+[ios.privacy]                          # PrivacyInfo.xcprivacy; the App Store rejects uploads without it
+tracking = false                       # NSPrivacyTracking: true only if the app tracks users across apps and sites
+tracking_domains = []                  # NSPrivacyTrackingDomains
+collected_data = []                    # NSPrivacyCollectedDataTypes
+api_reasons = { FileTimestamp = ["C617.1"], SystemBootTime = ["35F9.1"] }   # required-reason APIs iced itself calls; add your own
+
+[ios.entitlements]                     # added to the minimal set; the provisioning profile must allow each one
+
+[ios.info_plist]                       # extra Info.plist keys; keys icm manages are refused (config.managed_key)
+
+[android]
+min_sdk = 26                           # <uses-sdk android:minSdkVersion>: Android 8.0
+target_sdk = 36                        # <uses-sdk android:targetSdkVersion>; Google Play's floor since 2026-08-31
+abis = ["arm64-v8a", "x86_64"]         # ABIs in release builds; dev builds build only the device's
+activity = "native"                    # NativeActivity, which needs no Java code ("game" is reserved)
+back = "key"                           # Back reaches the app as a key and never closes the activity (avoids the destroy freeze)
+allow_backup = true                    # android:allowBackup
+res = "platform/android/res"           # optional resources, compiled with aapt2 over the generated ones
+extra_permissions = []                 # Android permissions the vocabulary above does not cover
+
+[android.manifest]
+application = {}                       # extra <application> attributes, e.g. { "android:dataExtractionRules" = "@xml/rules" }
+activity = {}                          # extra <activity> attributes
+extra_manifest_xml = ""                # raw XML inside <manifest> (<queries>, <uses-feature>); checked by icm
+extra_application_xml = ""             # raw XML inside <application> (<meta-data>, <provider>); checked by icm
+
+# [android.signing]                    # the release upload key; the owner creates it, passwords come from env vars
+# upload = { keystore = "~/.icm/keys/app-upload.jks", alias = "upload",
+#            store_pass_env = "ICM_ANDROID_STORE_PASS", key_pass_env = "ICM_ANDROID_KEY_PASS" }
+
+[android.play]
+track = "internal"                     # the Google Play track named in the printed upload commands
+service_account_json_env = "PLAY_SERVICE_ACCOUNT_JSON"   # env var holding the service-account key path; printed commands only
+
+[web]
+public_url = "/"                       # where the site is served from (<base href>)
+host = "generic"                       # generic | cloudflare-pages | netlify | github-pages | s3
+project = ""                           # the host's project or bucket, for the printed deploy commands
+size_budget_kb = 4096                  # gzip size limit of the .wasm in release builds
+rustflags = []                         # extra RUSTFLAGS for wasm builds
+
+[desktop.macos]
+min_os = "12.0"                        # MACOSX_DEPLOYMENT_TARGET and LSMinimumSystemVersion
+universal = false                      # true: arm64 + x86_64 (needs `rustup target add x86_64-apple-darwin`)
+identity = "auto"                      # Developer ID Application signing identity: "auto" | SHA-1 | common name
+# notary_profile = "icm-notary"        # created by the owner with `xcrun notarytool store-credentials`
+
+[desktop.windows]
+formats = ["msi", "nsis"]              # installers to build
+# sign_command = "jsign --storetype TRUSTEDSIGNING ... {file}"   # the owner's signing command; credentials only via env
+
+[desktop.linux]
+formats = ["deb", "appimage"]          # packages to build
+glibc_floor = "2.35"                   # newest glibc the binary may need: Ubuntu 22.04+, Debian 12+
+# maintainer = "Example Ltd <dev@example.com>"   # required for .deb
+deb_depends = []                       # extra Depends of the .deb
+deb_recommends = []                    # extra Recommends of the .deb
+
+[test]
+flows = "tests/flows"                  # the .ice flows `icm test` runs
+viewports = ["iphone-17", "pixel-9", "web-mobile", "desktop"]   # sizes for `icm shot --headless --all-viewports`
+
+[checks]                               # scripts run after a successful `icm run`, per platform; `CHECK PASS|FAIL <name>: …` lines count
+# ios-sim = ["platform/ios/checks.sh"]
+
+[review]
+snapshot = false                       # later: true makes `icm check` fail when platform/generated/* is stale

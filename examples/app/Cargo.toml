@@ -1,0 +1,34 @@
+[package]
+name = "app"
+version = "0.1.0"              # the marketing version; nowhere else
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+# No crate-type: icm builds the Android library with
+# `cargo rustc --lib --crate-type cdylib`, and every other platform runs the
+# binary. No [profile.*] sections either: Cargo ignores them in a workspace
+# member, so icm passes its profiles with `--config`.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
+[[test]]
+name = "icm"
+path = "tests/icm.rs"
+harness = false
+
+[dependencies]
+# Same source on every iced line, character for character. `icm new` turns
+# these paths into the fork's git URL and tag (or rev).
+iced = { path = "../..", features = ["fira-sans"] }
+log = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+iced = { path = "../..", features = ["fira-sans", "webgl"] }
+
+[dev-dependencies]
+iced_test = { path = "../../test" }

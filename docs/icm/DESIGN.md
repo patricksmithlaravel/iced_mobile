@@ -914,6 +914,21 @@ The fork's own root `AGENTS.md` gets a `cli/` section:
 - Never put upload or notarize argv outside `cli/src/release/owner_plans.rs`; CI scans for it.
 - A new check id needs an `explain` doc.
 
+### 8.5 As built (phase 1)
+`examples/app` is the template. Where it differs from §7.2 and §8.1–8.4, it wins:
+- `icm.toml` has `min_icm = "0.14.1-mobile.1"`, a plain version compared by semver ordering (Appendix C 5), instead of `icm = ">=…"`. It has no `#:schema` line while schema printing waits (Appendix C 30), and `[app] agent = false` until iced has its `agent` feature.
+- `Cargo.toml` has no `[profile.*]` (Appendix C 4) and no `icm-agent` feature yet: it needs iced's `agent` feature (F7).
+- `tests/icm.rs` calls a stand-in `agent::main` defined in the same file. It runs the flows through `iced_test::run`, behaves like libtest for `--list`, `--ignored`, `--skip` and name filters, and answers the `icm-*` subcommands with exit 2. Once F4 lands, `main` calls `iced_test::agent::main` with the same arguments and the stand-in goes.
+- `src/lib.rs` is a counter, a text field that submits on Return, and a scrollable list whose rows keep their buttons small (review A2). `safe_area()` pads 64 top, 48 bottom and 16 at the sides on Android and iOS, 16 elsewhere. Its unit tests send touch events, not mouse events.
+- `icm new` substitutes:
+  - the package, library and binary name `app`: Cargo.toml, `app::` in `src/main.rs` and `tests/icm.rs`, and icm.toml `package`, `lib` and `bin`;
+  - the display name `App`: icm.toml `name` and `.title("App")`;
+  - the id `com.example.app`;
+  - the path dependencies `path = "../.."` and `path = "../../test"`, which become the pinned git source.
+- `AGENTS.md` is the template `icm docs agents` fills: `{{name}}`, `{{id}}`, `{{framework_tag}}`, `{{icm_version}}`, and `{{limitations}}`, which is `docs/agents/limitations.md` after its `<!-- icm: … -->` marker line. It describes only phase 1 commands.
+- `assets/icon.png` is the placeholder icon (1024×1024, opaque RGB). icm keeps its sha256 for `app.icon.placeholder` (Appendix C 12).
+- `rust-toolchain.toml` pins 1.98.0. Cargo run from the fork's root ignores it, but cargo run inside `examples/app` (or a new app) uses 1.98.0, whose wasm and Android targets are missing on this host: icm runs children with `RUSTUP_AUTO_INSTALL=0` and `doctor --fix --yes` adds them (Appendix C 8).
+
 ---
 
 ## 9. Generated platform files
