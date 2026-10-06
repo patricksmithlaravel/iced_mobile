@@ -135,6 +135,11 @@ mobile-fira-sans = ["iced_renderer/mobile-fira-sans"]
 # off when every font the application draws with is embedded and nothing may
 # fall back to a system font. No effect on other targets.
 mobile-system-fonts = ["iced_renderer/mobile-system-fonts"]
+# Reserved for the debug-only agent bridge that the `icm` tool drives (an
+# application's `icm-agent = ["iced/agent"]` feature turns it on in dev
+# builds). It does nothing yet: it exists so that applications can declare
+# that feature today.
+agent = []
 
 [dependencies]
 iced_debug.workspace = true
