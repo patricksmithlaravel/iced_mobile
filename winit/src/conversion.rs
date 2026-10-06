@@ -296,8 +296,8 @@ pub fn window_event(
                 ..
             } = event;
 
-            #[cfg(target_os = "ios")]
-            let (key, logical_key) = (ios_key(key), ios_key(logical_key));
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            let (key, logical_key) = (mobile_key(key), mobile_key(logical_key));
 
             let key = self::key(key);
             let modified_key = self::key(logical_key);
@@ -648,22 +648,31 @@ pub fn touch_event(
     }
 }
 
-/// iOS: Return and Tab as the named keys a hardware keyboard sends.
+/// Android and iOS: Return and Tab as the named keys a desktop keyboard
+/// sends.
 ///
-/// winit hands over every character UIKit inserts through `insertText:` as
-/// a key event of its own with a `Key::Character`, so Return is
-/// `Character("\n")` and Tab is `Character("\t")` (winit 0.30.13
-/// src/platform_impl/ios/view.rs:543-579). iced's widgets act on the named
-/// keys only: `text_input` submits and `text_editor` breaks the line on
-/// `Named::Enter`, and both drop control characters given as text. The
-/// event's `text` is left as the character, a control character the text
-/// widgets do not insert, as a desktop Return ("\r") or Tab ("\t") is.
+/// - iOS: winit hands over every character UIKit inserts through
+///   `insertText:` as a key event of its own with a `Key::Character`, so
+///   Return is `Character("\n")` and Tab is `Character("\t")` (winit 0.30.13
+///   src/platform_impl/ios/view.rs:543-579).
+/// - Android: winit looks every key up in the device's key character map
+///   first, and the map gives Enter (`KEYCODE_ENTER`, also what the soft
+///   keyboard's Return key sends) the character '\n' and Tab '\t', so they
+///   too arrive as `Character("\n")` and `Character("\t")` (winit 0.30.13
+///   src/platform_impl/android/keycodes.rs:224-230). Only keys the map has
+///   no character for, such as the D-pad centre, become `Named::Enter`.
 ///
-/// UIKit inserts dictated and pasted text the same way, so a line break in
-/// it now acts as Return too: it submits a `text_input` and breaks the line
-/// in a `text_editor` ("\r\n" twice), where before it was dropped.
-#[cfg(any(target_os = "ios", test))]
-fn ios_key(key: winit::keyboard::Key) -> winit::keyboard::Key {
+/// iced's widgets act on the named keys only: `text_input` submits and
+/// `text_editor` breaks the line on `Named::Enter`, and both drop control
+/// characters given as text. The event's `text` is left as the character,
+/// a control character the text widgets do not insert, as a desktop Return
+/// ("\r") or Tab ("\t") is.
+///
+/// UIKit inserts dictated and pasted text the same way, so on iOS a line
+/// break in it now acts as Return too: it submits a `text_input` and breaks
+/// the line in a `text_editor` ("\r\n" twice), where before it was dropped.
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+fn mobile_key(key: winit::keyboard::Key) -> winit::keyboard::Key {
     use winit::keyboard::{Key, NamedKey};
 
     match key.as_ref() {
@@ -1330,25 +1339,51 @@ mod tests {
 
     #[test]
     fn ios_return_and_tab_are_named_keys() {
-        assert_eq!(ios_key(character("\n")), Key::Named(NamedKey::Enter));
-        assert_eq!(ios_key(character("\r")), Key::Named(NamedKey::Enter));
-        assert_eq!(ios_key(character("\t")), Key::Named(NamedKey::Tab));
+        assert_eq!(mobile_key(character("\n")), Key::Named(NamedKey::Enter));
+        assert_eq!(mobile_key(character("\r")), Key::Named(NamedKey::Enter));
+        assert_eq!(mobile_key(character("\t")), Key::Named(NamedKey::Tab));
 
         assert_eq!(
-            key(ios_key(character("\n"))),
+            key(mobile_key(character("\n"))),
             keyboard::Key::Named(keyboard::key::Named::Enter)
         );
     }
 
+    /// What an Android 16 emulator delivered for `input keyevent ENTER` and
+    /// for the soft keyboard's Return key: logical key `Character("\n")`,
+    /// physical key `Code(Enter)`, text `"\n"`. Tab comes through the same
+    /// key map lookup as `Character("\t")`.
     #[test]
-    fn ios_other_keys_are_left_alone() {
+    fn android_enter_and_tab_from_the_key_map_are_named_keys() {
+        assert_eq!(
+            key(mobile_key(character("\n"))),
+            keyboard::Key::Named(keyboard::key::Named::Enter)
+        );
+        assert_eq!(
+            key(mobile_key(character("\t"))),
+            keyboard::Key::Named(keyboard::key::Named::Tab)
+        );
+
+        // The D-pad centre already arrives named.
+        assert_eq!(
+            mobile_key(Key::Named(NamedKey::Enter)),
+            Key::Named(NamedKey::Enter)
+        );
+    }
+
+    #[test]
+    fn mobile_other_keys_are_left_alone() {
         for c in ["a", " ", "\r\n", "\n\n", "é", "\u{7f}"] {
-            assert_eq!(ios_key(character(c)), character(c));
+            assert_eq!(mobile_key(character(c)), character(c));
         }
 
         assert_eq!(
-            ios_key(Key::Named(NamedKey::Backspace)),
+            mobile_key(Key::Named(NamedKey::Backspace)),
             Key::Named(NamedKey::Backspace)
+        );
+        assert_eq!(
+            mobile_key(Key::Named(NamedKey::BrowserBack)),
+            Key::Named(NamedKey::BrowserBack)
         );
     }
 }
