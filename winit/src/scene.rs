@@ -17,9 +17,13 @@
 //!   at boot through winit's event loop proxy, and winit hands that over
 //!   only once its run loop turns after launch: usually after the scene has
 //!   connected. A window shown first is held until the scene connects.
-//! - When UIKit disconnects the scene (to reclaim memory, or when it is
+//! - When UIKit disconnects a scene (to reclaim memory, or when it is
 //!   closed), the windows in it move into the newest application scene still
 //!   connected, if there is one, or are held for the next one that connects.
+//!   Every connected application scene is tracked, so with several scenes
+//!   (an iPad app with `UIApplicationSupportsMultipleScenes`) closing the
+//!   newest one hands its windows to an older one. A window iced has hidden
+//!   stays hidden when it moves.
 //!
 //! The application's `Info.plist` must declare the scene, which iced cannot
 //! do for it:
@@ -55,6 +59,7 @@ use std::cell::RefCell;
 use std::ptr::NonNull;
 
 use block2::RcBlock;
+use objc2::Message;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyClass, NSObjectProtocol};
 use objc2_foundation::{
@@ -91,10 +96,11 @@ const MANIFEST: &str = "\
 const WINIT_WINDOW: &str = "WinitUIWindow";
 
 thread_local! {
-    /// The newest application scene UIKit has connected and not yet
-    /// disconnected. A window shown while it is set goes into it.
-    static SCENE: RefCell<Option<Retained<UIWindowScene>>> =
-        const { RefCell::new(None) };
+    /// The application scenes UIKit has connected and not yet disconnected,
+    /// oldest first. A window shown goes into the newest. Weak: UIKit keeps
+    /// a connected scene alive, and a disconnected one must not be.
+    static SCENES: RefCell<Vec<Weak<UIWindowScene>>> =
+        const { RefCell::new(Vec::new()) };
     /// winit's windows, once shown. Weak, since iced owns them: a window it
     /// has closed must not be kept alive or shown again.
     static WINDOWS: RefCell<Vec<Weak<UIWindow>>> =
@@ -195,7 +201,7 @@ fn scene_connected(note: &NSNotification) {
 
     log::debug!("iOS scene: connected");
 
-    SCENE.set(Some(scene.clone()));
+    SCENES.with_borrow_mut(|scenes| remember(scenes, &scene));
 
     for window in live(&PENDING.take()) {
         place(&window, &scene);
@@ -209,15 +215,13 @@ fn scene_disconnected(note: &NSNotification) {
 
     log::debug!("iOS scene: disconnected");
 
-    let current = SCENE.with_borrow(|current| {
-        current
-            .as_deref()
-            .is_some_and(|current| std::ptr::addr_eq(current, &*scene))
+    SCENES.with_borrow_mut(|scenes| {
+        scenes.retain(|known| {
+            known
+                .load()
+                .is_some_and(|known| !std::ptr::addr_eq(&*known, &*scene))
+        });
     });
-
-    if current {
-        SCENE.set(None);
-    }
 
     // The windows the scene held, or that UIKit has already taken out of it.
     let orphans: Vec<_> = WINDOWS
@@ -231,7 +235,7 @@ fn scene_disconnected(note: &NSNotification) {
         .collect();
 
     // Another application scene may still be connected; else the next one.
-    match SCENE.with_borrow(Clone::clone) {
+    match newest_scene() {
         Some(scene) => {
             for window in orphans {
                 place(&window, &scene);
@@ -268,10 +272,15 @@ fn window_visible(note: &NSNotification) {
         return;
     }
 
-    match SCENE.with_borrow(Clone::clone) {
+    match newest_scene() {
         Some(scene) => place(&window, &scene),
         None => PENDING.with_borrow_mut(|pending| remember(pending, &window)),
     }
+}
+
+/// The newest application scene still connected, if any.
+fn newest_scene() -> Option<Retained<UIWindowScene>> {
+    SCENES.with_borrow(|scenes| scenes.iter().rev().find_map(Weak::load))
 }
 
 /// The scene a scene notification is about, if it is an application scene:
@@ -304,18 +313,22 @@ fn application_scene(note: &NSNotification) -> Option<Retained<UIWindowScene>> {
     Some(unsafe { Retained::cast::<UIWindowScene>(scene) })
 }
 
-/// Adds `window` to `windows` once, dropping the windows that are gone.
-fn remember(windows: &mut Vec<Weak<UIWindow>>, window: &Retained<UIWindow>) {
-    windows.retain(|known| known.load().is_some());
+/// Adds `object` to `objects` once, at the end, dropping the objects that
+/// are gone.
+fn remember<T>(objects: &mut Vec<Weak<T>>, object: &Retained<T>)
+where
+    T: Message + objc2::mutability::IsIdCloneable,
+{
+    objects.retain(|known| known.load().is_some());
 
-    let known = windows.iter().any(|known| {
+    let known = objects.iter().any(|known| {
         known
             .load()
-            .is_some_and(|known| std::ptr::addr_eq(&*known, &**window))
+            .is_some_and(|known| std::ptr::addr_eq(&*known, &**object))
     });
 
     if !known {
-        windows.push(Weak::from_retained(window));
+        objects.push(Weak::from_retained(object));
     }
 }
 
@@ -324,10 +337,17 @@ fn live(windows: &[Weak<UIWindow>]) -> Vec<Retained<UIWindow>> {
     windows.iter().filter_map(Weak::load).collect()
 }
 
+/// Puts `window` into `scene`, and makes it the key window unless it is
+/// hidden: a window iced has hidden is moved, not shown.
 fn place(window: &UIWindow, scene: &UIWindowScene) {
     // SAFETY: UIKit calls on the main thread with valid objects.
     unsafe {
         window.setWindowScene(Some(scene));
+    }
+
+    if window.isHidden() {
+        log::debug!("iOS scene: hidden window placed");
+        return;
     }
 
     window.makeKeyAndVisible();
