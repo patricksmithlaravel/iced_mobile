@@ -189,7 +189,17 @@ fn max_level() -> log::LevelFilter {
 ///    `log::error!` (`adb logcat -s iced`), then runs the previous hook,
 ///    which writes it to stderr (`RustStdoutStderr`);
 /// 3. hands its `AndroidApp` to the shell with `mobile::set_android_app`;
-/// 4. calls your function, and logs the error it returns, if any.
+/// 4. calls your function, catching a panic, and logs how it ended;
+/// 5. ends the process with `std::process::exit`: status 0 when your
+///    function returned `Ok`, 1 when it returned an error or panicked.
+///
+/// Step 5 is needed because winit allows one event loop per process, and
+/// Android usually keeps the process alive once `android_main` returns: the
+/// next launch would run `android_main` again in it and fail to create the
+/// event loop, launch after launch, until the process is killed. On Android
+/// your function returns only when the application cannot go on (no usable
+/// graphics backend, for example), since `iced::exit` and closing the last
+/// window are ignored there.
 ///
 /// On every other target it expands to nothing, so the same line serves
 /// every build.
@@ -235,7 +245,7 @@ macro_rules! android_main {
 /// defines. Not public API.
 #[doc(hidden)]
 #[cfg(target_os = "android")]
-pub fn __android_main(app: AndroidApp, run: fn() -> crate::Result) {
+pub fn __android_main(app: AndroidApp, run: fn() -> crate::Result) -> ! {
     use std::sync::Once;
 
     // `android_main` runs again for each new Activity in the same process;
@@ -259,9 +269,29 @@ pub fn __android_main(app: AndroidApp, run: fn() -> crate::Result) {
 
     set_android_app(app);
 
-    if let Err(error) = run() {
-        log::error!(
-            "the application stopped with an error: {error} ({error:?})"
-        );
-    }
+    // winit allows one event loop per process, and Android usually keeps the
+    // process alive after `android_main` returns: the next launch would run
+    // `android_main` again in it and fail to build an event loop
+    // (RecreationAttempt), launch after launch. Ending the process gives the
+    // next launch a fresh one. A panic is caught for the same reason; the
+    // hook above has logged it.
+    let code = match std::panic::catch_unwind(run) {
+        Ok(Ok(())) => {
+            log::info!("the application stopped; ending the process");
+            0
+        }
+        Ok(Err(error)) => {
+            log::error!(
+                "the application stopped with an error: {error} ({error:?}); \
+                ending the process"
+            );
+            1
+        }
+        Err(_panic) => {
+            log::error!("the application panicked; ending the process");
+            1
+        }
+    };
+
+    std::process::exit(code)
 }
