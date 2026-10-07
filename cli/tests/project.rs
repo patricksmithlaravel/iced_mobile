@@ -958,12 +958,10 @@ fn stop_ends_sessions_and_ps_lists_them() {
 
 #[test]
 fn stop_never_signals_a_reused_pid_or_shuts_down_foreign_devices() {
-    let mut sandbox = Sandbox::with_fixture("app");
-    // `--shutdown` also looks for the managed emulator: through a fake adb
-    // that sees no devices, never the real one.
-    let adb = sandbox.path("fakebin/adb");
-    write_exe(&adb, "#!/bin/sh\necho 'List of devices attached'\n");
-    sandbox.set("ICM_TOOL_ADB", &adb);
+    let sandbox = Sandbox::with_fixture("app");
+    // A platform without its own stop (ios-device until phase 2) goes
+    // through the session file alone; the dev platforms' own stops have
+    // their own tests.
     let sessions = sandbox.cwd.join("target/icm/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
 
@@ -971,12 +969,12 @@ fn stop_never_signals_a_reused_pid_or_shuts_down_foreign_devices() {
     // reused, so it must survive.
     let pid = orphan_sleep();
     let shut = sandbox.path("shutdown.txt");
-    let file = sessions.join("android.json");
+    let file = sessions.join("ios-device.json");
     std::fs::write(
         &file,
         serde_json::json!({
-            "platform": "android", "pid": pid,
-            "device": {"kind": "emulator", "serial": "emulator-5554", "name": "cn_api36", "managed": true},
+            "platform": "ios-device", "pid": pid,
+            "device": {"kind": "device", "udid": "00008110-X", "name": "Owner iPhone", "managed": true},
             "shutdown": [["/bin/sh", "-c", format!("echo shut > '{}'", shut.display())]]
         })
         .to_string(),
@@ -994,7 +992,7 @@ fn stop_never_signals_a_reused_pid_or_shuts_down_foreign_devices() {
     let listed = sandbox.json(&["ps"]);
     assert_eq!(listed["sessions"][0]["running"], false, "{listed}");
 
-    let stopped = sandbox.json(&["stop", "android", "--shutdown"]);
+    let stopped = sandbox.json(&["stop", "ios-device", "--shutdown"]);
     assert_eq!(stopped["exit"], 0, "{stopped}");
     assert_eq!(stopped["stopped"][0]["already_gone"][0], pid);
     assert!(alive(pid), "a pid the session does not own was signalled");

@@ -1,0 +1,1799 @@
+//! The Android commands (design §10.4, §13):
+//!
+//! - `build`: the signed dev APK for one ABI;
+//! - `run`: device (booting the managed emulator while the build runs),
+//!   build, install, `setprop debug.icm.events 1`, launch, readiness
+//!   (`ICM_EVENT ready`, else a probe), screenshot, logs, session;
+//! - `shot`, `logs`, `input`, `stop`, `devices` on the session's device;
+//! - [`doctor_checks`] for `icm doctor android`.
+
+use super::adb::{self, Adb};
+use super::apk;
+use super::avd;
+use super::device::{self, Chosen};
+use super::image;
+use super::logcat::{self, Record};
+use super::manifest::ACTIVITY;
+use super::session::{self, Geometry, Session};
+use super::{BUILD_TOOLS_PACKAGE, NDK_PACKAGE, Toolset};
+use crate::catalogue::{By, CheckId};
+use crate::cli::{
+    BuildArgs, DoctorArgs, InputAction, InputArgs, Key, LogSource, LogsArgs, Rotation, RunArgs,
+    ShotArgs, StopArgs, Theme,
+};
+use crate::config::Abi;
+use crate::context::{Ctx, Project};
+use crate::error::{Check, Evidence, IcmError, Result, Status};
+use crate::host::HostConfig;
+use crate::screen::{Screen, Space, preview_size};
+use serde_json::{Value, json};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+fn setup(ctx: &mut Ctx) -> Result<(Project, HostConfig, Toolset)> {
+    let project = ctx.project()?.clone();
+    let host = ctx.host()?.clone();
+    let tools = Toolset::discover(&host, &ctx.env)?;
+    Ok((project, host, tools))
+}
+
+fn run_dir(ctx: &Ctx, project: &Project) -> PathBuf {
+    ctx.rep
+        .run_dir()
+        .unwrap_or_else(|| project.runs_dir().join(ctx.rep.run_id()))
+}
+
+fn internal(what: &str, error: impl std::fmt::Display) -> IcmError {
+    IcmError::new(CheckId::InternalBug, format!("{what}: {error}"))
+}
+
+// ---- build ---------------------------------------------------------------------
+
+/// `icm build android`: the signed dev APK for `--abi`, the `--device`'s
+/// ABI, or the host's emulator ABI.
+pub fn build(ctx: &mut Ctx, args: &BuildArgs) -> Result<()> {
+    let (project, _host, tools) = setup(ctx)?;
+    let _lock = ctx.lock_platform("android")?;
+    let ctx: &Ctx = ctx;
+
+    let abi = match (&args.abi, &args.device) {
+        (Some(name), _) => Abi::from_name(name).ok_or_else(|| {
+            IcmError::new(
+                CheckId::UsageBadArgs,
+                format!("unknown ABI `{name}`; use arm64-v8a, x86_64, armeabi-v7a or x86"),
+            )
+        })?,
+        (None, Some(serial)) => device::device_abi(&Adb::new(&tools, serial)?)?,
+        (None, None) => avd::host_abi(),
+    };
+    ctx.rep.set(
+        "profile",
+        json!(crate::cargo::profile_dir(if args.release {
+            "release"
+        } else {
+            "dev"
+        })),
+    );
+    let built = apk::build(ctx, &project, &tools, abi, args.release)?;
+    ctx.rep.artifact("apk", &built.apk);
+    ctx.rep.summary(format!(
+        "built {} ({})",
+        crate::paths::display(&built.apk),
+        abi.as_str()
+    ));
+    ctx.rep.next(
+        "icm run android --no-build",
+        "install and launch this build",
+    );
+    Ok(())
+}
+
+// ---- run -----------------------------------------------------------------------
+
+/// `(name, value)` system properties.
+type Props = Vec<(String, String)>;
+
+/// System properties standing in for `--env` (Android apps get no
+/// environment), and the variables that have no stand-in.
+fn props_from_env(env: &[String]) -> Result<(Props, Vec<String>)> {
+    let mut props = Vec::new();
+    let mut ignored = Vec::new();
+    for pair in env {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(IcmError::new(
+                CheckId::UsageBadArgs,
+                format!("--env {pair}: expected K=V"),
+            ));
+        };
+        match key {
+            "ICED_BACKEND" => props.push(("debug.iced.backend".to_string(), value.to_string())),
+            "ICM_EVENTS" => {}
+            _ => ignored.push(key.to_string()),
+        }
+    }
+    Ok((props, ignored))
+}
+
+/// `icm run android`.
+pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
+    if args.from_aab {
+        return Err(IcmError::new(
+            CheckId::UsageNotImplemented,
+            "`--from-aab` (install through bundletool) comes with Android releases",
+        )
+        .fix("Run without --from-aab.", &["icm run android"]));
+    }
+    let (props, ignored_env) = props_from_env(&args.env)?;
+    let (project, host, tools) = setup(ctx)?;
+    ctx.rep.latest("android");
+    let _lock = ctx.lock_platform("android")?;
+    let ctx: &Ctx = ctx;
+
+    let config = &project.config.config;
+    let app_id = config.app.id.clone();
+    let profile = if args.release { "release" } else { "dev" };
+    ctx.rep
+        .set("profile", json!(crate::cargo::profile_dir(profile)));
+    for key in &ignored_env {
+        ctx.rep.check(Check::warn(
+            CheckId::UsageBadArgs,
+            format!(
+                "--env {key}: Android apps get no environment variables; only ICED_BACKEND has a stand-in (the sysprop debug.iced.backend)"
+            ),
+        ));
+    }
+    let dir = run_dir(ctx, &project);
+
+    // 1. The device; an emulator boots while the app builds.
+    let request = device::Request {
+        serial: args.device.clone(),
+        avd: args.avd.clone(),
+        show: args.show,
+        wipe: args.fresh,
+        target_sdk: config.android.target_sdk,
+    };
+    let chosen = device::choose(
+        ctx,
+        &tools,
+        &host,
+        &ctx.env,
+        &request,
+        true,
+        &dir.join("emulator.log"),
+    )?;
+    ctx.rep
+        .progress(format!("device: {} ({})", chosen.serial, chosen.reason));
+    let mut session = Session {
+        schema: session::SCHEMA.to_string(),
+        run: ctx.rep.run_id(),
+        run_dir: Some(dir.clone()),
+        serial: chosen.serial.clone(),
+        kind: chosen.kind().to_string(),
+        avd: chosen.avd.clone(),
+        booted_by_icm: chosen.booting.is_some(),
+        emulator_pid: chosen.booting.as_ref().map(|b| b.pid),
+        emulator_log: chosen.booting.as_ref().map(|b| b.log.clone()),
+        abi: chosen.abi.as_str().to_string(),
+        app_id: app_id.clone(),
+        started: crate::time::Utc::now().rfc3339(),
+        ..Session::default()
+    };
+    if let Some(booting) = &chosen.booting {
+        // Recorded now, so `icm stop android --shutdown` finds the emulator
+        // even when the build fails.
+        let _ = session::write(&project, &session);
+        ctx.rep.artifact("emulator_log", &booting.log);
+    }
+
+    // 2. The APK.
+    let apk_path = if args.no_build {
+        let package = project.package_for("android")?;
+        let path = apk::apk_path(&project, &package.name, profile);
+        if !path.is_file() {
+            return Err(IcmError::new(
+                CheckId::UsageBadArgs,
+                format!(
+                    "--no-build: there is no APK at {} from an earlier build",
+                    crate::paths::display(&path)
+                ),
+            )
+            .fix("Build it first.", &["icm build android", "icm run android"]));
+        }
+        let names = super::zip::names(&path).unwrap_or_default();
+        if !names
+            .iter()
+            .any(|name| name.starts_with(&format!("lib/{}/", chosen.abi.as_str())))
+        {
+            return Err(IcmError::new(
+                CheckId::AndroidSoAbis,
+                format!(
+                    "--no-build: {} has no library for {}, the device's ABI",
+                    crate::paths::display(&path),
+                    chosen.abi.as_str()
+                ),
+            )
+            .fix_commands([format!("icm build android --abi {}", chosen.abi.as_str())]));
+        }
+        path
+    } else {
+        apk::build(ctx, &project, &tools, chosen.abi, args.release)?.apk
+    };
+    ctx.rep.artifact("apk", &apk_path);
+    session.apk = Some(apk_path.clone());
+
+    // 3. Boot, install, launch.
+    if let Some(booting) = &chosen.booting {
+        ctx.rep
+            .progress(format!("waiting for {} to boot", booting.serial));
+        let took = avd::wait_booted(ctx, &tools, booting)?;
+        ctx.rep.progress(format!(
+            "{} booted in {}",
+            booting.serial,
+            crate::time::format_duration(took)
+        ));
+    }
+    let adb = Adb::new(&tools, &chosen.serial)?;
+    if chosen.managed() {
+        avd::prepare(&adb);
+    }
+    ctx.rep.set("device", device::to_json(&chosen, &adb));
+
+    install(
+        ctx,
+        &adb,
+        &apk_path,
+        &app_id,
+        args.reinstall,
+        args.wipe_data,
+    )?;
+
+    let mark = adb.epoch().ok_or_else(|| {
+        IcmError::new(
+            CheckId::AndroidDeviceNone,
+            format!("{} does not answer `date`", adb.serial),
+        )
+    })?;
+    session.log_mark = Some(mark.clone());
+    set_props(ctx, &adb, &props)?;
+
+    let launched = Instant::now();
+    launch(ctx, &adb, &app_id)?;
+
+    // 4. Ready, screenshot, logs.
+    let outcome = wait_ready(ctx, &adb, &app_id, &mark, launched, args.wait_ready);
+    let pids: BTreeSet<u32> = match &outcome {
+        Ok(ready) => ready.pids.clone(),
+        Err(_) => adb.pids(&app_id).into_iter().collect(),
+    };
+    session.pid = pids.iter().next().copied();
+
+    let mut result = outcome.and_then(|ready| {
+        report_ready(ctx, &project, &ready, launched);
+        if !args.no_shot {
+            std::thread::sleep(args.settle);
+            let shot = capture(ctx, &adb, &dir, "screen", &app_id, args.expect_content)?;
+            session.screen = Some(Geometry::from(&shot));
+            // Dying between the first frame and the screenshot is dying.
+            if adb.pids(&app_id).is_empty() {
+                return Err(IcmError::new(
+                    CheckId::RunAppDied,
+                    format!("{app_id} exited after its first frame"),
+                ));
+            }
+        }
+        ctx.rep.set(
+            "process",
+            json!({
+                "pid": ready.pids.iter().next(),
+                "alive": true,
+                "ready": {"source": ready.source, "ms": ready.ms},
+            }),
+        );
+        Ok(())
+    });
+
+    let logs = collect_logs(ctx, &adb, &dir, &app_id, &mark, &pids);
+    if let Err(error) = &mut result {
+        attach_evidence(error, &logs, &project);
+        ctx.rep.set(
+            "process",
+            json!({
+                "pid": session.pid,
+                "alive": !adb.pids(&app_id).is_empty(),
+                "ready": {"source": "none", "ms": null},
+            }),
+        );
+    }
+
+    if let Ok(path) = session::write(&project, &session) {
+        ctx.rep.set("session", json!(crate::paths::display(&path)));
+    }
+    result?;
+
+    ctx.rep.next(
+        "icm logs android --level warn",
+        "read the app's warnings and errors",
+    );
+    ctx.rep.next(
+        "icm input android tap <x> <y>",
+        "tap in screen.preview.png pixels",
+    );
+    ctx.rep.next("icm stop android", "stop the app");
+
+    if args.attach {
+        follow(ctx, &adb, &app_id, &mark, pids, true, &|_, _| true)?;
+    }
+    Ok(())
+}
+
+fn set_props(ctx: &Ctx, adb: &Adb, props: &[(String, String)]) -> Result<()> {
+    // Events are opt-in for every build (Appendix C item 27).
+    let mut lines = vec!["setprop debug.icm.events 1".to_string()];
+    let backend = props
+        .iter()
+        .find(|(key, _)| key == "debug.iced.backend")
+        .map(|(_, value)| value.clone());
+    match backend {
+        Some(value) => lines.push(format!("setprop debug.iced.backend {}", adb::quote(&value))),
+        // A backend an earlier run chose must not leak into this one.
+        None => lines.push("setprop debug.iced.backend ''".to_string()),
+    }
+    let cmd = adb
+        .shell(&lines.join(" && "))
+        .timeout(Duration::from_secs(30));
+    let outcome = ctx.step("adb.setprop", &cmd)?;
+    if outcome.success() {
+        Ok(())
+    } else {
+        Err(ctx.step_failure("adb.setprop", CheckId::ToolFailed, &outcome))
+    }
+}
+
+fn install(
+    ctx: &Ctx,
+    adb: &Adb,
+    apk: &Path,
+    app_id: &str,
+    reinstall: bool,
+    wipe: bool,
+) -> Result<()> {
+    if reinstall {
+        let line = if wipe {
+            format!("pm uninstall {}", adb::quote(app_id))
+        } else {
+            format!("pm uninstall -k {}", adb::quote(app_id))
+        };
+        // Not installed is fine.
+        let _ = ctx.step(
+            "adb.uninstall",
+            &adb.shell(&line).timeout(Duration::from_secs(120)),
+        )?;
+    }
+
+    let cmd = adb
+        .cmd(["install", "-r", "-d"])
+        .arg(apk)
+        .timeout(Duration::from_secs(300));
+    let outcome = ctx.step("adb.install", &cmd)?;
+    let text = format!("{}\n{}", outcome.stdout_text(), outcome.stderr_text());
+    if outcome.success() && text.contains("Success") {
+        return Ok(());
+    }
+
+    let reason = adb::install_failure(&text).unwrap_or_else(|| outcome.describe());
+    let mut error = match reason.as_str() {
+        "INSTALL_FAILED_UPDATE_INCOMPATIBLE" => IcmError::new(
+            CheckId::AndroidInstallSignatureMismatch,
+            format!(
+                "{app_id} is installed on {} with a different signing key; reinstalling wipes its data",
+                adb.serial
+            ),
+        )
+        .fix_commands(["icm run android --reinstall --wipe-data"]),
+        "INSTALL_FAILED_NO_MATCHING_ABIS" => IcmError::new(
+            CheckId::AndroidSoAbis,
+            format!("{} has no library for {}'s ABI", apk.display(), adb.serial),
+        ),
+        _ => IcmError::new(
+            CheckId::AndroidInstallFailed,
+            format!("adb install failed on {}: {reason}", adb.serial),
+        ),
+    };
+    if let Some(log) = &outcome.log {
+        error = error.evidence(Evidence::file(log).with_excerpt(reason));
+    }
+    Err(error)
+}
+
+fn launch(ctx: &Ctx, adb: &Adb, app_id: &str) -> Result<adb::Started> {
+    let component = format!("{app_id}/{ACTIVITY}");
+    let cmd = adb
+        .shell(&format!("am start -W -S -n {}", adb::quote(&component)))
+        .timeout(Duration::from_secs(90));
+    let outcome = ctx.step("adb.launch", &cmd)?;
+    let text = format!("{}\n{}", outcome.stdout_text(), outcome.stderr_text());
+    let started = adb::parse_am_start(&text);
+    if !outcome.success() || started.error.is_some() {
+        let mut error = IcmError::new(
+            CheckId::AndroidLaunchFailed,
+            format!(
+                "am start {component} failed: {}",
+                started
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| outcome.stderr_tail(3))
+            ),
+        );
+        if let Some(log) = &outcome.log {
+            error = error.evidence(Evidence::file(log));
+        }
+        return Err(error);
+    }
+    Ok(started)
+}
+
+/// How the app became ready.
+#[derive(Clone, Debug)]
+struct Ready {
+    source: &'static str,
+    ms: Option<u64>,
+    window: Option<Value>,
+    pids: BTreeSet<u32>,
+}
+
+/// Waits for `ICM_EVENT ready` in logcat (the framework emits it after
+/// the first presented frame). An app that never speaks the protocol (no
+/// `start` event) is ready by probe: alive and the top resumed activity on
+/// three polls in a row. A death or panic fails at once.
+fn wait_ready(
+    ctx: &Ctx,
+    adb: &Adb,
+    app_id: &str,
+    mark: &str,
+    launched: Instant,
+    wait: Duration,
+) -> Result<Ready> {
+    let limit = ctx
+        .remaining()
+        .map_or(wait, |remaining| remaining.min(wait));
+    let deadline = launched + limit;
+    let mut pids: BTreeSet<u32> = BTreeSet::new();
+    let mut start_seen = false;
+    let mut probes = 0;
+    let mut gone_polls = 0;
+
+    loop {
+        if let Some(signal) = crate::signals::pending() {
+            return Err(crate::output::interrupted(signal));
+        }
+        let records = events_since(adb, mark);
+        for record in &records {
+            let Some(event) = logcat::event(record) else {
+                continue;
+            };
+            let _ = pids.insert(record.pid);
+            match logcat::kind(&event) {
+                "start" => start_seen = true,
+                "ready" => {
+                    return Ok(Ready {
+                        source: "icm_event",
+                        ms: event.get("ms").and_then(Value::as_u64),
+                        window: event.get("window").cloned(),
+                        pids,
+                    });
+                }
+                "panic" => {
+                    let message = event
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let location = event
+                        .get("location")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown location");
+                    return Err(IcmError::new(
+                        CheckId::RunAppPanicked,
+                        format!("panicked at {location}: {message}"),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        let alive = adb.pids(app_id);
+        if alive.is_empty() {
+            gone_polls += 1;
+            // Give a fresh launch a moment to appear; a vanished process
+            // (or one that never came) is dead.
+            if !pids.is_empty() || gone_polls >= 6 {
+                return Err(IcmError::new(
+                    CheckId::RunAppDied,
+                    format!(
+                        "{app_id} exited {} after launch, before its first frame",
+                        crate::time::format_duration(launched.elapsed())
+                    ),
+                ));
+            }
+        } else {
+            gone_polls = 0;
+            pids.extend(alive);
+        }
+
+        if !start_seen && !pids.is_empty() && launched.elapsed() >= Duration::from_secs(6) {
+            if top_resumed(adb, app_id) {
+                probes += 1;
+                if probes >= 3 {
+                    return Ok(Ready {
+                        source: "probe",
+                        ms: None,
+                        window: None,
+                        pids,
+                    });
+                }
+            } else {
+                probes = 0;
+            }
+        }
+
+        if Instant::now() >= deadline {
+            let detail = if start_seen {
+                format!(
+                    "{app_id} is alive but sent no ICM_EVENT ready within {}",
+                    crate::time::format_duration(limit)
+                )
+            } else {
+                format!(
+                    "{app_id} is alive but never became the resumed activity within {}",
+                    crate::time::format_duration(limit)
+                )
+            };
+            return Err(IcmError::new(CheckId::RunNotReady, detail)
+                .fix_commands(["icm logs android --level warn".to_string()]));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn events_since(adb: &Adb, mark: &str) -> Vec<Record> {
+    let cmd = adb.cmd([
+        "logcat",
+        "-d",
+        "-v",
+        "threadtime,epoch",
+        "-T",
+        mark,
+        "-s",
+        "ICM_EVENT:I",
+    ]);
+    adb::quick(cmd, Duration::from_secs(15))
+        .map(|outcome| logcat::parse(&outcome.stdout_text()))
+        .unwrap_or_default()
+}
+
+fn top_resumed(adb: &Adb, app_id: &str) -> bool {
+    adb.shell_text(
+        "dumpsys activity activities | grep -E 'topResumedActivity|ResumedActivity'",
+        Duration::from_secs(15),
+    )
+    .is_some_and(|text| text.contains(&format!("{app_id}/")))
+}
+
+fn report_ready(ctx: &Ctx, project: &Project, ready: &Ready, launched: Instant) {
+    let window = ready.window.clone().unwrap_or(Value::Null);
+    // Logical sizes are fractional on Android (1080 px / 2.625); one
+    // decimal is plenty for a person.
+    let number = |v: f64| {
+        if (v - v.round()).abs() < 0.05 {
+            format!("{}", v.round())
+        } else {
+            format!("{v:.1}")
+        }
+    };
+    let size = window.get("size").and_then(Value::as_array).map(|size| {
+        size.iter()
+            .filter_map(Value::as_f64)
+            .map(number)
+            .collect::<Vec<_>>()
+            .join("x")
+    });
+    let scale = window.get("scale").and_then(Value::as_f64);
+    let ms = ready
+        .ms
+        .unwrap_or_else(|| launched.elapsed().as_millis() as u64);
+    ctx.rep.ready(json!({
+        "session": crate::paths::display(&session::path(project)),
+        "source": ready.source,
+        "ms_since_launch": launched.elapsed().as_millis() as u64,
+        "window": window,
+    }));
+    let what = match (size, scale) {
+        (Some(size), Some(scale)) => format!("first frame {size}@{scale}"),
+        _ => "the app is up".to_string(),
+    };
+    ctx.rep.check(Check::pass(
+        CheckId::RunReady,
+        format!(
+            "{what} after {} (source: {})",
+            crate::time::format_duration(Duration::from_millis(ms)),
+            ready.source
+        ),
+    ));
+}
+
+// ---- screenshots ---------------------------------------------------------------------
+
+/// Captures `<stem>.png` and `<stem>.preview.png` in `dir`, reports them,
+/// the `screen` geometry and blank detection (`run.screen_blank`, or INFO
+/// `android.screen.secure` for a FLAG_SECURE window).
+fn capture(
+    ctx: &Ctx,
+    adb: &Adb,
+    dir: &Path,
+    stem: &str,
+    app_id: &str,
+    expect_content: bool,
+) -> Result<Screen> {
+    std::fs::create_dir_all(dir).map_err(|e| internal("cannot create the run directory", e))?;
+    let cmd = adb
+        .cmd(["exec-out", "screencap", "-p"])
+        .timeout(Duration::from_secs(60));
+    let outcome = ctx.step("adb.screencap", &cmd)?;
+    if !outcome.success() || image::png_size(&outcome.stdout).is_none() {
+        let mut error = ctx.step_failure("adb.screencap", CheckId::ToolFailed, &outcome);
+        if outcome.success() {
+            error.detail = format!(
+                "screencap returned {} bytes that are not a PNG",
+                outcome.stdout.len()
+            );
+        }
+        return Err(error);
+    }
+    let png_path = dir.join(format!("{stem}.png"));
+    let preview_path = dir.join(format!("{stem}.preview.png"));
+    std::fs::write(&png_path, &outcome.stdout)
+        .map_err(|e| internal("cannot write the screenshot", e))?;
+    let stats = image::write_preview(&outcome.stdout, &preview_path)
+        .map_err(|e| internal("cannot write the preview", e))?;
+
+    let scale = adb
+        .shell_text("wm density", Duration::from_secs(15))
+        .and_then(|text| adb::parse_density(&text))
+        .unwrap_or(1.0);
+    let mut screen = Screen::new(stats.px, scale);
+    screen.preview = stats.preview;
+
+    let mut extra = serde_json::Map::new();
+    let _ = extra.insert("bytes".into(), json!(outcome.stdout.len()));
+    let _ = extra.insert("blank".into(), json!(stats.blank));
+    ctx.rep.artifact_with("screenshot", &png_path, extra);
+    ctx.rep.artifact("preview", &preview_path);
+    ctx.rep.set("screen", screen.to_json());
+
+    if stats.blank {
+        let secure = adb
+            .shell_text("dumpsys window windows", Duration::from_secs(20))
+            .is_some_and(|text| adb::focused_window_is_secure(&text, app_id));
+        if secure {
+            ctx.rep.check(Check::info(
+                CheckId::AndroidScreenSecure,
+                format!("{app_id}'s window has FLAG_SECURE, so the screenshot is black"),
+            ));
+        } else {
+            let detail = format!(
+                "{:.1}% of pixels are {}",
+                stats.dominant_share * 100.0,
+                stats.dominant
+            );
+            let status = if expect_content {
+                Status::Fail
+            } else {
+                Status::Warn
+            };
+            ctx.rep.check(
+                Check::new(CheckId::RunScreenBlank, status, detail)
+                    .evidence(Evidence::file(&png_path))
+                    .fix(
+                        "Compare with a headless render; read the logs.",
+                        &["icm shot --headless", "icm logs android --level warn"],
+                    ),
+            );
+        }
+    }
+    Ok(screen)
+}
+
+/// `icm shot android`: a screenshot of the device the session runs on.
+pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
+    let (project, host, tools) = setup(ctx)?;
+    let ctx: &Ctx = ctx;
+    let (adb, mut session) = session_device(ctx, &project, &host, &tools)?;
+    let dir = run_dir(ctx, &project);
+    let stem = args.name.clone().unwrap_or_else(|| "screen".to_string());
+    if stem.contains('/') || stem.is_empty() {
+        return Err(IcmError::new(
+            CheckId::UsageBadArgs,
+            format!("--name `{stem}` must be a plain file name"),
+        ));
+    }
+    let app_id = project.config.config.app.id.clone();
+    let screen = capture(ctx, &adb, &dir, &stem, &app_id, false)?;
+    if let Some(out) = &args.out {
+        if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| internal("cannot create --out's directory", e))?;
+        }
+        std::fs::copy(dir.join(format!("{stem}.png")), out)
+            .map_err(|e| internal("cannot write --out", e))?;
+        ctx.rep.artifact("out", out);
+    }
+    if let Some(session) = session.as_mut() {
+        session.screen = Some(Geometry::from(&screen));
+        let _ = session::write(&project, session);
+    }
+    ctx.rep.set("device", json!({"serial": adb.serial}));
+    ctx.rep.next(
+        "icm input android tap <x> <y>",
+        "act in screen.preview.png pixels",
+    );
+    Ok(())
+}
+
+/// The session's device when it is online, else one chosen without
+/// booting.
+fn session_device(
+    ctx: &Ctx,
+    project: &Project,
+    host: &HostConfig,
+    tools: &Toolset,
+) -> Result<(Adb, Option<Session>)> {
+    let session = session::read(project);
+    let listed = adb::devices(tools)?;
+    if let Some(session) = &session
+        && listed
+            .iter()
+            .any(|device| device.serial == session.serial && device.online())
+    {
+        return Ok((Adb::new(tools, &session.serial)?, Some(session.clone())));
+    }
+    let request = device::Request {
+        target_sdk: project.config.config.android.target_sdk,
+        ..device::Request::default()
+    };
+    let chosen: Chosen = device::choose(
+        ctx,
+        tools,
+        host,
+        &ctx.env,
+        &request,
+        false,
+        Path::new("/dev/null"),
+    )?;
+    Ok((Adb::new(tools, &chosen.serial)?, None))
+}
+
+// ---- logs ----------------------------------------------------------------------
+
+/// What [`collect_logs`] found.
+#[derive(Clone, Debug, Default)]
+struct Collected {
+    records: Vec<Record>,
+    selected: Vec<(String, Record)>,
+    logs: Option<PathBuf>,
+}
+
+fn query(adb: &Adb, mark: &str, buffers: &[&str]) -> Option<String> {
+    let mut args: Vec<String> = vec!["logcat".into(), "-d".into()];
+    for buffer in buffers {
+        args.push("-b".into());
+        args.push((*buffer).to_string());
+    }
+    args.extend([
+        "-v".into(),
+        "threadtime,epoch".into(),
+        "-T".into(),
+        mark.to_string(),
+    ]);
+    let outcome = adb::quick(adb.cmd(&args), Duration::from_secs(60))?;
+    outcome.success().then(|| outcome.stdout_text())
+}
+
+/// Writes `logcat.txt` (raw), `logs.ndjson` and `app.log` (the app's
+/// records) into the run directory.
+fn collect_logs(
+    ctx: &Ctx,
+    adb: &Adb,
+    dir: &Path,
+    app_id: &str,
+    mark: &str,
+    pids: &BTreeSet<u32>,
+) -> Collected {
+    let Some(text) = query(adb, mark, &["main", "system", "crash"]) else {
+        return Collected::default();
+    };
+    let raw = dir.join("logcat.txt");
+    let _ = std::fs::write(&raw, &text);
+    let records = logcat::parse(&text);
+    let mut pids = pids.clone();
+    // ICM_EVENT start names the app's pid even when pidof missed it.
+    for record in &records {
+        if record.tag == "ICM_EVENT" {
+            let _ = pids.insert(record.pid);
+        }
+    }
+    let selected: Vec<(String, Record)> = logcat::select(&records, app_id, &pids)
+        .into_iter()
+        .map(|(source, record)| (source.to_string(), record.clone()))
+        .collect();
+    let (logs, app_log) = write_records(dir, &selected);
+    if let Some(path) = &logs {
+        ctx.rep.artifact("logs", path);
+    }
+    if let Some(path) = &app_log {
+        ctx.rep.artifact("app_log", path);
+    }
+    ctx.rep.artifact("logcat", &raw);
+    Collected {
+        records,
+        selected,
+        logs,
+    }
+}
+
+fn write_records(dir: &Path, selected: &[(String, Record)]) -> (Option<PathBuf>, Option<PathBuf>) {
+    let ndjson: String = selected
+        .iter()
+        .map(|(source, record)| format!("{}\n", record.to_json(source)))
+        .collect();
+    let readable: String = selected
+        .iter()
+        .map(|(_, record)| format!("{}\n", record.line()))
+        .collect();
+    let logs = dir.join("logs.ndjson");
+    let app_log = dir.join("app.log");
+    (
+        std::fs::write(&logs, ndjson).ok().map(|()| logs),
+        std::fs::write(&app_log, readable).ok().map(|()| app_log),
+    )
+}
+
+/// Adds the logs, a panic's location and the failure signatures to a run
+/// failure.
+fn attach_evidence(error: &mut IcmError, collected: &Collected, project: &Project) {
+    let pids: BTreeSet<u32> = collected
+        .selected
+        .iter()
+        .filter(|(source, _)| source == "app")
+        .map(|(_, record)| record.pid)
+        .collect();
+    let app_records: Vec<Record> = collected
+        .selected
+        .iter()
+        .map(|(_, record)| record.clone())
+        .collect();
+
+    let panic = logcat::panic_of(&collected.records, &pids);
+    let app_id = &project.config.config.app.id;
+    if error.id == CheckId::RunNotReady.id()
+        && let Some(anr) = app_records
+            .iter()
+            .find(|record| record.msg.starts_with(&format!("ANR in {app_id}")))
+    {
+        let mut anr_error = IcmError::new(
+            CheckId::RunAnr,
+            format!("{}: {}", error.detail, anr.msg.trim()),
+        );
+        anr_error.evidence = std::mem::take(&mut error.evidence);
+        *error = anr_error;
+    }
+    if error.id == CheckId::RunAppDied.id()
+        && let Some((message, location)) = &panic
+    {
+        let mut panicked = IcmError::new(
+            CheckId::RunAppPanicked,
+            match location {
+                Some(location) if !message.contains(location.as_str()) => {
+                    format!("panicked at {location}: {message}")
+                }
+                _ => message.clone(),
+            },
+        );
+        panicked.evidence = std::mem::take(&mut error.evidence);
+        *error = panicked;
+    }
+
+    if let Some(logs) = &collected.logs {
+        // The panic line when there is one (what follows it is the abort),
+        // else the last error.
+        let panic_line = app_records.iter().find(|record| {
+            record.msg.contains("panicked at")
+                || logcat::event(record).is_some_and(|event| logcat::kind(&event) == "panic")
+        });
+        let excerpt = panic_line
+            .or_else(|| {
+                app_records
+                    .iter()
+                    .rev()
+                    .find(|record| record.priority == 'E' || record.priority == 'F')
+            })
+            .or(app_records.last())
+            .map(Record::line)
+            .unwrap_or_default();
+        error
+            .evidence
+            .push(Evidence::file(logs).with_excerpt(excerpt));
+    }
+    let lib = project.lib_name().unwrap_or_default();
+    for cause in logcat::likely_causes(&app_records, &lib) {
+        // A panic aborts the process: the SIGABRT is its consequence.
+        if panic.is_some() && cause.contains("Fatal signal 6") {
+            continue;
+        }
+        error.likely_causes.push(cause);
+    }
+    if error.fix.commands.is_empty() {
+        error
+            .fix
+            .commands
+            .push("icm logs android --level warn".to_string());
+    }
+}
+
+fn source_matches(filter: LogSource, source: &str) -> bool {
+    match filter {
+        LogSource::All => true,
+        LogSource::App => source == "app",
+        LogSource::System => source == "system",
+        LogSource::Crash => source == "crash",
+    }
+}
+
+/// `icm logs android`: re-queries logcat from the launch mark (or
+/// `--since <dur>` ago) on the session's device.
+pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
+    let (project, host, tools) = setup(ctx)?;
+    let ctx: &Ctx = ctx;
+    let (adb, session) = session_device(ctx, &project, &host, &tools)?;
+    let app_id = project.config.config.app.id.clone();
+
+    let mark = if args.since == "launch" {
+        session
+            .as_ref()
+            .filter(|session| session.serial == adb.serial)
+            .and_then(|session| session.log_mark.clone())
+            .ok_or_else(|| {
+                IcmError::new(
+                    CheckId::RunNoSession,
+                    format!(
+                        "no `icm run android` session on {}, so there is no launch mark",
+                        adb.serial
+                    ),
+                )
+                .fix_commands(["icm run android", "icm logs android --since 10m"])
+            })?
+    } else {
+        let ago = crate::time::parse_duration(&args.since).map_err(|error| {
+            IcmError::new(
+                CheckId::UsageBadArgs,
+                format!(
+                    "--since {}: {error} (use `launch` or a duration like 10m)",
+                    args.since
+                ),
+            )
+        })?;
+        let now: f64 = adb
+            .epoch()
+            .and_then(|epoch| epoch.parse().ok())
+            .ok_or_else(|| {
+                IcmError::new(
+                    CheckId::AndroidDeviceNone,
+                    format!("{} does not answer `date`", adb.serial),
+                )
+            })?;
+        format!("{:.3}", (now - ago.as_secs_f64()).max(0.0))
+    };
+    ctx.rep.set("device", json!({"serial": adb.serial}));
+    ctx.rep.set("since", json!(mark));
+
+    let mut pids: BTreeSet<u32> = adb.pids(&app_id).into_iter().collect();
+    if let Some(pid) = session.as_ref().and_then(|s| s.pid) {
+        let _ = pids.insert(pid);
+    }
+
+    let dir = run_dir(ctx, &project);
+    let text = query(&adb, &mark, &["main", "system", "crash"]).ok_or_else(|| {
+        IcmError::new(
+            CheckId::ToolFailed,
+            format!("adb logcat failed on {}", adb.serial),
+        )
+    })?;
+    let raw = dir.join("logcat.txt");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&raw, &text);
+    ctx.rep.artifact("logcat", &raw);
+
+    if args.raw {
+        ctx.rep.content(&text);
+        ctx.rep.summary(format!(
+            "{} lines of logcat since {mark}",
+            text.lines().count()
+        ));
+        return Ok(());
+    }
+
+    let records = logcat::parse(&text);
+    for record in &records {
+        if record.tag == "ICM_EVENT" {
+            let _ = pids.insert(record.pid);
+        }
+    }
+    let grep = args.grep.clone();
+    let wanted = |source: &str, record: &Record| {
+        source_matches(args.source, source)
+            && logcat::at_least(record, args.level)
+            && grep.as_ref().is_none_or(|needle| {
+                record.msg.contains(needle.as_str()) || record.tag.contains(needle.as_str())
+            })
+    };
+    let mut selected: Vec<(String, Record)> = logcat::select(&records, &app_id, &pids)
+        .into_iter()
+        .filter(|(source, record)| wanted(source, record))
+        .map(|(source, record)| (source.to_string(), record.clone()))
+        .collect();
+    let total = selected.len();
+    if selected.len() > args.tail {
+        selected.drain(..selected.len() - args.tail);
+    }
+    let (logs, app_log) = write_records(&dir, &selected);
+    if let Some(path) = logs {
+        ctx.rep.artifact("logs", &path);
+    }
+    if let Some(path) = app_log {
+        ctx.rep.artifact("app_log", &path);
+    }
+    ctx.rep.set(
+        "records",
+        Value::Array(
+            selected
+                .iter()
+                .map(|(source, record)| record.to_json(source))
+                .collect(),
+        ),
+    );
+    let text: String = selected
+        .iter()
+        .map(|(_, record)| format!("{}\n", record.line()))
+        .collect();
+    if !text.is_empty() {
+        ctx.rep.content(text);
+    }
+    ctx.rep.summary(format!(
+        "{} of {total} record(s) from {} since {mark}",
+        selected.len(),
+        adb.serial
+    ));
+
+    if args.follow {
+        follow(ctx, &adb, &app_id, &mark, pids, false, &wanted)?;
+    }
+    Ok(())
+}
+
+/// Streams the app's new records until the app exits (`until_exit`),
+/// Ctrl-C or `--timeout`. In JSON mode each record is a `log` event.
+fn follow(
+    ctx: &Ctx,
+    adb: &Adb,
+    app_id: &str,
+    mark: &str,
+    mut pids: BTreeSet<u32>,
+    until_exit: bool,
+    wanted: &dyn Fn(&str, &Record) -> bool,
+) -> Result<()> {
+    type Key = (String, u32, u32, String);
+    let key = |record: &Record| -> Key {
+        (
+            record.ts.clone(),
+            record.pid,
+            record.tid,
+            record.msg.clone(),
+        )
+    };
+    let mut since = mark.to_string();
+    let mut seen: BTreeSet<Key> = BTreeSet::new();
+    // Skip what was already shown.
+    if let Some(text) = query(adb, &since, &["main", "system", "crash"]) {
+        for record in logcat::parse(&text) {
+            since = record.ts.clone();
+            let _ = seen.insert(key(&record));
+        }
+    }
+    let deadline = ctx.deadline();
+    loop {
+        if crate::signals::pending().is_some() || deadline.is_some_and(|d| Instant::now() >= d) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(1000));
+        let alive = adb.pids(app_id);
+        pids.extend(alive.iter().copied());
+        if let Some(text) = query(adb, &since, &["main", "system", "crash"]) {
+            let records = logcat::parse(&text);
+            // `-T <since>` repeats the records at `since`; older keys are
+            // no longer needed.
+            let floor: f64 = since.parse().unwrap_or(0.0);
+            seen.retain(|(ts, ..)| ts.parse::<f64>().unwrap_or(0.0) >= floor);
+            for (source, record) in logcat::select(&records, app_id, &pids) {
+                if !seen.insert(key(record)) || !wanted(source, record) {
+                    continue;
+                }
+                let mut event = record.to_json(source);
+                event["type"] = json!("log");
+                if ctx.rep.mode().json {
+                    ctx.rep.emit(event);
+                } else {
+                    ctx.rep.content(record.line());
+                }
+            }
+            if let Some(last) = records.last() {
+                since = last.ts.clone();
+            }
+        }
+        if until_exit && alive.is_empty() {
+            ctx.rep.progress(format!("{app_id} exited"));
+            return Ok(());
+        }
+    }
+}
+
+// ---- input ---------------------------------------------------------------------
+
+/// The geometry input coordinates refer to: the last screenshot's (what
+/// the agent looked at), else the device's current display.
+fn geometry(adb: &Adb, session: Option<&Session>) -> Result<Screen> {
+    if let Some(geometry) = session.and_then(|session| session.screen) {
+        return Ok(geometry.screen());
+    }
+    let displays = adb
+        .shell_text("dumpsys window displays", Duration::from_secs(20))
+        .unwrap_or_default();
+    let wm_size = adb
+        .shell_text("wm size", Duration::from_secs(15))
+        .unwrap_or_default();
+    let px = adb::parse_display_size(&displays, &wm_size).ok_or_else(|| {
+        IcmError::new(
+            CheckId::ToolFailed,
+            format!("cannot read {}'s display size", adb.serial),
+        )
+    })?;
+    let scale = adb
+        .shell_text("wm density", Duration::from_secs(15))
+        .and_then(|text| adb::parse_density(&text))
+        .unwrap_or(1.0);
+    let mut screen = Screen::new(px, scale);
+    screen.preview = preview_size(px);
+    Ok(screen)
+}
+
+fn keycode(key: Key) -> &'static str {
+    match key {
+        Key::Back => "KEYCODE_BACK",
+        Key::Home => "KEYCODE_HOME",
+        Key::Enter => "KEYCODE_ENTER",
+        Key::Tab => "KEYCODE_TAB",
+        Key::Escape => "KEYCODE_ESCAPE",
+    }
+}
+
+fn space_name(space: Space) -> &'static str {
+    match space {
+        Space::Preview => "preview",
+        Space::Px => "px",
+        Space::Pt => "pt",
+    }
+}
+
+/// `icm input android …`: taps and swipes in one coordinate space
+/// (preview pixels by default, Appendix C item 25), text, keys and the
+/// device-state helpers.
+pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
+    let (project, host, tools) = setup(ctx)?;
+    let ctx: &Ctx = ctx;
+    let (adb, session) = session_device(ctx, &project, &host, &tools)?;
+    let app_id = project.config.config.app.id.clone();
+    ctx.rep.set("device", json!({"serial": adb.serial}));
+
+    let point = |screen: &Screen, x: f64, y: f64| -> Result<(i64, i64)> {
+        if !screen.contains(x, y, args.space) {
+            let (w, h) = match args.space {
+                Space::Preview => (f64::from(screen.preview.0), f64::from(screen.preview.1)),
+                Space::Px => (f64::from(screen.px.0), f64::from(screen.px.1)),
+                Space::Pt => screen.pt(),
+            };
+            return Err(IcmError::new(
+                CheckId::UsageBadArgs,
+                format!(
+                    "({x}, {y}) is outside the screen, which is {w}x{h} in {} space",
+                    space_name(args.space)
+                ),
+            ));
+        }
+        let (px, py) = screen.to_px(x, y, args.space);
+        Ok((px.round() as i64, py.round() as i64))
+    };
+
+    let (line, what): (String, Value) = match &args.action {
+        InputAction::Tap { x, y } => {
+            let screen = geometry(&adb, session.as_ref())?;
+            let (px, py) = point(&screen, *x, *y)?;
+            ctx.rep.set("screen", screen.to_json());
+            (
+                format!("input tap {px} {py}"),
+                json!({"action": "tap", "space": space_name(args.space), "at": [x, y], "px": [px, py]}),
+            )
+        }
+        InputAction::Swipe { x1, y1, x2, y2, ms } => {
+            let screen = geometry(&adb, session.as_ref())?;
+            let (ax, ay) = point(&screen, *x1, *y1)?;
+            let (bx, by) = point(&screen, *x2, *y2)?;
+            let ms = ms.unwrap_or(300);
+            ctx.rep.set("screen", screen.to_json());
+            (
+                format!("input swipe {ax} {ay} {bx} {by} {ms}"),
+                json!({"action": "swipe", "space": space_name(args.space), "from": [x1, y1], "to": [x2, y2], "px": [[ax, ay], [bx, by]], "ms": ms}),
+            )
+        }
+        InputAction::Text { text } => {
+            if !text.is_ascii() || text.chars().any(char::is_control) {
+                return Err(IcmError::new(
+                    CheckId::UsageBadArgs,
+                    "adb can type printable ASCII only",
+                ));
+            }
+            (
+                format!("input text {}", adb::input_text_arg(text)),
+                json!({"action": "text", "text": text}),
+            )
+        }
+        InputAction::Key { key } => (
+            format!("input keyevent {}", keycode(*key)),
+            json!({"action": "key", "key": keycode(*key)}),
+        ),
+        InputAction::Appearance { mode } => {
+            let night = if *mode == Theme::Dark { "yes" } else { "no" };
+            (
+                format!("cmd uimode night {night}"),
+                json!({"action": "appearance", "night": night}),
+            )
+        }
+        InputAction::Rotate { orientation } => {
+            let rotation = if *orientation == Rotation::Landscape {
+                1
+            } else {
+                0
+            };
+            (
+                format!(
+                    "settings put system accelerometer_rotation 0 && settings put system user_rotation {rotation}"
+                ),
+                json!({"action": "rotate", "user_rotation": rotation}),
+            )
+        }
+        InputAction::FontScale { scale } => {
+            if !(0.5..=3.0).contains(scale) {
+                return Err(IcmError::new(
+                    CheckId::UsageBadArgs,
+                    format!("font scale {scale} is outside 0.5 to 3.0"),
+                ));
+            }
+            (
+                format!("settings put system font_scale {scale}"),
+                json!({"action": "font-scale", "scale": scale}),
+            )
+        }
+        InputAction::Background => (
+            "input keyevent KEYCODE_HOME".to_string(),
+            json!({"action": "background"}),
+        ),
+        InputAction::Foreground => (
+            format!(
+                "am start -n {}",
+                adb::quote(&format!("{app_id}/{ACTIVITY}"))
+            ),
+            json!({"action": "foreground"}),
+        ),
+    };
+
+    let outcome = ctx.step(
+        "adb.input",
+        &adb.shell(&line).timeout(Duration::from_secs(30)),
+    )?;
+    let text = format!("{}{}", outcome.stdout_text(), outcome.stderr_text());
+    if !outcome.success() || text.contains("Exception") || text.contains("Error:") {
+        let mut error = ctx.step_failure("adb.input", CheckId::ToolFailed, &outcome);
+        if outcome.success() {
+            error.detail = format!("`{line}` failed: {}", text.trim());
+        }
+        return Err(error);
+    }
+    ctx.rep.set("input", what);
+    ctx.rep.summary(format!("{line} on {}", adb.serial));
+    ctx.rep.next("icm shot android", "see the result");
+    Ok(())
+}
+
+// ---- stop ----------------------------------------------------------------------
+
+/// `icm stop android [--shutdown]`: force-stops the app; with
+/// `--shutdown`, also the emulator icm booted for this project (never an
+/// AVD outside icm's `icm-` names, never one another project booted).
+pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
+    let (project, host, tools) = setup(ctx)?;
+    let ctx: &Ctx = ctx;
+    let app_id = project.config.config.app.id.clone();
+    let session = session::read(&project);
+    let listed = adb::devices(&tools)?;
+    let online = |serial: &str| {
+        listed
+            .iter()
+            .any(|device| device.serial == serial && device.online())
+    };
+    let mut stopped: Vec<Value> = Vec::new();
+
+    if let Some(session) = &session
+        && online(&session.serial)
+    {
+        let adb = Adb::new(&tools, &session.serial)?;
+        let outcome = ctx.step(
+            "adb.force_stop",
+            &adb.shell(&format!("am force-stop {}", adb::quote(&app_id)))
+                .timeout(Duration::from_secs(30)),
+        )?;
+        if !outcome.success() {
+            return Err(ctx.step_failure("adb.force_stop", CheckId::ToolFailed, &outcome));
+        }
+        stopped.push(json!({"app": app_id, "serial": session.serial}));
+    }
+
+    if args.shutdown {
+        let mut targets: Vec<(String, Option<u32>)> = Vec::new();
+        if let Some(session) = &session
+            && online(&session.serial)
+            && (session.booted_by_icm || session.avd.as_deref().is_some_and(avd::is_managed))
+        {
+            targets.push((session.serial.clone(), session.emulator_pid));
+        }
+        let default = device::default_avd(&host, project.config.config.android.target_sdk);
+        if avd::is_managed(&default) {
+            for (serial, name) in device::running_emulators(&tools, &listed) {
+                if name.as_deref() == Some(default.as_str())
+                    && !targets.iter().any(|(s, _)| *s == serial)
+                {
+                    targets.push((serial, None));
+                }
+            }
+        }
+        for (serial, pid) in targets {
+            ctx.rep.progress(format!("shutting down {serial}"));
+            avd::shutdown(&tools, &serial, pid)?;
+            stopped.push(json!({"emulator": serial}));
+        }
+    }
+
+    session::remove(&project);
+    ctx.rep.summary(if stopped.is_empty() {
+        "nothing to stop on Android".to_string()
+    } else {
+        format!("stopped {} on Android", stopped.len())
+    });
+    ctx.rep.set("stopped", Value::Array(stopped));
+    Ok(())
+}
+
+// ---- devices -------------------------------------------------------------------
+
+/// `icm devices android`: online devices and the AVDs.
+pub fn devices(ctx: &mut Ctx) -> Result<()> {
+    let host = ctx.host()?.clone();
+    let tools = Toolset::discover(&host, &ctx.env)?;
+    let target_sdk = ctx
+        .try_project()
+        .map_or(36, |project| project.config.config.android.target_sdk);
+    let ctx: &Ctx = ctx;
+    let listed = adb::devices(&tools)?;
+    let emulators = device::running_emulators(&tools, &listed);
+    let mut lines = String::new();
+
+    let devices: Vec<Value> = listed
+        .iter()
+        .map(|device| {
+            let avd = emulators
+                .iter()
+                .find(|(serial, _)| *serial == device.serial)
+                .and_then(|(_, avd)| avd.clone());
+            let abi = if device.online() {
+                Adb::new(&tools, &device.serial)
+                    .ok()
+                    .and_then(|adb| adb.getprop("ro.product.cpu.abi"))
+            } else {
+                None
+            };
+            lines.push_str(&format!(
+                "{:16} {:12} {:12} {}\n",
+                device.serial,
+                device.state,
+                abi.clone().unwrap_or_default(),
+                avd.clone().unwrap_or_default()
+            ));
+            json!({
+                "serial": device.serial,
+                "state": device.state,
+                "kind": if device.is_emulator() { "emulator" } else { "device" },
+                "avd": avd,
+                "abi": abi,
+                "model": device.props.get("model"),
+            })
+        })
+        .collect();
+
+    let default = device::default_avd(&host, target_sdk);
+    let avds: Vec<Value> = avd::list(&ctx.env)
+        .into_iter()
+        .map(|name| {
+            let running = emulators
+                .iter()
+                .find(|(_, avd)| avd.as_deref() == Some(name.as_str()))
+                .map(|(serial, _)| serial.clone());
+            lines.push_str(&format!(
+                "avd {name}{}{}\n",
+                if name == default { " (icm's)" } else { "" },
+                running
+                    .as_ref()
+                    .map(|serial| format!(" running as {serial}"))
+                    .unwrap_or_default()
+            ));
+            json!({
+                "name": name,
+                "abi": avd::abi(&ctx.env, &name).map(Abi::as_str),
+                "managed": avd::is_managed(&name),
+                "default": name == default,
+                "running": running,
+            })
+        })
+        .collect();
+
+    ctx.rep.set("devices", Value::Array(devices));
+    ctx.rep.set("avds", Value::Array(avds));
+    ctx.rep.set("default_avd", json!(default));
+    ctx.rep.content(lines);
+    Ok(())
+}
+
+// ---- doctor --------------------------------------------------------------------
+
+/// The Android part of `icm doctor`: one check per requirement. With
+/// `fix`, creates the managed AVD and the debug keystore (local,
+/// idempotent); with `fix` and `--yes`, also installs missing SDK
+/// packages and Rust targets. Licences are never accepted for the owner.
+pub fn doctor_checks(ctx: &mut Ctx, fix: bool) -> Vec<Check> {
+    let mut checks = Vec::new();
+    let host = match ctx.host() {
+        Ok(host) => host.clone(),
+        Err(error) => return vec![Check::from_error(error, Status::Fail)],
+    };
+    let project = ctx.try_project().cloned();
+    let yes = ctx.global.yes;
+    let ctx: &Ctx = ctx;
+    let target_sdk = project
+        .as_ref()
+        .map_or(36, |p| p.config.config.android.target_sdk);
+    let abis: Vec<Abi> = project.as_ref().map_or_else(
+        || vec![avd::host_abi()],
+        |p| p.config.config.android.abis.clone(),
+    );
+
+    let tools = match Toolset::discover(&host, &ctx.env) {
+        Ok(tools) => tools,
+        Err(error) => return vec![Check::from_error(error, Status::Fail)],
+    };
+    checks.push(Check::pass(
+        CheckId::EnvAndroidSdkMissing,
+        format!(
+            "Android SDK at {} ({})",
+            tools.sdk.root.display(),
+            tools.sdk.source
+        ),
+    ));
+
+    match &tools.jdk {
+        Ok(jdk) => checks.push(Check::pass(
+            CheckId::EnvJdkMissing,
+            format!(
+                "JDK {} at {} ({}); passed to Android tools as JAVA_HOME",
+                jdk.version,
+                jdk.home.display(),
+                jdk.source
+            ),
+        )),
+        Err(error) => checks.push(Check::from_error(error.clone(), Status::Fail)),
+    }
+
+    let licensed = tools
+        .sdk
+        .root
+        .join("licenses")
+        .join("android-sdk-license")
+        .is_file();
+    let install = |package: String, what: &str, checks: &mut Vec<Check>| {
+        if !fix {
+            checks.push(
+                Check::fail(
+                    CheckId::EnvAndroidPackageMissing,
+                    format!("{what} is not installed"),
+                )
+                .fix(
+                    "Run `icm doctor android --fix --yes`.",
+                    &["icm doctor android --fix --yes"],
+                ),
+            );
+            return;
+        }
+        if !yes {
+            checks.push(Check::from_error(
+                IcmError::new(
+                    CheckId::EnvConsentRequired,
+                    format!("installing {what} ({package}) downloads; rerun with --yes"),
+                )
+                .fix_commands(["icm doctor android --fix --yes"]),
+                Status::Fail,
+            ));
+            return;
+        }
+        if !licensed {
+            checks.push(Check::from_error(
+                IcmError::new(CheckId::EnvLicensesNotAccepted, format!("the Android SDK licences are not accepted, so {package} cannot be installed"))
+                    .fix_commands(["sdkmanager --licenses"]),
+                Status::Fail,
+            ));
+            return;
+        }
+        let result = tools.sdkmanager().and_then(|cmd| {
+            let cmd = cmd
+                .args(["--install", &package])
+                .timeout(Duration::from_secs(1800));
+            let outcome = ctx.step("sdkmanager.install", &cmd)?;
+            if outcome.success() {
+                Ok(())
+            } else {
+                Err(ctx.step_failure(
+                    "sdkmanager.install",
+                    CheckId::EnvAndroidPackageMissing,
+                    &outcome,
+                ))
+            }
+        });
+        match result {
+            Ok(()) => checks.push(Check::pass(
+                CheckId::EnvAndroidPackageMissing,
+                format!("installed {package}"),
+            )),
+            Err(error) => checks.push(Check::from_error(error, Status::Fail)),
+        }
+    };
+
+    if tools.adb().is_ok() {
+        checks.push(Check::pass(
+            CheckId::EnvAndroidPackageMissing,
+            "platform-tools (adb)",
+        ));
+    } else {
+        install("platform-tools".into(), "platform-tools (adb)", &mut checks);
+    }
+    if tools.emulator().is_ok() {
+        checks.push(Check::pass(
+            CheckId::EnvAndroidPackageMissing,
+            "the emulator",
+        ));
+    } else {
+        install("emulator".into(), "the emulator", &mut checks);
+    }
+    match tools.build_tools() {
+        Ok((version, _)) => checks.push(Check::pass(
+            CheckId::EnvAndroidPackageMissing,
+            format!("build-tools {version}"),
+        )),
+        Err(_) => install(
+            BUILD_TOOLS_PACKAGE.into(),
+            "build-tools 35 or newer",
+            &mut checks,
+        ),
+    }
+    if tools.platform_jar(target_sdk).is_ok() {
+        checks.push(Check::pass(
+            CheckId::EnvAndroidPackageMissing,
+            format!("platforms;android-{target_sdk}"),
+        ));
+    } else {
+        install(
+            format!("platforms;android-{target_sdk}"),
+            &format!("the platform android-{target_sdk}"),
+            &mut checks,
+        );
+    }
+    match &tools.ndk {
+        Ok(ndk) => checks.push(Check::pass(
+            CheckId::EnvNdkTooOld,
+            format!(
+                "NDK {} at {} ({})",
+                ndk.version,
+                ndk.root.display(),
+                ndk.source
+            ),
+        )),
+        Err(_) => install(NDK_PACKAGE.into(), "an NDK r28 or newer", &mut checks),
+    }
+    let abi = avd::host_abi();
+    let image = avd::find_image(&tools.sdk, target_sdk, abi);
+    match &image {
+        Some(image) => checks.push(Check::pass(
+            CheckId::EnvAndroidPackageMissing,
+            format!("system image {}", image.package),
+        )),
+        None => install(
+            avd::image_package(target_sdk, abi),
+            &format!("the {} system image for android-{target_sdk}", abi.as_str()),
+            &mut checks,
+        ),
+    }
+
+    // The managed AVD and the debug keystore (local fixes).
+    let name = device::default_avd(&host, target_sdk);
+    if avd::list(&ctx.env).contains(&name) {
+        checks.push(Check::pass(
+            CheckId::AndroidDeviceNone,
+            format!("the AVD {name} exists"),
+        ));
+    } else if !avd::is_managed(&name) {
+        checks.push(Check::fail(
+            CheckId::AndroidDeviceNone,
+            format!("host.toml names the AVD {name}, which does not exist"),
+        ));
+    } else if fix {
+        let image = avd::find_image(&tools.sdk, target_sdk, abi);
+        match image.map(|image| avd::create(ctx, &tools, &name, &image)) {
+            Some(Ok(())) => checks.push(Check::pass(
+                CheckId::AndroidDeviceNone,
+                format!("created the AVD {name}"),
+            )),
+            Some(Err(error)) => checks.push(Check::from_error(error, Status::Fail)),
+            None => checks.push(Check::fail(
+                CheckId::EnvAndroidPackageMissing,
+                format!("cannot create {name} without its system image"),
+            )),
+        }
+    } else {
+        checks.push(
+            Check::fail(
+                CheckId::AndroidDeviceNone,
+                format!(
+                    "the managed AVD {name} does not exist yet (`icm run android` also creates it)"
+                ),
+            )
+            .fix(
+                "Run `icm doctor android --fix`.",
+                &["icm doctor android --fix"],
+            ),
+        );
+        if let Some(last) = checks.last_mut() {
+            last.error.fix.by = By::Doctor;
+            last.error.exit = crate::exit::Exit::Environment;
+        }
+    }
+
+    let keystore = super::debug_keystore();
+    if keystore.is_file() {
+        checks.push(Check::pass(
+            CheckId::AndroidKeystoreMissing,
+            format!("debug keystore {}", crate::paths::display(&keystore)),
+        ));
+    } else if fix && tools.jdk.is_ok() {
+        match apk::ensure_debug_keystore(ctx, &tools) {
+            Ok(path) => checks.push(Check::pass(
+                CheckId::AndroidKeystoreMissing,
+                format!(
+                    "created the debug keystore {}",
+                    crate::paths::display(&path)
+                ),
+            )),
+            Err(error) => checks.push(Check::from_error(error, Status::Fail)),
+        }
+    } else {
+        checks.push(Check::info(
+            CheckId::AndroidKeystoreMissing,
+            format!(
+                "the debug keystore {} is created on the first build",
+                crate::paths::display(&keystore)
+            ),
+        ));
+    }
+
+    // Rust targets of the project's toolchain (Appendix C item 8).
+    let dir = project.as_ref().map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        |p| p.dir().to_path_buf(),
+    );
+    match crate::toolchain::active(&dir) {
+        Ok(toolchain) => {
+            let targets: Vec<String> = abis.iter().map(|abi| abi.triple().to_string()).collect();
+            for check in crate::toolchain::check_targets(&toolchain, &targets) {
+                if check.failed() && fix && yes {
+                    let target = targets
+                        .iter()
+                        .find(|t| check.error.detail.contains(t.as_str()))
+                        .cloned();
+                    if let Some(target) = target {
+                        let mut cmd = crate::process::Cmd::tool("rustup").args(["target", "add"]);
+                        if let Some(name) = &toolchain.name {
+                            cmd = cmd.args(["--toolchain", name]);
+                        }
+                        let cmd = cmd.arg(&target).timeout(Duration::from_secs(900));
+                        match ctx.step("rustup.target_add", &cmd) {
+                            Ok(outcome) if outcome.success() => {
+                                checks.push(Check::pass(
+                                    CheckId::EnvRustTargetMissing,
+                                    format!("installed {target}"),
+                                ));
+                                continue;
+                            }
+                            Ok(outcome) => {
+                                checks.push(Check::from_error(
+                                    ctx.step_failure(
+                                        "rustup.target_add",
+                                        CheckId::EnvRustTargetMissing,
+                                        &outcome,
+                                    ),
+                                    Status::Fail,
+                                ));
+                                continue;
+                            }
+                            Err(error) => {
+                                checks.push(Check::from_error(error, Status::Fail));
+                                continue;
+                            }
+                        }
+                    }
+                }
+                checks.push(check);
+            }
+        }
+        Err(error) => checks.push(Check::from_error(error, Status::Fail)),
+    }
+    checks
+}
+
+/// `icm doctor android` on its own: the checks, and doctor's exit rule (4
+/// while anything `doctor`/`doctor-yes` can fix remains, else 9 while
+/// owner items remain, else 0).
+pub fn doctor(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
+    let checks = doctor_checks(ctx, args.fix);
+    let mut fixable: Option<IcmError> = None;
+    let mut owner: Option<IcmError> = None;
+    for check in checks {
+        if check.failed() {
+            let error = check.error.clone();
+            if error.fix.by == By::Owner || error.exit == crate::exit::Exit::NeedsOwner {
+                let _ = owner.get_or_insert(error);
+            } else {
+                let _ = fixable.get_or_insert(error);
+            }
+        }
+        // A failure reported here and returned below appears once, as
+        // errors[0].
+        ctx.rep.check(check);
+    }
+    match (fixable, owner) {
+        (Some(error), _) => Err(error.exit(crate::exit::Exit::Environment)),
+        (None, Some(error)) => Err(error.exit(crate::exit::Exit::NeedsOwner)),
+        (None, None) => Ok(()),
+    }
+}

@@ -477,6 +477,12 @@ catalogue! {
     AndroidEmulatorPortsBusy = "android.emulator.ports_busy", Device, Fail, Agent,
         "Every emulator port icm may use is busy",
         "Stop an emulator (`icm stop android --shutdown`) or set `android.emulator_ports` in host.toml.";
+    AndroidEmulatorFailed = "android.emulator.failed", Device, Fail, Agent,
+        "The emulator exited while booting",
+        "Read the emulator log in the evidence (disk space, memory, a broken AVD), then rerun; `icm devices android` lists the AVDs.";
+    AndroidLaunchFailed = "android.launch_failed", Device, Fail, Agent,
+        "am start could not launch the app's activity",
+        "Read the step log; rebuild with `icm run android` so the installed manifest declares the activity.";
     AndroidInstallFailed = "android.install.failed", Device, Fail, Agent,
         "adb install failed",
         "Read the step log for the INSTALL_FAILED_* reason.";

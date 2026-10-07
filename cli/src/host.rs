@@ -56,6 +56,10 @@ pub struct HostAndroid {
     /// The emulator console ports icm may use (even numbers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emulator_ports: Option<Vec<u16>>,
+    /// The `-gpu` mode of headless emulators icm boots (default
+    /// `swiftshader_indirect`; `host` uses the host GPU).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emulator_gpu: Option<String>,
 }
 
 /// The default emulator ports (Appendix C item 10: configurable).

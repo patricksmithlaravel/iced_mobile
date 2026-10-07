@@ -12,6 +12,7 @@
 #[cfg(not(unix))]
 compile_error!("icm supports macOS and Linux hosts in this phase (Windows hosts come later)");
 
+pub mod android;
 pub mod buildinfo;
 pub mod cargo;
 pub mod catalogue;

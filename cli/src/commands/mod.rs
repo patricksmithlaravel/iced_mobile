@@ -19,6 +19,7 @@ use crate::platform::{desktop, ios_sim};
 
 /// Runs a command.
 pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
+    let android = Some(Platform::Android);
     match command {
         Command::Explain(args) => explain::run(ctx, &args),
         Command::Wait(args) => wait::run(ctx, &args),
@@ -55,6 +56,24 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
         }
         Command::Input(args) if args.platform == Platform::IosSim => {
             ios_sim::input::input(ctx, &args)
+        }
+        // android (design §10.4); `icm doctor android` is the generic doctor
+        Command::Build(args) if args.platform == android && !args.all => {
+            crate::android::build(ctx, &args)
+        }
+        Command::Run(args) if args.platform == Platform::Android => crate::android::run(ctx, &args),
+        Command::Stop(args) if args.platform == android && !args.all => {
+            crate::android::stop(ctx, &args)
+        }
+        Command::Devices(args) if args.platform == android => crate::android::devices(ctx),
+        Command::Shot(args) if args.platform == android && !args.headless => {
+            crate::android::shot(ctx, &args)
+        }
+        Command::Logs(args) if args.platform == Platform::Android => {
+            crate::android::logs(ctx, &args)
+        }
+        Command::Input(args) if args.platform == Platform::Android => {
+            crate::android::input(ctx, &args)
         }
         Command::Build(_) => not_implemented("build"),
         Command::Run(_) => not_implemented("run"),
