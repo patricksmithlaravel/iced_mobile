@@ -13,9 +13,9 @@ use std::marker::PhantomData;
 /// `Command` or [`Subscription`] and get notified of the results!
 ///
 /// Dropping a [`Runtime`] ends the futures it spawned that are still
-/// running, the next time their executor polls them. An executor that
-/// lives on (another runtime of the same process, as when Android starts a
-/// new Activity) is not left running them.
+/// running, subscriptions included, the next time their executor polls
+/// them. An executor that lives on (another runtime of the same process, as
+/// when Android starts a new Activity) is not left running them.
 ///
 /// [`Subscription`]: crate::Subscription
 #[derive(Debug)]
@@ -145,6 +145,7 @@ where
             executor,
             subscriptions,
             sender,
+            stop,
             ..
         } = self;
 
@@ -152,8 +153,11 @@ where
             subscriptions.update(recipes.into_iter(), sender.clone())
         });
 
+        // The Tracker cancels a subscription only while it waits for its
+        // stream. One blocked on sending to a full `Sender` would outlive
+        // the Runtime without the guard.
         for future in futures {
-            executor.spawn(future);
+            executor.spawn(stop.guard(future));
         }
     }
 
@@ -219,5 +223,52 @@ mod tests {
         drop(runtime);
 
         assert!(future.as_mut().poll(&mut context).is_ready());
+    }
+
+    #[test]
+    fn dropping_the_runtime_ends_a_subscription_blocked_on_its_sender() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static DROPPED: AtomicBool = AtomicBool::new(false);
+
+        struct Flag;
+
+        impl Drop for Flag {
+            fn drop(&mut self) {
+                DROPPED.store(true, Ordering::SeqCst);
+            }
+        }
+
+        // A subscription that produces on its own, as a clock does.
+        fn ticking() -> impl futures::Stream<Item = ()> {
+            futures::stream::unfold(Flag, |flag| async { Some(((), flag)) })
+        }
+
+        let executor = Spawned::default();
+
+        // Nothing reads it: the subscription's first message fills it, and
+        // the second one waits.
+        let (sender, _receiver) = mpsc::channel::<()>(0);
+        let mut runtime = Runtime::new(executor.clone(), sender);
+
+        runtime.track(subscription::into_recipes(crate::Subscription::run(
+            ticking,
+        )));
+
+        let mut future = executor
+            .0
+            .lock()
+            .expect("Lock futures")
+            .pop()
+            .expect("A spawned future");
+
+        let mut context = Context::from_waker(noop_waker_ref());
+
+        assert!(future.as_mut().poll(&mut context).is_pending());
+
+        drop(runtime);
+
+        assert!(future.as_mut().poll(&mut context).is_ready());
+        assert!(DROPPED.load(Ordering::SeqCst));
     }
 }

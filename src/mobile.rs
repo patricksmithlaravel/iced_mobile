@@ -254,9 +254,11 @@
 //! 1. [`Lifecycle::Suspended`] has come first, when the window went away
 //!    (just before, or when the app left the screen).
 //! 2. The event loop ends, and the application is dropped: its state, its
-//!    windows, its renderer and its executor, with the futures and
-//!    subscriptions still running on it. The function that runs it returns
-//!    `Ok(())`, and `mobile::activity_destroyed` says why.
+//!    windows, its renderer and its executor. The futures and subscriptions
+//!    still running on it end, a subscription stuck on sending a message
+//!    (the event loop takes none while the app is in the background) too.
+//!    The function that runs it returns `Ok(())`, and
+//!    `mobile::activity_destroyed` says why.
 //! 3. `android_main` returns, as the Activity's `onDestroy` waits for it.
 //! 4. The next Activity calls `android_main` again, on a thread of its own,
 //!    and a new application starts, from its boot function.
