@@ -98,8 +98,17 @@ pub fn install_panic_hook() {
         std::panic::set_hook(Box::new(move |info| {
             let thread = std::thread::current();
 
-            let message =
-                info.payload_as_str().unwrap_or("Box<dyn Any>").to_owned();
+            // `PanicHookInfo::payload_as_str` is newer than the
+            // workspace's rust-version (1.88): downcast by hand.
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| {
+                    payload.downcast_ref::<String>().map(String::as_str)
+                })
+                .unwrap_or("Box<dyn Any>")
+                .to_owned();
 
             let location = info.location().map(|location| {
                 format!(
