@@ -16,9 +16,11 @@
 //! emulator (`icm-` names only, never `icm-test-` ones, never a device
 //! icm did not create, and never one icm booted for another project:
 //! [`crate::platform::ios_sim::owner`], [`crate::android::session::OWNER_PROP`]).
-//! Without a session, only the one this project's runs pick is a
-//! candidate: for iOS, host.toml's pinned simulator when there is one.
-//! Stopping what is not running is not an error.
+//! For iOS, with an ios-sim session only the session's simulator is a
+//! candidate, and its own stop decides; without one, only the simulator
+//! this project's runs pick (host.toml's pinned simulator when there is
+//! one, else the managed one). Stopping what is not running is not an
+//! error.
 
 use crate::catalogue::CheckId;
 use crate::cli::{Platform, StopArgs};
@@ -56,6 +58,10 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         return Ok(());
     }
     let host = ctx.host()?.clone();
+    // With an ios-sim session (whose record outlives a stop, as state
+    // `stopped`), the session's simulator is the only candidate for
+    // `--shutdown`, and ios-sim's own stop decides about it.
+    let ios_session = crate::platform::ios_sim::session::path(&dir).is_file();
 
     let mut stopped: Vec<Value> = Vec::new();
     let mut shut_down: Vec<String> = Vec::new();
@@ -105,6 +111,9 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
 
     if args.shutdown {
         for platform in &platforms {
+            if matches!(platform, Platform::IosSim) && ios_session {
+                continue;
+            }
             shut_down.extend(shutdown_managed(ctx, &project, &host, *platform));
         }
     }
@@ -158,10 +167,22 @@ fn plan(ctx: &Ctx, dir: &Path, platforms: &[Platform], shutdown: bool) {
                 )
             },
         ));
-        if shutdown && matches!(platform, Platform::IosSim | Platform::Android) {
+        let shut = match platform {
+            Platform::IosSim if found => {
+                "shut down the session's simulator when icm manages it (icm-* names only, never icm-test-*, never one booted for another project)"
+            }
+            Platform::IosSim => {
+                "shut down the simulator this project's runs pick (host.toml's simulator_udid, else the managed one) when icm manages it (icm-* names only, never icm-test-*, never one booted for another project)"
+            }
+            Platform::Android => {
+                "shut down the icm-managed emulator (icm-* names only, never icm-test-*, never one booted for another project)"
+            }
+            _ => "",
+        };
+        if shutdown && !shut.is_empty() {
             plan.push(crate::plan::Step::internal(
                 &format!("{}.shutdown", platform.as_str()),
-                "shut down the icm-managed simulator or emulator (icm-* names only, never icm-test-*, never one booted for another project)",
+                shut,
             ));
         }
     }
@@ -315,7 +336,8 @@ fn run_quietly(ctx: &Ctx, name: &str, cmd: &Cmd) -> bool {
 }
 
 /// `--shutdown` without a session: the simulator or emulator the project's
-/// runs use, when it is running and icm may shut it down.
+/// runs use, when it is running and icm may shut it down. [`stop`] does not
+/// call it for ios-sim when the project has an ios-sim session.
 fn shutdown_managed(
     ctx: &Ctx,
     project: &Project,

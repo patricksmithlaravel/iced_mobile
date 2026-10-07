@@ -573,6 +573,68 @@ fn shutdown_without_a_session_honours_the_pinned_simulator() {
     );
 }
 
+/// With an ios-sim session, `stop --all --shutdown` considers only the
+/// session's simulator: a run on a test simulator (`--sim`) leaves icm's
+/// managed one alone, booted and untagged as it is, since another process
+/// may be running on it.
+#[test]
+fn shutdown_with_a_session_leaves_the_default_simulator() {
+    let fake = Fake::new();
+    fake.booted_pair();
+    let run = fake.result(
+        "ok",
+        &["run", "ios-sim", "--sim", "TEST-UDID", "--json", "-q"],
+    );
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(run["device"]["udid"], "TEST-UDID");
+
+    // The plan says so.
+    let plan = fake.result(
+        "ok",
+        &["stop", "--all", "--shutdown", "--dry-run", "--json", "-q"],
+    );
+    let step = plan["plan"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "ios-sim.shutdown")
+        .unwrap_or_else(|| panic!("{plan}"));
+    assert!(
+        step["display"]
+            .as_str()
+            .unwrap()
+            .contains("the session's simulator"),
+        "{step}"
+    );
+
+    let events = fake.events("ok", &["stop", "--all", "--shutdown", "--json"]);
+    let stop = events.last().unwrap();
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["shutdown"], json!([]), "{stop}");
+    let log = fake.xcrun_log();
+    assert!(log.contains("simctl terminate TEST-UDID"), "{log}");
+    assert!(!log.contains("simctl shutdown"), "{log}");
+    assert!(
+        !log.contains("simctl getenv MANAGED-UDID"),
+        "the default simulator was considered: {log}"
+    );
+    assert!(
+        checks(&events, "run.no_session")
+            .iter()
+            .any(|check| check["detail"]
+                .as_str()
+                .unwrap()
+                .contains("left icm-test-pinned running")),
+        "{events:?}"
+    );
+
+    // The record stays after a stop, so a second stop still goes by it.
+    let again = fake.result("ok", &["stop", "--all", "--shutdown", "--json", "-q"]);
+    assert_eq!(again["exit"], 0, "{again}");
+    assert_eq!(again["shutdown"], json!([]), "{again}");
+    assert!(!fake.xcrun_log().contains("simctl shutdown"));
+}
+
 /// Without a session, the managed simulator is shut down unless icm booted
 /// it for another project; then the advice names that simulator only.
 #[test]

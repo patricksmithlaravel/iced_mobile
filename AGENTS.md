@@ -210,9 +210,9 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
   changes that device's system settings.
 - Projects share the managed devices. A run that boots one marks it with the project's tag
   (`debug.icm.booted_by` on the emulator, `ICM_BOOTED_BY` in the simulator's launchd environment),
-  and `stop --shutdown` in another project leaves it running. Without a session, `stop --all
-  --shutdown` considers only the simulator the project's runs pick (host.toml's `simulator_udid`,
-  else the managed one).
+  and `stop --shutdown` in another project leaves it running. `stop --all --shutdown` considers
+  only the ios-sim session's simulator, or without a session the one the project's runs pick
+  (host.toml's `simulator_udid`, else the managed one).
 - Name any throwaway simulator or AVD you create `icm-test-*`, and delete it when done. icm creates
   or boots an `icm-test-*` device only when you name it (`--avd`), and `stop --shutdown` leaves it
   running unless icm booted it. But `icm run android` uses one, and sets it up like its own emulator (animations off, stay
