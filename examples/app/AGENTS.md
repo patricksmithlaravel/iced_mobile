@@ -5,18 +5,20 @@ test it ONLY through `icm`, and read the last JSON line of every command: it is 
 
 ## The loop
 1. `icm check --all --json -q`: compiles every platform. Fix what `errors[]` lists (file, line, message).
-2. `icm run <desktop|web|ios-sim|android> --json -q`: builds, installs, launches, waits for the first
+2. Fresh checkout or new dependencies: prewarm every build with `icm build --all --detach --json -q`,
+   then repeat `icm wait <run> --timeout 9m --json -q` until it returns the result.
+3. `icm run <desktop|web|ios-sim|android> --json -q`: builds, installs, launches, waits for the first
    frame, takes a screenshot and returns while the app keeps running. Then OPEN `artifacts.preview`
    and look at it. Every run, every time.
-3. `icm logs <platform> --level warn --json` when anything looks wrong (it re-reads the live logs).
+4. `icm logs <platform> --level warn --json` when anything looks wrong (it re-reads the live logs).
    Trust the `app` and `crash` records: the app's own output, panics and crash reports. On ios-sim,
    `--source system` adds the system log, mostly other processes' errors that merely mention the app.
-4. `icm test --json -q`: unit tests and `tests/flows/*.ice` in a headless renderer.
-5. `icm shot --headless --all-viewports --json -q`: the layout at phone and desktop sizes, no device.
-6. `icm ui --headless tree --json`: the widget tree with bounds, for writing `.ice` flows.
+5. `icm test --json -q`: unit tests and `tests/flows/*.ice` in a headless renderer.
+6. `icm shot --headless --all-viewports --json -q`: the layout at phone and desktop sizes, no device.
+7. `icm ui --headless tree --json`: the widget tree with bounds, for writing `.ice` flows.
    `icm ui --headless find "<text>" --json` gives a widget's centre; `icm ui --headless ice <file>`
    reruns one flow step by step.
-7. `icm stop --all` when done.
+8. `icm stop --all` when done.
 
 A first build can outlast your command timeout. Add `--detach`: `icm run android --detach --json -q`
 returns at once with the run id and `"status":"running"`; then repeat
