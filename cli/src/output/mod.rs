@@ -219,6 +219,7 @@ impl Reporter {
             return Ok(());
         }
         std::fs::create_dir_all(dir.join("steps"))?;
+        let _ = rundir::write_owner(dir);
         let mut events = OpenOptions::new()
             .create(true)
             .append(true)

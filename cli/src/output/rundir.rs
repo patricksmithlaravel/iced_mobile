@@ -95,8 +95,22 @@ pub fn link_latest(root: &Path, platform: &str, run_dir: &Path) -> io::Result<()
     std::fs::rename(&tmp, &link)
 }
 
-/// Removes run directories beyond the newest `keep`, never the current one
-/// and never one whose detached icm is still running.
+/// The file naming the icm that writes a run directory (`{"pid": N}`).
+pub const OWNER: &str = "owner.json";
+
+/// Records this icm as the run directory's writer, so `prune` in another
+/// icm leaves the directory alone while this one still runs.
+pub fn write_owner(dir: &Path) -> io::Result<()> {
+    write_atomic(
+        &dir.join(OWNER),
+        format!("{{\"pid\":{}}}\n", std::process::id()).as_bytes(),
+    )
+}
+
+/// Removes run directories beyond the newest `keep`. Never removes the
+/// current one, one whose icm (detached or not) is still running, or one
+/// that a session under `<root>/sessions` names (an app launched by that
+/// run may still use files there).
 pub fn prune(root: &Path, keep: usize, current: &str) -> io::Result<usize> {
     let runs = runs_dir(root);
     let Ok(read_dir) = std::fs::read_dir(&runs) else {
@@ -112,13 +126,14 @@ pub fn prune(root: &Path, keep: usize, current: &str) -> io::Result<usize> {
     ids.sort();
     ids.reverse();
 
+    let sessions = session_runs(&root.join("sessions"));
     let mut removed = 0;
     for id in ids.into_iter().skip(keep) {
-        if id == current {
+        if id == current || sessions.contains(&id) {
             continue;
         }
         let dir = runs.join(&id);
-        if detached_alive(&dir) {
+        if in_progress(&dir) {
             continue;
         }
         if std::fs::remove_dir_all(&dir).is_ok() {
@@ -126,6 +141,34 @@ pub fn prune(root: &Path, keep: usize, current: &str) -> io::Result<usize> {
         }
     }
     Ok(removed)
+}
+
+/// The runs that the session records in `sessions_dir` name (`run`).
+fn session_runs(sessions_dir: &Path) -> Vec<String> {
+    let Ok(read_dir) = std::fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+    read_dir
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter_map(|value| value.get("run")?.as_str().map(str::to_string))
+        .collect()
+}
+
+/// Whether a run has not finished and the icm writing it still runs.
+fn in_progress(dir: &Path) -> bool {
+    if dir.join("result.json").exists() {
+        return false;
+    }
+    let owner = std::fs::read_to_string(dir.join(OWNER))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.get("pid")?.as_i64())
+        .map(|pid| pid as i32);
+    detached_alive(dir) || owner.is_some_and(crate::signals::alive)
 }
 
 /// Whether a run directory belongs to a detached icm that is still running.
@@ -201,6 +244,27 @@ mod tests {
         )
         .unwrap();
 
+        // So is a foreground run whose icm still runs, and a run that a
+        // session names (its app may still write there).
+        let foreground = runs.join("20261001T000000Z-run-web-0001");
+        std::fs::remove_file(foreground.join("result.json")).unwrap();
+        write_owner(&foreground).unwrap();
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("desktop.json"),
+            r#"{"platform":"desktop","run":"20261002T000000Z-run-web-0002"}"#,
+        )
+        .unwrap();
+
+        let removed = prune(root.path(), 2, "20261003T000000Z-run-web-0003").unwrap();
+        assert_eq!(removed, 0);
+        assert!(running.exists());
+        assert!(foreground.exists());
+        assert!(runs.join("20261002T000000Z-run-web-0002").exists());
+
+        std::fs::write(foreground.join("result.json"), "{}").unwrap();
+        std::fs::remove_file(sessions.join("desktop.json")).unwrap();
         let removed = prune(root.path(), 2, "20261003T000000Z-run-web-0003").unwrap();
         assert_eq!(removed, 2);
         assert!(running.exists());

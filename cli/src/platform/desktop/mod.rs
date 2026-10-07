@@ -6,8 +6,10 @@
 //! into `target/icm/build/desktop/<profile>/`, stops this project's previous
 //! desktop app (Appendix C item 13), and starts the new one in its own
 //! session and process group with `ICM_EVENTS=1` (Appendix C item 27), its
-//! stdout and stderr going to `app.stdout` and `app.stderr` in the run
-//! directory. It is ready on `ICM_EVENT ready`; an app that sends no events
+//! stdout and stderr going to `app.stdout` and `app.stderr` in
+//! `target/icm/sessions/desktop/<run>/` (outside the run directories, so
+//! pruning never removes files the app still writes; the run directory
+//! gets a copy). It is ready on `ICM_EVENT ready`; an app that sends no events
 //! is ready when it is alive after 3 s and owns a window (`source:
 //! "probe"`). A panic, an exit or no first frame within `--wait-ready`
 //! fails the run (exit 10) and stops the app.
@@ -158,6 +160,55 @@ pub fn read_session(project: &Project) -> Option<Session> {
     read_session_file(&session_path(project))
 }
 
+/// Where a run's app writes its stdout and stderr while it runs:
+/// `target/icm/sessions/desktop/<run>/`.
+fn files_dir(project: &Project, run: &str) -> PathBuf {
+    project.sessions_dir().join(PLATFORM).join(run)
+}
+
+/// Removes the live-file directories of runs other than `keep` (their apps
+/// have been stopped; the run directories keep copies).
+fn prune_files(project: &Project, keep: &str) {
+    let Ok(read) = std::fs::read_dir(project.sessions_dir().join(PLATFORM)) else {
+        return;
+    };
+    for entry in read.flatten() {
+        if entry.file_name().to_string_lossy() != keep
+            && entry.file_type().is_ok_and(|t| t.is_dir())
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Copies the app's live stdout and stderr into its run directory.
+fn snapshot(session: &Session) {
+    for (from, name) in [
+        (&session.stdout, "app.stdout"),
+        (&session.stderr, "app.stderr"),
+    ] {
+        let to = session.run_dir.join(name);
+        if *from != to {
+            let _ = std::fs::copy(from, to);
+        }
+    }
+}
+
+/// A finished session whose live files are gone (a later run removed them)
+/// reads the copies in its run directory.
+fn with_copies(mut session: Session) -> Session {
+    for (path, name) in [
+        (&mut session.stdout, "app.stdout"),
+        (&mut session.stderr, "app.stderr"),
+    ] {
+        let copy = session.run_dir.join(name);
+        if !path.exists() && copy.exists() {
+            *path = copy;
+        }
+    }
+    session
+}
+
 fn read_session_file(path: &Path) -> Option<Session> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
@@ -166,6 +217,17 @@ fn read_session_file(path: &Path) -> Option<Session> {
 /// The newest run that launched a desktop app (its `session.json`), for
 /// logs after the app is gone. A run that failed before its launch has none.
 fn last_session(project: &Project) -> Option<Session> {
+    // The last launch's live files stay until the next launch, even when
+    // its run directory has been pruned.
+    let live = std::fs::read_dir(project.sessions_dir().join(PLATFORM))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| read_session_file(&entry.path().join("session.json")))
+        .max_by(|a, b| a.run.cmp(&b.run));
+    if live.is_some() {
+        return live;
+    }
     if let Some(session) = read_session_file(&project.latest_dir(PLATFORM).join("session.json")) {
         return Some(session);
     }
@@ -190,6 +252,11 @@ fn write_session(project: &Project, session: &Session) {
     text.push('\n');
     let _ = rundir::write_atomic(&session_path(project), text.as_bytes());
     let _ = rundir::write_atomic(&session.run_dir.join("session.json"), text.as_bytes());
+    if let Some(files) = session.stderr.parent()
+        && files != session.run_dir
+    {
+        let _ = rundir::write_atomic(&files.join("session.json"), text.as_bytes());
+    }
 }
 
 /// Removes the session file if it still records `pid` (a newer run may have
@@ -644,8 +711,12 @@ struct Launched {
     pid: i32,
     started: Instant,
     launched: String,
+    /// The live files the app writes.
     stdout: PathBuf,
     stderr: PathBuf,
+    /// The copy of stderr in the run directory, which evidence names (the
+    /// live file goes when a later run starts).
+    stderr_copy: PathBuf,
 }
 
 fn launch(
@@ -655,9 +726,14 @@ fn launch(
     run_dir: &Path,
     extra: &[(String, String)],
 ) -> Result<Launched> {
-    let stdout = run_dir.join("app.stdout");
-    let stderr = run_dir.join("app.stderr");
-    let cmd = app_cmd(project, exe, &ctx.rep.run_id(), extra);
+    let run = ctx.rep.run_id();
+    let files = files_dir(project, &run);
+    std::fs::create_dir_all(&files)
+        .map_err(|error| internal(&format!("cannot create {}", files.display()), error))?;
+    prune_files(project, &run);
+    let stdout = files.join("app.stdout");
+    let stderr = files.join("app.stderr");
+    let cmd = app_cmd(project, exe, &run, extra);
 
     ctx.rep.step_begin(
         "desktop.launch",
@@ -683,6 +759,7 @@ fn launch(
         launched,
         stdout,
         stderr,
+        stderr_copy: run_dir.join("app.stderr"),
     })
 }
 
@@ -888,8 +965,8 @@ fn panic_error(panic: &Panic, project: &Project, launched: &Launched) -> IcmErro
 
     let mut error = IcmError::new(CheckId::RunAppPanicked, detail);
     error = error.evidence(match (panic.line, &panic.excerpt) {
-        (Some(line), Some(excerpt)) => Evidence::line(&launched.stderr, line, excerpt.clone()),
-        _ => Evidence::file(&launched.stderr),
+        (Some(line), Some(excerpt)) => Evidence::line(&launched.stderr_copy, line, excerpt.clone()),
+        _ => Evidence::file(&launched.stderr_copy),
     });
 
     match panic.location.as_deref().and_then(split_location) {
@@ -935,9 +1012,9 @@ fn died_error(ended: Ended, launched: &Launched, after_ready: bool) -> IcmError 
     }
     let excerpt = tail.lines().last().unwrap_or("").to_string();
     let evidence = if excerpt.is_empty() {
-        Evidence::file(&launched.stderr)
+        Evidence::file(&launched.stderr_copy)
     } else {
-        Evidence::file(&launched.stderr).with_excerpt(excerpt)
+        Evidence::file(&launched.stderr_copy).with_excerpt(excerpt)
     };
     IcmError::new(CheckId::RunAppDied, detail)
         .evidence(evidence)
@@ -1035,7 +1112,7 @@ fn wait_ready(
                 detail.push_str(" and sent no ICM_EVENT lines (and owns no window)");
             }
             return Err(IcmError::new(CheckId::RunNotReady, detail)
-                .evidence(Evidence::file(&launched.stderr))
+                .evidence(Evidence::file(&launched.stderr_copy))
                 .fix(
                     "Read the app's output; raise --wait-ready if it is legitimately slow.",
                     &[
@@ -1465,8 +1542,10 @@ fn read_records(session: &Session) -> (Vec<Record>, [Tail; 2]) {
     (records, [stderr, stdout])
 }
 
-/// Writes `app.log` and `logs.ndjson` into the run directory.
+/// Copies the app's output into the run directory and writes `app.log`
+/// and `logs.ndjson` there.
 fn write_logs(ctx: &Ctx, session: &Session) {
+    snapshot(session);
     let (records, _) = read_records(session);
     let app_log = session.run_dir.join("app.log");
     let ndjson = session.run_dir.join("logs.ndjson");
@@ -1537,10 +1616,10 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     let (session, live) = match read_session(&project) {
         Some(session) => {
             let live = running(&session);
-            (session, live)
+            (with_copies(session), live)
         }
         None => match last_session(&project) {
-            Some(session) => (session, false),
+            Some(session) => (with_copies(session), false),
             None => {
                 return Err(no_session(
                     "no desktop app has run in this project yet, so there are no logs",
@@ -1681,8 +1760,8 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     write_session(&project, &session);
     ctx.rep
         .set("session", json!(paths::display(&session_path(&project))));
-    ctx.rep.artifact("stderr", &launched.stderr);
-    ctx.rep.artifact("stdout", &launched.stdout);
+    ctx.rep.artifact("stderr", &launched.stderr_copy);
+    ctx.rep.artifact("stdout", &run_dir.join("app.stdout"));
 
     // Until the run succeeds, a signal to icm stops the app too.
     signals::register_group(launched.pid);
@@ -1852,6 +1931,7 @@ fn attach(ctx: &Ctx, project: &Project, session: &Session, launched: &Launched) 
     remove_session(project, session.pid);
     match end {
         FollowEnd::Exited(ended) => {
+            write_logs(ctx, session);
             ctx.rep.set(
                 "process",
                 json!({"pid": session.pid, "alive": false, "exit": ended.to_json()}),
@@ -1880,6 +1960,7 @@ fn attach(ctx: &Ctx, project: &Project, session: &Session, launched: &Launched) 
         }
         FollowEnd::Signal | FollowEnd::Deadline => {
             let how = terminate(session.pid, session.pgid);
+            write_logs(ctx, session);
             ctx.rep.set(
                 "process",
                 json!({"pid": session.pid, "alive": false, "stopped": how}),
