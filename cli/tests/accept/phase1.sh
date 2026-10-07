@@ -206,6 +206,15 @@ doctor_app() {
     fixed_evidence "$ACCEPT/doctor-app.json"
 }
 
+# Once everything is in place, doctor without --fix only probes: every
+# requirement passes and nothing is fixed.
+doctor_probe() {
+    cd "$DEMO"
+    icm doctor --json -q >"$ACCEPT/doctor-probe.json" || true
+    jqe '.ok and .exit == 0 and (.fixed | length) == 0 and .checks.fail == 0' "$ACCEPT/doctor-probe.json"
+    evidence "$(/usr/bin/jq -r '.summary' "$ACCEPT/doctor-probe.json"); checks $(/usr/bin/jq -c '.checks | {pass, warn, fail, skip}' "$ACCEPT/doctor-probe.json"); fixed []"
+}
+
 check_all() {
     cd "$DEMO"
     icmd check --all >"$ACCEPT/check.json" || true
@@ -390,6 +399,19 @@ shot_platform() {
         jqe '(.warnings | map(.id) | index("desktop.shot.permission")) != null' "$out"
     fi
     evidence "$(/usr/bin/jq -r '.summary' "$out"); $(png_size "$png" | tr ' ' x) png, $(png_size "$preview" | tr ' ' x) preview; screen $(/usr/bin/jq -c '.screen' "$out"); $ACCEPT/previews/shot-$p.preview.png"
+}
+
+# Touches on the desktop and the iOS Simulator are not phase 1 (the agent
+# bridge is phase 6, AXe is cut by Appendix C item 30): exit 2
+# input.unsupported, never a silent no-op.
+input_unsupported() {
+    local p
+    cd "$DEMO"
+    for p in desktop ios-sim; do
+        icm input "$p" tap 10 10 --json -q >"$ACCEPT/input-$p-unsupported.json" || true
+        jqe '.exit == 2 and .errors[0].id == "input.unsupported"' "$ACCEPT/input-$p-unsupported.json"
+        evidence "$p: $(/usr/bin/jq -c '{exit, id: .errors[0].id, detail: .errors[0].detail}' "$ACCEPT/input-$p-unsupported.json" | cut -c1-200)"
+    done
 }
 
 # One coordinate space (Appendix C item 25): every input result reports
@@ -600,6 +622,15 @@ stop_all() {
     evidence "$(/usr/bin/jq -r '.summary' "$ACCEPT/stop.json"); ps after: $(/usr/bin/jq -r '.summary' "$ACCEPT/ps.json")"
 }
 
+# With every app stopped, `icm shot` has nothing to capture: exit 7
+# run.no_session.
+shot_no_session() {
+    cd "$DEMO"
+    icm shot desktop --json -q >"$ACCEPT/shot-none.json" || true
+    jqe '.exit == 7 and .errors[0].id == "run.no_session"' "$ACCEPT/shot-none.json"
+    evidence "$(/usr/bin/jq -c '{exit, id: .errors[0].id, detail: .errors[0].detail}' "$ACCEPT/shot-none.json")"
+}
+
 # --- negative cases ----------------------------------------------------------
 
 # An app that panics in its first view: the template, made by `icm new`, with
@@ -644,6 +675,19 @@ two_copies() {
     icm check --config "$ACCEPT/twocopies/icm.toml" --json -q >"$ACCEPT/p3.json" || true
     jqe '.exit == 3 and .errors[0].id == "deps.single_iced"' "$ACCEPT/p3.json"
     evidence "$(/usr/bin/jq -c '.errors[0] | {id, detail}' "$ACCEPT/p3.json" | cut -c1-300)"
+}
+
+# A misspelt key in icm.toml: exit 3 config.unknown_key, with the key's
+# file:line as evidence and the keys allowed there in the detail. The
+# fixture is copied, so icm writes nothing into the checkout.
+bad_config() {
+    rm -rf "$ACCEPT/badconfig"
+    cp -R "$F/badconfig" "$ACCEPT/badconfig"
+    cd "$ACCEPT"
+    icm check --config "$ACCEPT/badconfig/icm.toml" --json -q >"$ACCEPT/p5.json" || true
+    jqe '.exit == 3 and .errors[0].id == "config.unknown_key"' "$ACCEPT/p5.json"
+    jqe '.errors[0].evidence[0].line == 6 and (.errors[0].evidence[0].path | endswith("badconfig/icm.toml")) and (.errors[0].detail | test("`colour`") and test("`background`"))' "$ACCEPT/p5.json"
+    evidence "$(/usr/bin/jq -c '.errors[0] | {id, evidence: [.evidence[] | "\(.path):\(.line) \(.excerpt)"]}' "$ACCEPT/p5.json" | sed "s|$ACCEPT|\$ACCEPT|g")"
 }
 
 bad_platform() {
@@ -737,6 +781,7 @@ main() {
     must no-foreign-android-device no_foreign_android
     must new new_app
     must doctor-app doctor_app
+    step doctor-probe doctor_probe
     step check-all check_all
     step explain explain
     step output-contract output_contract
@@ -753,6 +798,9 @@ main() {
     done
     step shot-ios-sim shot_platform ios-sim
     step shot-desktop shot_platform desktop
+    step shot-android shot_platform android
+    step shot-web shot_platform web
+    step input-unsupported input_unsupported
     step input-android input_tap android 200 400
     step input-android-increment tap_increment android 64
     step input-web input_tap web 100 100
@@ -765,10 +813,12 @@ main() {
     step hooks-android-env hooks_android
     step hooks-off hooks_off
     step stop-all-shutdown stop_all
+    step shot-no-session shot_no_session
     must make-panics-app make_panics
     step panic-ios-sim panic_ios
     step panic-android panic_android
     step deps-single-iced two_copies
+    step config-unknown-key bad_config
     step usage-bad-platform bad_platform
     if [ -d "$TAWARA/.git" ]; then
         step tawara-check tawara_check
