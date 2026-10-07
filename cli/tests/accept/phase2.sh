@@ -71,9 +71,15 @@ echo "fork: $FORK"
 echo "outputs: $ACCEPT"
 echo "keychain: $ICM_KEYCHAIN; profiles: $ICM_PROVISIONING_PROFILES"
 
+# The run drives the iOS Simulator and, with ICM_ACCEPT_DEVICE=1, an
+# iPhone, so it stops just those. `icm stop --all --shutdown` would also,
+# with no ios-sim session yet, shut down the managed simulator this
+# project's runs would pick, and ask Android to shut down icm's emulator:
+# devices the run never booted, which another process may be using.
 cleanup() {
     if [ -f "$DEMO/icm.toml" ] && command -v icm >/dev/null; then
-        (cd "$DEMO" && icm stop --all --shutdown --json -q >"$ACCEPT/cleanup.json" 2>&1) || true
+        (cd "$DEMO" && icm stop ios-sim --shutdown --json -q >"$ACCEPT/cleanup.json" 2>&1) || true
+        (cd "$DEMO" && icm stop ios-device --json -q >"$ACCEPT/cleanup-ios-device.json" 2>&1) || true
     fi
     if [ -f "$TEST_KC" ]; then
         security delete-keychain "$TEST_KC" 2>/dev/null || rm -f "$TEST_KC"

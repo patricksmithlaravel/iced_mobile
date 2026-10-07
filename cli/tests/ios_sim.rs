@@ -547,6 +547,19 @@ fn checks<'a>(events: &'a [Value], id: &str) -> Vec<&'a Value> {
         .collect()
 }
 
+/// `stop ios-sim --shutdown` without a session shuts nothing down, not even
+/// icm's managed simulator booted and untagged: the acceptance scripts that
+/// never run on a simulator (phase3.sh) stop it this way.
+#[test]
+fn stop_ios_sim_without_a_session_shuts_nothing_down() {
+    let fake = Fake::new();
+    fake.booted_pair();
+    let stop = fake.result("ok", &["stop", "ios-sim", "--shutdown", "--json", "-q"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["summary"], "no ios-sim session to stop", "{stop}");
+    assert!(!fake.xcrun_log().contains("simctl"), "{}", fake.xcrun_log());
+}
+
 /// With host.toml pinning a test run's simulator and no ios-sim session,
 /// `stop --all --shutdown` shuts down neither the pinned simulator (not
 /// icm's) nor icm's managed one (not the one this project uses: another

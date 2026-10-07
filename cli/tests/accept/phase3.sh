@@ -44,9 +44,16 @@ cd "$ACCEPT"
 echo "fork: $FORK"
 echo "outputs: $ACCEPT"
 
+# The run drives Android, and the iOS Simulator only when this icm has its
+# lifecycle suite, so it stops just those two. `icm stop --all --shutdown`
+# would also, with no ios-sim session, shut down the managed simulator this
+# project's runs would pick, which the run never booted and another process
+# may be using. `icm stop ios-sim --shutdown` without a session does
+# nothing.
 cleanup() {
     if [ -f "$DEMO/icm.toml" ] && command -v icm >/dev/null; then
-        (cd "$DEMO" && icm stop --all --shutdown --json -q >"$ACCEPT/cleanup.json" 2>&1) || true
+        (cd "$DEMO" && icm stop android --shutdown --json -q >"$ACCEPT/cleanup.json" 2>&1) || true
+        (cd "$DEMO" && icm stop ios-sim --shutdown --json -q >"$ACCEPT/cleanup-ios-sim.json" 2>&1) || true
     fi
 }
 trap cleanup EXIT
@@ -244,11 +251,14 @@ lifecycle_ios() {
     evidence "$(/usr/bin/jq -r '.summary' "$ACCEPT/lifecycle-ios.json")"
 }
 
+# Only what the run drove (see cleanup).
 final_cleanup() {
     cd "$DEMO"
-    icm stop --all --shutdown --json -q >"$ACCEPT/stop.json" || true
+    icm stop android --shutdown --json -q >"$ACCEPT/stop.json" || true
     jqe '.ok' "$ACCEPT/stop.json"
-    evidence "$(/usr/bin/jq -r '.summary' "$ACCEPT/stop.json")"
+    icm stop ios-sim --shutdown --json -q >"$ACCEPT/stop-ios-sim.json" || true
+    jqe '.ok' "$ACCEPT/stop-ios-sim.json"
+    evidence "android: $(/usr/bin/jq -r '.summary' "$ACCEPT/stop.json"); ios-sim: $(/usr/bin/jq -r '.summary' "$ACCEPT/stop-ios-sim.json")"
 }
 
 main() {

@@ -91,7 +91,10 @@ tab. Never add a step that uploads, publishes or reads a secret.
 ### Acceptance scripts
 
 These are end-to-end runs from the design's §18. Each step prints PASS, FAIL or SKIP, and the script
-exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory by default).
+exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory by default). Only
+phase1.sh, which drives every dev platform, cleans up with `icm stop --all --shutdown`. The others
+stop only the platforms they drive and leave the other platforms' devices alone
+(`cli/tests/accept_lib.rs` checks).
 
 - **`cli/tests/accept/phase0.sh`** covers the framework prerequisites: the check matrix, the
   template's deliverables, the `ICM_EVENT` opt-in, the `.ice` flows and a headless screenshot.

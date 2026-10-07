@@ -281,3 +281,31 @@ fn the_simulator_check_leaves_out_what_was_booted_before_the_run() {
     let output = host.bash("simulators_left");
     assert!(!output.status.success(), "{}", text(&output));
 }
+
+/// Every phase but phase1.sh, which drives all four dev platforms, shuts
+/// down only the devices of the platforms it drives. `icm stop --all
+/// --shutdown` also shuts down, with no ios-sim session, the managed
+/// simulator the project's runs would pick, and asks Android to shut down
+/// icm's emulator: devices such a phase never booted, which another process
+/// may be using. phase2.sh and phase3.sh once cleaned up that way. (A plain
+/// `stop --all` shuts nothing down.)
+#[test]
+fn only_phase1_shuts_down_every_platform() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/accept");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.starts_with("phase") || name == "phase1.sh" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            assert!(
+                line.trim_start().starts_with('#')
+                    || !(line.contains("stop --all") && line.contains("--shutdown")),
+                "{name}:{}: shut down only the platforms the phase drives: {line}",
+                n + 1
+            );
+        }
+    }
+}
