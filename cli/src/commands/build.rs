@@ -68,6 +68,19 @@ pub fn all(ctx: &mut Ctx, args: &BuildArgs) -> Result<()> {
         }
     }
 
+    if ctx.dry_run() {
+        // Each platform reported its steps; nothing was built.
+        ctx.rep.set("planned", json!(built));
+        ctx.rep.set("skipped", json!(skipped));
+        ctx.rep.summary(format!(
+            "the plan of icm build --all for {} (--dry-run: nothing was built)",
+            built.join(", ")
+        ));
+        return match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        };
+    }
     ctx.rep.set("built", json!(built));
     ctx.rep.set("skipped", json!(skipped));
     let failed = first_error.is_some();

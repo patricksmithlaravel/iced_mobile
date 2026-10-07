@@ -52,6 +52,9 @@ fn internal(what: &str, error: impl std::fmt::Display) -> IcmError {
 /// `icm build android`: the signed dev APK for `--abi`, the `--device`'s
 /// ABI, or the host's emulator ABI.
 pub fn build(ctx: &mut Ctx, args: &BuildArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return super::plan::build(ctx, args);
+    }
     let (project, _host, tools) = setup(ctx)?;
     let _lock = ctx.lock_platform("android")?;
     let ctx: &Ctx = ctx;
@@ -116,6 +119,9 @@ fn props_from_env(env: &[String]) -> Result<(Props, Vec<String>)> {
 
 /// `icm run android`.
 pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
+    if ctx.dry_run() && !args.from_aab {
+        return super::plan::run(ctx, args);
+    }
     if args.from_aab {
         return Err(IcmError::new(
             CheckId::UsageNotImplemented,
@@ -997,6 +1003,9 @@ fn capture(
 
 /// `icm shot android`: a screenshot of the device the session runs on.
 pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return super::plan::shot(ctx, args);
+    }
     let (project, host, tools) = setup(ctx)?;
     let ctx: &Ctx = ctx;
     let (adb, mut session) = session_device(ctx, &project, &host, &tools)?;
@@ -1519,6 +1528,9 @@ fn source_matches(filter: LogSource, source: &str) -> bool {
 /// `icm logs android`: re-queries logcat from the launch mark (or
 /// `--since <dur>` ago) on the session's device.
 pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return super::plan::logs(ctx, args);
+    }
     let (project, host, tools) = setup(ctx)?;
     let ctx: &Ctx = ctx;
     let (adb, session) = session_device(ctx, &project, &host, &tools)?;
@@ -1820,6 +1832,9 @@ fn space_name(space: Space) -> &'static str {
 /// (preview pixels by default, Appendix C item 25), text, keys and the
 /// device-state helpers.
 pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return super::plan::input(ctx, args);
+    }
     let (project, host, tools) = setup(ctx)?;
     let ctx: &Ctx = ctx;
     let (adb, session) = session_device(ctx, &project, &host, &tools)?;
@@ -1998,6 +2013,9 @@ pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
 /// AVD outside icm's `icm-` names, never one icm booted for another
 /// project).
 pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return super::plan::stop(ctx, args);
+    }
     let (project, host, tools) = setup(ctx)?;
     let ctx: &Ctx = ctx;
     let stopped = stop_session(ctx, &project, &host, &tools, args.shutdown)?;
@@ -2173,6 +2191,9 @@ pub fn app_state(ctx: &mut Ctx, project: &Project) -> crate::session::AppState {
 
 /// `icm devices android`: online devices and the AVDs.
 pub fn devices(ctx: &mut Ctx) -> Result<()> {
+    if ctx.dry_run() {
+        return super::plan::devices(ctx);
+    }
     let (lines, listing) = device_listing(ctx)?;
     for key in ["devices", "avds", "default_avd"] {
         ctx.rep.set(key, listing[key].clone());

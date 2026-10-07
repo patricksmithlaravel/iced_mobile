@@ -26,12 +26,14 @@
 //!    returns and the session keeps serving.
 //!
 //! `icm shot web`, `icm input web`, `icm logs web` and `icm stop web` talk
-//! to the session; see [`client`].
+//! to the session; see [`client`]. With `--dry-run` each command prints
+//! its plan instead ([`plan`]) and starts nothing.
 
 pub mod cdp;
 pub mod client;
 pub mod console;
 pub mod host;
+pub mod plan;
 pub mod server;
 pub mod site;
 pub mod viewport;
@@ -76,7 +78,7 @@ pub struct Built {
     pub rustc: Option<String>,
 }
 
-fn profile_name(release: bool) -> &'static str {
+pub(crate) fn profile_name(release: bool) -> &'static str {
     if release { "release" } else { "debug" }
 }
 
@@ -126,6 +128,50 @@ fn wasm_bindgen_cli(ctx: &Ctx, project: &Project) -> Result<Option<Found>> {
     Ok(Some(found))
 }
 
+/// The cargo invocation of a web build and its environment (`[web]
+/// rustflags` in `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS`).
+pub fn invocation(
+    project: &Project,
+    package: &crate::cargo::Package,
+    bin: &str,
+    release: bool,
+) -> (Invocation, Vec<(String, String)>) {
+    let mut invocation = Invocation::new("build", &package.manifest_path, &package.name);
+    invocation.select = Select::Bin(bin.to_string());
+    invocation.triple = Some(TRIPLE.to_string());
+    invocation.profile = if release { "release" } else { "dev" }.to_string();
+    let mut env = Vec::new();
+    let rustflags = &project.config.config.web.rustflags;
+    if !rustflags.is_empty() {
+        env.push((
+            "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS".to_string(),
+            rustflags.join(" "),
+        ));
+    }
+    (invocation, env)
+}
+
+/// `wasm-bindgen <wasm> --target web --no-typescript --out-name app
+/// --out-dir <pkg> [--debug]`.
+pub fn bindgen_cmd(bindgen: &Path, wasm: &Path, pkg: &Path, release: bool) -> Cmd {
+    let mut cmd = Cmd::new(bindgen)
+        .arg(wasm)
+        .args([
+            "--target",
+            "web",
+            "--no-typescript",
+            "--out-name",
+            site::OUT_NAME,
+        ])
+        .arg("--out-dir")
+        .arg(pkg)
+        .timeout(Duration::from_secs(600));
+    if !release {
+        cmd = cmd.arg("--debug");
+    }
+    cmd
+}
+
 /// Builds the site: cargo, wasm-bindgen, index.html and friends.
 pub fn build(ctx: &mut Ctx, project: &Project, release: bool) -> Result<Built> {
     let profile = profile_name(release);
@@ -157,18 +203,7 @@ pub fn build(ctx: &mut Ctx, project: &Project, release: bool) -> Result<Built> {
         None
     };
 
-    let mut invocation = Invocation::new("build", &package.manifest_path, &package.name);
-    invocation.select = Select::Bin(bin.clone());
-    invocation.triple = Some(TRIPLE.to_string());
-    invocation.profile = if release { "release" } else { "dev" }.to_string();
-    let mut env = Vec::new();
-    let rustflags = &project.config.config.web.rustflags;
-    if !rustflags.is_empty() {
-        env.push((
-            "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS".to_string(),
-            rustflags.join(" "),
-        ));
-    }
+    let (invocation, env) = invocation(project, &package, &bin, release);
     let output = ctx
         .cargo("cargo.build", &invocation, &env)
         .map_err(|error| getrandom_backend(ctx, error))?;
@@ -208,21 +243,7 @@ pub fn build(ctx: &mut Ctx, project: &Project, release: bool) -> Result<Built> {
     let site = project.build_dir(PLATFORM, profile).join("site");
     let pkg = site.join("pkg");
     let _ = std::fs::remove_dir_all(&pkg);
-    let mut cmd = Cmd::new(&bindgen.path)
-        .arg(&wasm)
-        .args([
-            "--target",
-            "web",
-            "--no-typescript",
-            "--out-name",
-            site::OUT_NAME,
-        ])
-        .arg("--out-dir")
-        .arg(&pkg)
-        .timeout(Duration::from_secs(600));
-    if !release {
-        cmd = cmd.arg("--debug");
-    }
+    let cmd = bindgen_cmd(&bindgen.path, &wasm, &pkg, release);
     let outcome = ctx.step("wasm-bindgen", &cmd)?;
     if !outcome.success() {
         let text = outcome.stderr_text();
@@ -847,6 +868,9 @@ fn show(ctx: &Ctx, session: &Session) {
 
 /// `icm run web`.
 pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return plan::run(ctx, args);
+    }
     let project = ctx.project()?.clone();
     ctx.rep.latest(PLATFORM);
     let profile = profile_name(args.release);
@@ -1062,6 +1086,9 @@ fn capture(ctx: &Ctx, session: &Session, out: Option<&Path>, expect_content: boo
 
 /// `icm build web`.
 pub fn build_command(ctx: &mut Ctx, args: &BuildArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return plan::build(ctx, args);
+    }
     let project = ctx.project()?.clone();
     ctx.rep.set("profile", json!(profile_name(args.release)));
     let _lock = ctx.lock_platform(PLATFORM)?;
@@ -1086,6 +1113,9 @@ pub fn build_command(ctx: &mut Ctx, args: &BuildArgs) -> Result<()> {
 
 /// `icm shot web`.
 pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return plan::shot(ctx, args);
+    }
     let project = ctx.project()?.clone();
     let session = Session::find(&project.sessions_dir())?;
     let out = match (&args.out, &args.name) {
@@ -1103,6 +1133,9 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
 
 /// `icm input web`.
 pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return plan::input(ctx, args);
+    }
     let project = ctx.project()?.clone();
     let session = Session::find(&project.sessions_dir())?;
     let viewport = session.viewport()?;
@@ -1225,6 +1258,9 @@ fn emit_log(ctx: &Ctx, record: &Value) {
 
 /// `icm logs web`: re-reads the session's console file.
 pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return plan::logs(ctx, args);
+    }
     let project = ctx.project()?.clone();
     let sessions_dir = project.sessions_dir();
     let live = Session::find(&sessions_dir);

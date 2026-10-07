@@ -386,6 +386,11 @@ impl Reporter {
         let _ = inner.fields.insert(key.to_string(), value);
     }
 
+    /// A result field set so far.
+    pub fn field(&self, key: &str) -> Option<Value> {
+        self.lock().fields.get(key).cloned()
+    }
+
     /// Sets the result's one-line summary.
     pub fn summary(&self, summary: impl Into<String>) {
         self.lock().summary = Some(summary.into());

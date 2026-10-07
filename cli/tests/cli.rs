@@ -586,6 +586,97 @@ fn a_detached_failure_keeps_its_exit_code() {
     assert_eq!(done["errors"][0]["id"], "env.jdk_missing");
 }
 
+/// `--dry-run` on the web, Android and session commands prints a plan and
+/// touches nothing: no adb, no browser, no build, no session, no ledger.
+#[test]
+fn dry_runs_touch_nothing() {
+    let sandbox = Sandbox::with_fixture("app");
+    let config = sandbox.cwd.join("icm.toml");
+    let text = std::fs::read_to_string(&config).unwrap().replace(
+        "build = 7\n",
+        "build = 7\nplatforms = [\"desktop\", \"web\", \"android\"]\n",
+    );
+    std::fs::write(&config, text).unwrap();
+    let log = sandbox.cwd.join("tools.log");
+    let fake = sandbox.cwd.join("fake-tool");
+    std::fs::write(
+        &fake,
+        format!("#!/bin/sh\necho \"$0 $*\" >> '{}'\nexit 1\n", log.display()),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let commands: &[&[&str]] = &[
+        &["build", "android"],
+        &["run", "android"],
+        &["stop", "android", "--shutdown"],
+        &["shot", "android"],
+        &["logs", "android"],
+        &["input", "android", "tap", "1", "2"],
+        &["devices", "android"],
+        &["build", "web"],
+        &["run", "web"],
+        &["shot", "web"],
+        &["logs", "web"],
+        &["input", "web", "tap", "1", "2"],
+        &["stop", "web"],
+        &["stop", "--all", "--shutdown"],
+        &["stop", "ios-sim", "--shutdown"],
+        &["input", "ios-sim", "appearance", "dark"],
+        &["shot", "ios-sim"],
+        &["logs", "ios-sim"],
+        &["logs", "desktop"],
+        &["build", "--all"],
+        &["ledger", "mark-uploaded", "android", "--build", "3"],
+    ];
+    for args in commands {
+        let mut full: Vec<&str> = args.to_vec();
+        full.extend(["--dry-run", "--json", "-q"]);
+        let mut command = sandbox.command(&full);
+        for tool in [
+            "ADB",
+            "EMULATOR",
+            "XCRUN",
+            "WASM_BINDGEN",
+            "AAPT2",
+            "APKSIGNER",
+        ] {
+            let _ = command.env(format!("ICM_TOOL_{tool}"), &fake);
+        }
+        let result = result(&command.output().unwrap());
+        assert_eq!(result["exit"], 0, "{args:?}: {result}");
+        assert_eq!(result["dry_run"], true, "{args:?}: {result}");
+        assert!(
+            !result["plan"].as_array().unwrap().is_empty(),
+            "{args:?}: {result}"
+        );
+    }
+    // `print plan` is the same as --dry-run.
+    let printed = result(&sandbox.run(&["print", "plan", "run", "android", "--json", "-q"]));
+    assert!(
+        printed["plan"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["name"] == "cargo.rustc"),
+        "{printed}"
+    );
+
+    assert!(
+        !log.exists(),
+        "a tool ran: {}",
+        std::fs::read_to_string(&log).unwrap()
+    );
+    let icm = sandbox.cwd.join("target/icm");
+    for dir in ["build", "sessions", "locks", "gen"] {
+        assert!(!icm.join(dir).exists(), "target/icm/{dir} was created");
+    }
+    assert!(!sandbox.cwd.join(".icm/ledger.toml").exists());
+}
+
 #[test]
 fn plans_dry_run_and_execute() {
     let sandbox = Sandbox::new();

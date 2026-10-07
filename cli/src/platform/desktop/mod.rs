@@ -1610,6 +1610,20 @@ fn follow(ctx: &Ctx, tails: &mut [Tail], pid: i32, filter: &Filter) -> FollowEnd
 /// `icm logs desktop`: re-reads the app's stdout and stderr from the launch.
 pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     let project = ctx.project()?.clone();
+    if ctx.dry_run() {
+        let mut plan = Plan::new();
+        plan.push(Step::internal(
+            "desktop.logs",
+            &format!(
+                "read app.stderr and app.stdout of the session ({}), or of the last run, the last {} records{}",
+                paths::display(&session_path(&project)),
+                args.tail,
+                if args.follow { ", then follow" } else { "" }
+            ),
+        ));
+        plan.report(ctx);
+        return Ok(());
+    }
     let filter = Filter::new(args.level, &args.since, args.grep.as_deref())
         .map_err(|error| IcmError::new(CheckId::UsageBadArgs, format!("--since: {error}")))?;
 

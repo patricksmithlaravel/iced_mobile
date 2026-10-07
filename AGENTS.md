@@ -146,10 +146,10 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
 - Never boot, wipe, delete or install onto the owner's other AVDs, simulators or phones. Check
   `adb devices` first: when its own emulator is not up, `icm run android` installs onto the single
   online Android device.
-- Do not rely on `--dry-run` or `icm print plan` to keep a command harmless yet. Only `new`,
-  `doctor`, `selftest`, `build` and `run` on desktop and ios-sim, and `shot` and `stop` on desktop
-  honour it. Everything else runs for real, including every web and Android command, `check`,
-  `test`, `build --all` and `stop --all`.
+- `--dry-run` (or `icm print plan <cmd…>`) prints the plan and touches no device, browser or
+  file for `new`, `doctor`, `release`, `ledger mark-uploaded`, and `build`, `run`, `stop`, `shot`,
+  `logs`, `input` and `devices android` on every platform (`build --all` and `stop --all`
+  included). `check`, `test`, `ui`, `shot --headless` and `verify` ignore it and run for real.
 
 ## Where to look for platform behaviour
 

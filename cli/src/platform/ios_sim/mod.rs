@@ -1814,6 +1814,17 @@ fn follow(
 
 /// `icm logs ios-sim`.
 pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
+    if ctx.dry_run() {
+        let _ = args;
+        return dry_run(
+            ctx,
+            &[(
+                "ios-sim.logs",
+                "read the session's stdout and stderr, its log stream collector and crash reports"
+                    .to_string(),
+            )],
+        );
+    }
     let (_project, session) = read_session(ctx)?;
     let filter = filter_for(args)?;
     ctx.rep.set("device", session_device(&session));
@@ -1874,6 +1885,21 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
 
 /// `icm shot ios-sim`.
 pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return dry_run(
+            ctx,
+            &[(
+                "ios-sim.screenshot",
+                format!(
+                    "xcrun simctl io <the session's simulator> screenshot into {}",
+                    args.out
+                        .as_deref()
+                        .map(crate::paths::display)
+                        .unwrap_or_else(|| "the run directory".to_string())
+                ),
+            )],
+        );
+    }
     let (project, mut session) = read_session(ctx)?;
     let xcode = crate::tools::xcode(&ctx.env)?;
     ctx.rep.latest(PLATFORM);
@@ -1950,7 +1976,38 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
 
 /// `icm stop ios-sim`.
 pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
+    if ctx.dry_run() {
+        let project = ctx.project()?.clone();
+        let mut steps = vec![(
+            "ios-sim.stop",
+            format!(
+                "xcrun simctl terminate the app on the session's simulator ({}) and stop its log collector",
+                crate::paths::display(&project.sessions_dir().join("ios-sim.json"))
+            ),
+        )];
+        if args.shutdown {
+            steps.push((
+                "ios-sim.shutdown",
+                "xcrun simctl shutdown the icm-managed simulator (icm-* names only, never icm-test-*)"
+                    .to_string(),
+            ));
+        }
+        return dry_run(ctx, &steps);
+    }
     stop_session(ctx, args.shutdown).map(|_| ())
+}
+
+/// `--dry-run` for the commands that act on the running session: their
+/// steps, as a plan; nothing runs.
+pub fn dry_run(ctx: &Ctx, steps: &[(&str, String)]) -> Result<()> {
+    let mut plan = Plan::new();
+    for (name, description) in steps {
+        plan.push(Step::internal(name, description));
+    }
+    plan.report(ctx);
+    ctx.rep
+        .summary("the plan (--dry-run: nothing ran on the simulator)");
+    Ok(())
 }
 
 /// Stops this project's ios-sim session, if any (for `icm stop --all` too):

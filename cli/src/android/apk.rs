@@ -316,6 +316,29 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
 /// reported like [`Ctx::cargo`]: diagnostics become events, a failure is
 /// `build.compile_error`, `build.link_error` or `build.cargo_failed`.
 /// Returns the `.so`.
+/// `cargo rustc -p <pkg> --lib --crate-type cdylib --target <triple>`: the
+/// command the build runs and `--dry-run` prints.
+pub fn cdylib_cmd(
+    offline: bool,
+    package: &cargo::Package,
+    triple: &str,
+    profile: &str,
+    env: &[(String, String)],
+) -> Cmd {
+    let mut invocation = Invocation::new("rustc", &package.manifest_path, &package.name);
+    invocation.select = Select::Lib;
+    invocation.triple = Some(triple.to_string());
+    invocation.profile = profile.to_string();
+    invocation.offline = offline;
+    let mut cmd = invocation
+        .cmd()
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    // `--crate-type` is a `cargo rustc` flag; it goes after the subcommand.
+    cmd.args.insert(1, "--crate-type".into());
+    cmd.args.insert(2, "cdylib".into());
+    cmd
+}
+
 fn cargo_cdylib(
     ctx: &Ctx,
     project: &Project,
@@ -326,17 +349,7 @@ fn cargo_cdylib(
     env: &[(String, String)],
 ) -> Result<PathBuf> {
     let _ = project;
-    let mut invocation = Invocation::new("rustc", &package.manifest_path, &package.name);
-    invocation.select = Select::Lib;
-    invocation.triple = Some(triple.to_string());
-    invocation.profile = profile.to_string();
-    invocation.offline = ctx.global.offline;
-    let mut cmd = invocation
-        .cmd()
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-    // `--crate-type` is a `cargo rustc` flag; it goes after the subcommand.
-    cmd.args.insert(1, "--crate-type".into());
-    cmd.args.insert(2, "cdylib".into());
+    let cmd = cdylib_cmd(ctx.global.offline, package, triple, profile, env);
 
     let rep = ctx.rep.clone();
     let mut artifacts: Vec<Artifact> = Vec::new();

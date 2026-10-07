@@ -285,6 +285,21 @@ fn mark_uploaded(ctx: &mut Ctx, target: ReleaseTarget, build: Option<u64>) -> Re
         }
     };
 
+    if ctx.dry_run() {
+        let mut plan = crate::plan::Plan::new();
+        plan.push(crate::plan::Step::internal(
+            "ledger.record",
+            &format!(
+                "record the {name} upload of {} build {} in {}",
+                entry.version,
+                entry.build,
+                crate::paths::display(&path(project.dir()))
+            ),
+        ));
+        plan.report(ctx);
+        ctx.rep.set("upload", json!(entry));
+        return Ok(());
+    }
     let added = record(project.dir(), entry.clone())?;
     let ledger_path = path(project.dir());
     ctx.rep.artifact("ledger", &ledger_path);

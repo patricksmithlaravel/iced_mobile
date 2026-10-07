@@ -46,6 +46,18 @@ pub fn content_size(scale: f64) -> &'static str {
 
 /// `icm input ios-sim`.
 pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
+    if ctx.dry_run() {
+        return super::dry_run(
+            ctx,
+            &[(
+                "ios-sim.input",
+                format!(
+                    "send {:?} to the session's simulator through xcrun simctl",
+                    args.action
+                ),
+            )],
+        );
+    }
     let unsupported = |what: &str| {
         Err(IcmError::new(
             CheckId::InputUnsupported,

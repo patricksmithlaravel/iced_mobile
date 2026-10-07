@@ -9,6 +9,7 @@
 //! | [`avd`] | the managed AVD (`icm-api<target_sdk>`, host-ABI image), ports, boot, shutdown |
 //! | [`device`] | which device a command uses (design §6 order) |
 //! | [`pipeline`] | the commands: install, launch, readiness, screenshot, logs, input, stop |
+//! | [`plan`] | what `--dry-run` prints for each command (nothing touches a device) |
 //! | [`session`] | `target/icm/sessions/android.json` |
 //! | [`logcat`] | `threadtime,epoch` records, `ICM_EVENT` lines, failure signatures |
 //! | [`manifest`], [`res`] | the generated `AndroidManifest.xml` and resources |
@@ -26,6 +27,7 @@ pub mod image;
 pub mod logcat;
 pub mod manifest;
 pub mod pipeline;
+pub mod plan;
 pub mod res;
 pub mod session;
 pub mod zip;

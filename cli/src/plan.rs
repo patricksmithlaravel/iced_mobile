@@ -118,11 +118,20 @@ impl Plan {
     }
 
     /// Reports the plan: a `plan` event (`PLAN` lines in human mode) and
-    /// the result's `plan` field. Used by `--dry-run`.
+    /// the result's `plan` field, which collects the steps of every plan a
+    /// command reports (`build --all` reports one per platform). Used by
+    /// `--dry-run`.
     pub fn report(&self, ctx: &Ctx) {
         let steps = self.to_json();
         ctx.rep.emit(json!({"type": "plan", "steps": steps}));
-        ctx.rep.set("plan", steps);
+        let mut all = match ctx.rep.field("plan") {
+            Some(Value::Array(earlier)) => earlier,
+            _ => Vec::new(),
+        };
+        if let Value::Array(steps) = steps {
+            all.extend(steps);
+        }
+        ctx.rep.set("plan", Value::Array(all));
         ctx.rep.set("dry_run", Value::Bool(true));
     }
 

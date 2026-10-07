@@ -40,13 +40,18 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         .fix("Stop one platform or every session.", &["icm stop --all"]));
     }
     let project = ctx.project()?.clone();
-    let host = ctx.host()?.clone();
     let dir = project.sessions_dir();
 
     let platforms: Vec<Platform> = match args.platform {
         Some(platform) => vec![platform],
         None => Platform::ALL.to_vec(),
     };
+
+    if ctx.dry_run() {
+        plan(ctx, &dir, &platforms, args.shutdown);
+        return Ok(());
+    }
+    let host = ctx.host()?.clone();
 
     let mut stopped: Vec<Value> = Vec::new();
     let mut shut_down: Vec<String> = Vec::new();
@@ -120,6 +125,45 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
 
 /// The platforms whose sessions their own module stops.
 const OWN_STOP: [&str; 4] = ["desktop", "ios-sim", "android", "web"];
+
+/// `--dry-run`: what each session record would get, read from the
+/// records alone (no device, browser or process is touched).
+fn plan(ctx: &Ctx, dir: &Path, platforms: &[Platform], shutdown: bool) {
+    let mut plan = crate::plan::Plan::new();
+    let records = session::list(dir);
+    for platform in platforms {
+        let path = dir.join(format!("{}.json", platform.as_str()));
+        let found = records.iter().any(|(record, _)| *record == path);
+        let what = match platform {
+            Platform::Desktop => "SIGTERM the app's process group, SIGKILL after a grace period",
+            Platform::IosSim => "xcrun simctl terminate the app and stop the log collector",
+            Platform::Android => "am force-stop the app on the session's device",
+            Platform::Web => "ask the session host to stop, then signal it and headless Chrome",
+            Platform::IosDevice => "end the processes the record names",
+        };
+        plan.push(crate::plan::Step::internal(
+            &format!("{}.stop", platform.as_str()),
+            &if found {
+                format!("{what} ({})", crate::paths::display(&path))
+            } else {
+                format!(
+                    "nothing: no {} session ({} does not exist)",
+                    platform.as_str(),
+                    crate::paths::display(&path)
+                )
+            },
+        ));
+        if shutdown && matches!(platform, Platform::IosSim | Platform::Android) {
+            plan.push(crate::plan::Step::internal(
+                &format!("{}.shutdown", platform.as_str()),
+                "shut down the icm-managed simulator or emulator (icm-* names only, never icm-test-*, never one booted for another project)",
+            ));
+        }
+    }
+    plan.report(ctx);
+    ctx.rep
+        .summary("the plan of icm stop (--dry-run: nothing was stopped)");
+}
 
 /// Stops one dev platform's session through its own module; a platform
 /// without a session costs nothing (no tool is looked up).

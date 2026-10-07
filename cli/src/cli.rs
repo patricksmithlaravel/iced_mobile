@@ -966,7 +966,7 @@ pub struct VerifyArgs {
     /// The target
     #[arg(value_enum)]
     pub target: ReleaseTarget,
-    /// The artifact (default: the upload file of dist/latest/<target>)
+    /// The artifact (default: the upload file of the newest release of the target)
     #[arg(long, value_name = "PATH")]
     pub artifact: Option<PathBuf>,
     /// macOS: also check notarization and Gatekeeper (spctl, stapler)
