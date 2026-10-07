@@ -1,0 +1,169 @@
+# icm's desktop release pipelines on their own hosts (docs/icm/DESIGN.md §17
+# item 11, §18 phase 5). GitHub Actions is not enabled on this fork yet; the
+# workflow runs once the owner enables it. The other workflows in this
+# directory are upstream iced's.
+#
+# - linux: in ubuntu:22.04 (glibc 2.35, the default glibc_floor): the
+#   release, `dpkg -i`, the AppImage under Xvfb until ICM_EVENT ready,
+#   `icm verify linux`, and icm's desktop release tests with the real
+#   dpkg-deb.
+# - windows: the MSI and NSIS installers, installed and uninstalled. This
+#   build of icm does not run on Windows hosts yet (its process, signal and
+#   lock handling is Unix-only), so the job runs only when the repository
+#   variable ICM_WINDOWS_HOST is `true`, once that support exists.
+#
+# Nothing here signs with the owner's identities, uploads, publishes or
+# notarizes: every release is `--sign none`. Secrets are never referenced.
+name: icm desktop releases
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cli/**"
+      - "examples/app/**"
+      - ".github/workflows/icm-desktop.yml"
+  pull_request:
+    paths:
+      - "cli/**"
+      - "examples/app/**"
+      - ".github/workflows/icm-desktop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: icm-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # The glibc floor of the packages is this image's (2.35). Pin it by
+    # digest once Actions is enabled (`docker buildx imagetools inspect
+    # ubuntu:22.04` prints it).
+    container: ubuntu:22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      CARGO_HOME: /root/.cargo
+      RUSTUP_HOME: /root/.rustup
+    steps:
+      - name: Build and packaging tools, and the libraries the app loads
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends \
+            ca-certificates curl git jq build-essential pkg-config file xz-utils \
+            dpkg-dev desktop-file-utils lintian xvfb xauth \
+            libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 \
+            libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libgl1 libegl1 mesa-vulkan-drivers
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - name: icm's desktop release tests (the real dpkg-deb)
+        working-directory: cli
+        run: cargo test --locked --test desktop_release
+      - name: Install icm
+        run: cargo install --locked --path cli --root /opt/icm && echo /opt/icm/bin >> "$GITHUB_PATH"
+      - name: A new app
+        run: |
+          icm new /tmp/demo --id dev.icm.ci --framework "path:$GITHUB_WORKSPACE" --json -q
+          cd /tmp/demo
+          sed -i 's/^\[desktop.linux\]$/[desktop.linux]\nmaintainer = "icm CI <ci@icm.invalid>"/' icm.toml
+          grep -A1 '^\[desktop.linux\]$' icm.toml
+          icm doctor desktop --fix --yes --json -q || true
+          icm check desktop --json -q | jq -e '.ok'
+      - name: Release (unsigned; downloads the pinned appimagetool with --yes)
+        working-directory: /tmp/demo
+        run: |
+          icm release linux --sign none --yes --json -q > /tmp/linux.json || true
+          jq -e '.ok' /tmp/linux.json
+          run_dir=$(jq -r .run_dir /tmp/linux.json)
+          jq -e -s '[.[] | select(.type == "check" and .id == "linux.glibc_floor" and .status == "pass")] | length == 1' "$run_dir/events.ndjson"
+      - name: dpkg -i, then remove
+        working-directory: /tmp/demo
+        run: |
+          deb=$(jq -r .artifacts.deb /tmp/linux.json)
+          dpkg -i "$deb"
+          test -x /usr/bin/demo
+          test -f /usr/share/applications/dev.icm.ci.desktop
+          desktop-file-validate /usr/share/applications/dev.icm.ci.desktop
+          dpkg -r demo
+      - name: The AppImage draws its first frame under Xvfb
+        working-directory: /tmp/demo
+        run: |
+          appimage=$(jq -r .artifacts.appimage /tmp/linux.json)
+          chmod +x "$appimage"
+          ( ICM_EVENTS=1 APPIMAGE_EXTRACT_AND_RUN=1 timeout 60 xvfb-run -a "$appimage" 2> /tmp/appimage.err || true ) &
+          for _ in $(seq 1 120); do
+            if grep -q '^ICM_EVENT .*"kind":"ready"' /tmp/appimage.err 2>/dev/null; then break; fi
+            sleep 0.5
+          done
+          pkill -f "$(basename "$appimage")" || true
+          grep '^ICM_EVENT .*"kind":"ready"' /tmp/appimage.err
+      - name: icm verify linux
+        working-directory: /tmp/demo
+        run: icm verify linux --json -q | jq -e '.ok'
+      - name: Keep the release
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icm-linux-release
+          path: /tmp/demo/target/icm/dist
+          if-no-files-found: ignore
+
+  windows:
+    if: ${{ vars.ICM_WINDOWS_HOST == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: WiX v5 and NSIS
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          choco install nsis -y --no-progress
+          echo "$USERPROFILE/.dotnet/tools" >> "$GITHUB_PATH"
+          echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+      - name: Install icm
+        run: cargo install --locked --path cli --root "$RUNNER_TEMP/icm" && echo "$RUNNER_TEMP/icm/bin" >> "$GITHUB_PATH"
+      - name: Release (unsigned)
+        run: |
+          icm new "$RUNNER_TEMP/demo" --id dev.icm.ci --framework "path:$GITHUB_WORKSPACE" --json -q
+          cd "$RUNNER_TEMP/demo"
+          icm doctor desktop --fix --yes --json -q || true
+          icm release windows --sign none --json -q > "$RUNNER_TEMP/windows.json" || true
+          jq -e '.ok' "$RUNNER_TEMP/windows.json"
+      - name: The MSI installs and uninstalls
+        shell: pwsh
+        run: |
+          $result = Get-Content "$env:RUNNER_TEMP/windows.json" | ConvertFrom-Json
+          $msi = Join-Path "$env:RUNNER_TEMP/demo" $result.artifacts.msi
+          Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msi`" /qn /l*v `"$env:RUNNER_TEMP/install.log`""
+          if (-not (Test-Path "$env:ProgramFiles/Demo/demo.exe")) { throw "demo.exe is not installed" }
+          if (-not (Test-Path "$env:ProgramFiles/Demo/THIRD_PARTY_NOTICES.txt")) { throw "the notices are not installed" }
+          Start-Process msiexec.exe -Wait -ArgumentList "/x `"$msi`" /qn"
+          if (Test-Path "$env:ProgramFiles/Demo/demo.exe") { throw "demo.exe is still installed" }
+      - name: The NSIS installer installs and uninstalls
+        shell: pwsh
+        run: |
+          $result = Get-Content "$env:RUNNER_TEMP/windows.json" | ConvertFrom-Json
+          $setup = Join-Path "$env:RUNNER_TEMP/demo" $result.artifacts.exe
+          Start-Process $setup -Wait -ArgumentList "/S"
+          $dir = "$env:LOCALAPPDATA/Programs/Demo"
+          if (-not (Test-Path "$dir/demo.exe")) { throw "demo.exe is not installed" }
+          Start-Process "$dir/uninstall.exe" -Wait -ArgumentList "/S"
+          Start-Sleep -Seconds 5
+          if (Test-Path "$dir/demo.exe") { throw "demo.exe is still installed" }
+      - name: Keep the release
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icm-windows-release
+          path: ${{ runner.temp }}/demo/target/icm/dist
+          if-no-files-found: ignore

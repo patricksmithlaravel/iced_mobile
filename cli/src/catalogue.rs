@@ -676,6 +676,39 @@ catalogue! {
     LinuxDebLint = "linux.deb.lint", CheckFailed, Warn, Agent,
         "The .deb has lint warnings",
         "Read the step log.";
+    MacosSignIdentityAmbiguous = "macos.sign.identity_ambiguous", NeedsOwner, Fail, Owner,
+        "Several Developer ID Application identities of different teams are installed",
+        "The owner names one in `[desktop.macos] identity` (its SHA-1 or its full name).";
+    MacosSignKeychainPrompt = "macos.sign.keychain_prompt", NeedsOwner, Fail, Owner,
+        "codesign waited for keychain access",
+        "The owner unlocks the keychain and lets codesign use the key, or points host.toml `signing_keychain` (ICM_KEYCHAIN) at an unlocked build keychain.";
+    MacosArch = "macos.arch", CheckFailed, Fail, Agent,
+        "The binary lacks an architecture the release needs",
+        "Rebuild through icm; `--universal` needs the x86_64-apple-darwin target (`icm doctor desktop --fix --yes`).";
+    MacosBundle = "macos.bundle", CheckFailed, Fail, Agent,
+        "The .app's Info.plist or layout is invalid",
+        "Read the evidence; a key set by `[app]` may hold a value the plist cannot carry. Otherwise report it.";
+    MacosDsym = "macos.dsym", CheckFailed, Warn, Agent,
+        "The dSYM has no line tables for the app's sources",
+        "Rebuild through icm: release builds keep line tables for the dSYM.";
+    MacosDmg = "macos.dmg", CheckFailed, Fail, Agent,
+        "The disk image does not verify",
+        "Rebuild it with `icm release macos --dmg`.";
+    MacosNotarization = "macos.notarization", CheckFailed, Fail, Agent,
+        "Apple's notary service did not accept the submission",
+        "Fix what `icm diagnose notarytool` lists, rerun `icm release macos`, and the owner notarizes again.";
+    MacosNotaryCredentials = "macos.notary_credentials", NeedsOwner, Fail, Owner,
+        "notarytool could not use the owner's credentials",
+        "The owner stores them once with `xcrun notarytool store-credentials` (UPLOAD.md shows the line).";
+    WindowsPeImports = "windows.pe_imports", CheckFailed, Fail, Agent,
+        "The executable needs the VC++ runtime DLLs, which a clean Windows lacks",
+        "Rebuild through icm (it links the static C runtime); a RUSTFLAGS or CARGO_ENCODED_RUSTFLAGS in the environment replaces icm's flags.";
+    WindowsSubsystem = "windows.subsystem", CheckFailed, Warn, Agent,
+        "The executable opens a console window next to the app",
+        "Keep `#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = \"windows\")]` at the top of src/main.rs.";
+    LinuxAppimageLibs = "linux.appimage_libs", CheckFailed, Warn, Agent,
+        "The AppImage lacks a library it bundles for older hosts",
+        "Build in the ubuntu:22.04 container, or install libxkbcommon0, libxkbcommon-x11-0, libwayland-client0 and libwayland-cursor0 on the build host.";
 
     // ---- run -----------------------------------------------------------------------
     RunReady = "run.ready", Ok, Pass, Agent,

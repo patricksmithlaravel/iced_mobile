@@ -66,6 +66,7 @@
 
 pub mod android;
 pub mod compile;
+pub mod desktop;
 pub mod diagnose;
 pub mod dist;
 pub mod fake;

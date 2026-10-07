@@ -60,10 +60,11 @@ cargo test
 | `signatures.rs` | known failure signatures (design §13.4) → `likely_causes`; `signatures::annotate(error, text, &Facts)` |
 | `hooks.rs` | project hooks, `[checks] <platform>` scripts; every platform's `run` calls `hooks::run_for` once the app is up |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
-| `release/` | `release`, `verify`, `upload-commands`, `ledger`, `diagnose`: the core every target shares (`mod.rs`: preconditions, owner items, the `Pipeline` contract), `gates.rs` (`--sign none` and owner items), `dist.rs` and `manifest.rs` (`target/icm/dist/`, `artifacts.json`), `compile.rs` (release profiles by `--config`, `target/icm/release-target`, deployment-target stamps), `notices.rs` (THIRD_PARTY_NOTICES from `cargo metadata`, Fira Sans's OFL, the `release.notices` gate), `upload.rs` (`UPLOAD.md`, `upload.sh`), `owner_plans.rs` (the only file with upload or notarize argv), `ledger.rs`, `verify.rs`; one pipeline per target (`ios.rs` builds and gates the App Store `.ipa`, `android.rs` the Google Play `.aab`, `web.rs` the static site; `macos.rs`, `windows.rs`, `linux.rs` are stubs) and `fake.rs`, the stand-in pipeline of `icm __test release` |
+| `release/` | `release`, `verify`, `upload-commands`, `ledger`, `diagnose`: the core every target shares (`mod.rs`: preconditions, owner items, the `Pipeline` contract), `gates.rs` (`--sign none` and owner items), `dist.rs` and `manifest.rs` (`target/icm/dist/`, `artifacts.json`), `compile.rs` (release profiles by `--config`, `target/icm/release-target`, deployment-target stamps), `notices.rs` (THIRD_PARTY_NOTICES from `cargo metadata`, Fira Sans's OFL, the `release.notices` gate), `upload.rs` (`UPLOAD.md`, `upload.sh`), `owner_plans.rs` (the only file with upload or notarize argv), `ledger.rs`, `verify.rs`; one pipeline per target (`ios.rs` builds and gates the App Store `.ipa`, `android.rs` the Google Play `.aab`, `web.rs` the static site, and `macos.rs`, `windows.rs`, `linux.rs` the desktop installers below) and `fake.rs`, the stand-in pipeline of `icm __test release` |
 | `ios/` | iOS device builds, shared by `icm release ios` (`release/ios.rs`) and `ios-device`: the device bundle and its gates (`bundle.rs`), `DT*` keys (`dt.rs`), identities (`identity.rs`), provisioning profiles (`profile.rs`), entitlements, codesign with the keychain watchdog, Mach-O symbols and UUIDs (`macho.rs`), the privacy scan, the dSYM gates, the `.ipa` (`ipa.rs`), an XML plist reader and SHA-1 |
 | `pinned.rs` | the tools icm downloads itself (`tools.toml`, embedded: version, URL, size, sha256 per host): find, install with `--yes` (curl, sha256 check, unpack), doctor's WARN and `--fix --yes` |
 | `policy.rs` | the dated store policy table (`policy/stores.toml`, embedded): the floor in force on a day, `env.policy_stale`, upcoming floors; `icm print policy` |
+| `release/macos.rs`, `release/windows.rs`, `release/linux.rs` (and their directories), `release/desktop.rs` | the desktop release pipelines (phase 5). macOS: the identity and codesign (`macos/sign.rs`), Info.plist and entitlements (`macos/bundle.rs`), the `.app`, its zip and the DMG in two stages, `diagnose notarytool` (`macos/notary.rs`). Windows: `app.rc`, `app.wxs` and `installer.nsi` (`windows/files.rs`), the static-CRT build, the PE gates, `sign_command`. Linux: `DEBIAN/control`, the `.desktop` entry and `AppRun` (`linux/files.rs`), the `.deb` and the AppImage. Shared (`desktop.rs`, `desktop/`): the host check (`ICM_HOST_OS`), icons (PNG, iconset, ICO), and the PE, ELF and ar readers |
 | `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices` for Android (`doctor android` is `doctor/`): APK pipeline, managed AVD, adb, logcat, session; the release bundle's layout, tool-output parsing and store gates (`bundle.rs`, used by `release/android.rs`), `run --from-aab`, and `test --on android --lifecycle` (`lifecycle.rs`) (`android/mod.rs` has the module map) |
 
 ## Writing a command
@@ -150,6 +151,18 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   wasm-opt (real `cargo metadata`, `rustc --print cfg` and gzip) and real
   headless Chrome for the serve check; `verify web --url` goes to a test
   server that serves the site with a right and a wrong `.wasm` type.
+- `tests/desktop_release.rs` runs the desktop pipelines on `fixtures/release`.
+  - On macOS: a real ad-hoc-signed release, its DMG and `icm verify macos`
+    (cargo, dsymutil, iconutil, codesign, hdiutil). Then the signed two-stage
+    flow, with fake `security`, `codesign`, `spctl` and `xcrun stapler` as the
+    owner's identity and Apple's notary service.
+  - Everywhere: Windows and Linux with `ICM_HOST_OS` and fake tools (cargo's
+    build step, rc, wix, makensis, signtool, the signing command; dpkg-deb,
+    dpkg-shlibdeps, appimagetool, lintian).
+  - When installed, the real makensis and dpkg-deb build the generated
+    installer and package.
+  - `ICM_KEYCHAIN` always names a file of the test, so the user's keychains
+    are never searched.
 
 ## Environment
 
@@ -166,7 +179,9 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 | `ICM_BUILD_FRAMEWORK` | at build time: force the default framework pin (`tag:`/`rev:`/`path:`) |
 | `ICM_TOOLS_TOML` | a pinned-tools table to use instead of the embedded `tools.toml` (a mirror; the tests serve `file://` URLs) |
 | `ICM_TODAY` | `YYYY-MM-DD`: the day the store policy table is read for (icm's tests) |
-| `ICM_KEYCHAIN` | the keychain Apple signing searches (overrides host.toml `signing_keychain`) |
+| `ICM_KEYCHAIN` | the keychain Apple signing (iOS and macOS) searches instead of the user's search list (overrides host.toml `signing_keychain`) |
 | `ICM_PROVISIONING_PROFILES` | `:`-separated directories searched for provisioning profiles instead of Xcode's |
 | `ICM_CODESIGN_TIMEOUT` | seconds before a codesign that waits for a keychain dialog is stopped (default 60) |
+| `ICM_HOST_OS` | `macos`, `windows` or `linux`: the host the desktop release pipelines assume (icm's tests) |
+| `ICM_LINUX_LIB_DIRS` | `:`-separated directories the AppImage's bundled libraries are copied from (icm's tests; default: the host's library directories) |
 | `ICM_RUN_ID`, `ICM_RUN_DIR`, `ICM_RUN_ROOT`, `ICM_DETACHED` | internal: a detached child's run |
