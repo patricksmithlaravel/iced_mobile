@@ -147,8 +147,9 @@ impl App {
         })
         .size(14);
 
-        // At the top of the screen: iced does not know how tall a phone's
-        // keyboard is, and the keyboard covers fields in the lower half.
+        // At the top of the screen: the keyboard covers fields in the lower
+        // half, and the fixed root padding does not rise with it (see
+        // `safe_area`).
         let form = row![
             text_input("New item", &self.draft)
                 .id(INPUT)
@@ -204,12 +205,12 @@ impl App {
 const PHONE_WIDTH: f32 = 600.0;
 
 /// Room for the status bar, the notch or Dynamic Island, and the home
-/// indicator or navigation bar. iced has no safe-area API yet, and Android
-/// apps targeting SDK 35 or later draw edge to edge, so the root view pads
-/// for them on iOS and Android. A window narrower than a phone gets the
-/// same padding anywhere, so headless renders at phone viewports (`icm shot
-/// --headless`, `icm ui --headless`, `.ice` flows) lay out as the phone
-/// does.
+/// indicator or navigation bar: a fixed padding on iOS and Android, where
+/// apps targeting SDK 35 or later draw edge to edge. A window narrower than
+/// a phone gets the same padding anywhere, so headless renders at phone
+/// viewports (`icm shot --headless`, `icm ui --headless`, `.ice` flows) lay
+/// out as the phone does. `iced::mobile::safe_area()` reports the device's
+/// own insets and the keyboard's height instead, but nothing headless.
 fn safe_area(size: Size) -> Padding {
     if cfg!(any(target_os = "ios", target_os = "android"))
         || size.width < PHONE_WIDTH

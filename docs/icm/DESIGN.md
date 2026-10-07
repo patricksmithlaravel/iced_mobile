@@ -795,7 +795,8 @@ impl App {
         ]
         .spacing(16);
 
-        // No safe-area API yet: pad for status bar, notch and home indicator (targetSdk 36 is edge-to-edge).
+        // A fixed padding for status bar, notch and home indicator (targetSdk 36 is edge-to-edge), the same
+        // headless; iced::mobile::safe_area() reports the device's own insets and keyboard.
         container(content).padding(48).width(Fill).height(Fill).into()
     }
 }
@@ -889,7 +890,8 @@ Input on a device: `icm input android tap X Y`, `icm input web tap X Y`, `icm in
 ## Rules that fail silently when broken
 - Keep every iced line on the same git URL and tag (`icm framework set tag:<t>` changes them all).
 - Never call `iced::exit()` or close the last window on Android or iOS.
-- Keep the root padding (no safe-area API yet; Android targetSdk 36 is edge-to-edge).
+- Keep the root padding (Android targetSdk 36 is edge-to-edge): it lays headless renders out as on the phone;
+  `iced::mobile::safe_area()` reports the device's own insets and keyboard, and nothing headless.
 - .ice `click` and host tests use a mouse; phones use touch. Confirm UI changes with `icm run` on
   ios-sim and android and look at the screenshot.
 - Keep `features = ["fira-sans"]`; text with no font renders as nothing.
