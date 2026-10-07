@@ -2307,7 +2307,8 @@ fn run_action<'a, P, C>(
                 (Activity.finish) or move its task to the back \
                 (Activity.moveTaskToBack) through JNI: once Android destroys \
                 the Activity, the event loop and the application end with it. \
-                To end the process, call std::process::exit."
+                To end the process, call libc::_exit: std::process::exit runs \
+                exit handlers that make Android's renderer threads abort."
             );
 
             #[cfg(not(any(target_os = "android", target_os = "ios")))]

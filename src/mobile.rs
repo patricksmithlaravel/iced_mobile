@@ -319,9 +319,11 @@
 //! - **Exiting.** `iced::exit` and closing the last window are ignored on
 //!   Android and iOS, with a warning in the log: the system ends a mobile
 //!   app. On Android, finish the Activity through JNI (`Activity.finish`)
-//!   to leave: the application ends as when Android destroys it. On iOS a
-//!   window being opened can replace the last one: open the new window
-//!   before closing the old one.
+//!   to leave: the application ends as when Android destroys it. To end
+//!   the process instead, call `libc::_exit`: `std::process::exit` runs
+//!   exit handlers that make Android's renderer threads abort (SIGABRT).
+//!   On iOS a window being opened can replace the last one: open the new
+//!   window before closing the old one.
 //! - **One window on Android.** Android gives an app one native window, so
 //!   a second `window::open` is refused with an error in the log, and its
 //!   task ends without an id.
@@ -683,8 +685,10 @@ fn log_panics() {
 /// 2. hands its `AndroidApp` to the shell with `mobile::set_android_app`;
 /// 3. calls your function, catching a panic, and logs how it ended;
 /// 4. returns if the Activity was destroyed, and otherwise ends the process
-///    with `std::process::exit`: status 0 when your function returned `Ok`,
-///    1 when it returned an error or panicked.
+///    with `_exit`: status 0 when your function returned `Ok`, 1 when it
+///    returned an error or panicked. `std::process::exit` would run the
+///    process's exit handlers, which destroy what Android's renderer threads
+///    still use, and those threads would abort with SIGABRT.
 ///
 /// Android calls `android_main` once per Activity, on a thread of its own,
 /// and may call it again in the same process when it starts a new Activity
@@ -786,7 +790,7 @@ pub fn __android_main(
     // so the process ends.
     let Ok(result) = std::panic::catch_unwind(run) else {
         log::error!("the application panicked; ending the process");
-        std::process::exit(1);
+        end_process(1);
     };
 
     // The Activity's `onDestroy` waits for `android_main` to return, and the
@@ -823,7 +827,32 @@ pub fn __android_main(
         }
     };
 
-    std::process::exit(code)
+    end_process(code)
+}
+
+/// Ends the process with `status`, skipping the exit handlers that
+/// `std::process::exit` runs.
+///
+/// Those handlers include the C++ static destructors, which destroy a mutex
+/// of Android's renderer (libhwui) while its `hwuiTask` threads still lock
+/// it. The threads then abort ("FORTIFY: pthread_mutex_lock called on a
+/// destroyed mutex", then SIGABRT), and the process is recorded as a native
+/// crash or as an exit, whichever comes first.
+#[cfg(target_os = "android")]
+#[allow(unsafe_code)]
+fn end_process(status: i32) -> ! {
+    use std::io::Write;
+
+    // bionic's <unistd.h>.
+    unsafe extern "C" {
+        fn _exit(status: std::ffi::c_int) -> !;
+    }
+
+    // `std::process::exit` would flush it; stderr is unbuffered.
+    let _ = std::io::stdout().flush();
+
+    // SAFETY: `_exit` takes any status, and ends the process at once.
+    unsafe { _exit(status) }
 }
 
 #[cfg(test)]
