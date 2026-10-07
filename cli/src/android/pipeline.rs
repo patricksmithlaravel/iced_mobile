@@ -1384,20 +1384,23 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
             let _ = pids.insert(record.pid);
         }
     }
-    let grep = args.grep.clone();
+    let grep = crate::grep::Grep::new(args.grep.as_deref());
     let wanted = |source: &str, record: &Record| {
         source_matches(args.source, source)
             && logcat::at_least(record, args.level)
-            && grep.as_ref().is_none_or(|needle| {
-                record.msg.contains(needle.as_str()) || record.tag.contains(needle.as_str())
-            })
+            && grep
+                .as_ref()
+                .is_none_or(|grep| grep.matches(&[&record.tag, &record.msg]))
     };
-    let mut selected: Vec<(String, Record)> = logcat::select(&records, &app_id, &pids)
+    let app_records = logcat::select(&records, &app_id, &pids);
+    let considered = app_records.len();
+    let mut selected: Vec<(String, Record)> = app_records
         .into_iter()
         .filter(|(source, record)| wanted(source, record))
         .map(|(source, record)| (source.to_string(), record.clone()))
         .collect();
     let total = selected.len();
+    crate::grep::warn_unmatched(ctx, args.grep.as_deref(), total, considered);
     if selected.len() > args.tail {
         selected.drain(..selected.len() - args.tail);
     }

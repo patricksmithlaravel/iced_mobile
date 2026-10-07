@@ -586,7 +586,9 @@ pub struct LogsArgs {
     /// Which sources
     #[arg(long, value_enum, default_value_t = LogSource::All)]
     pub source: LogSource,
-    /// Only lines matching this pattern
+    /// Only records whose tag or message contains one of these
+    /// `|`-separated substrings, ignoring case (not a regular expression):
+    /// `--grep 'panic|error'`
     #[arg(long)]
     pub grep: Option<String>,
     /// The last N records

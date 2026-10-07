@@ -499,17 +499,11 @@ impl Filter {
         {
             return false;
         }
-        if let Some(grep) = &self.grep {
-            let haystack =
-                format!("{} {}", record.tag.as_deref().unwrap_or(""), record.msg).to_lowercase();
-            if !grep
-                .split('|')
-                .map(|alternative| alternative.trim().to_lowercase())
-                .filter(|alternative| !alternative.is_empty())
-                .any(|alternative| haystack.contains(&alternative))
-            {
-                return false;
-            }
+        if !crate::grep::keeps(
+            self.grep.as_deref(),
+            &[record.tag.as_deref().unwrap_or(""), &record.msg],
+        ) {
+            return false;
         }
         true
     }

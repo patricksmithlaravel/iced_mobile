@@ -145,7 +145,7 @@ pub struct Filter {
     pub level: Option<Level>,
     /// Which sources.
     pub source: Option<LogSource>,
-    /// A substring the message (or tag) must contain.
+    /// `--grep` ([`crate::grep`]).
     pub grep: Option<String>,
 }
 
@@ -176,10 +176,7 @@ impl Filter {
                 return false;
             }
         }
-        if let Some(grep) = &self.grep
-            && !field("msg").contains(grep.as_str())
-            && !field("tag").contains(grep.as_str())
-        {
+        if !crate::grep::keeps(self.grep.as_deref(), &[field("tag"), field("msg")]) {
             return false;
         }
         true

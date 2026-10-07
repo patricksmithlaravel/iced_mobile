@@ -1259,6 +1259,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     };
     let all = console::read(&path);
     let kept: Vec<&Value> = all.iter().filter(|r| filter.keeps(r)).collect();
+    crate::grep::warn_unmatched(ctx, args.grep.as_deref(), kept.len(), all.len());
     let tail: Vec<Value> = kept[kept.len().saturating_sub(args.tail)..]
         .iter()
         .map(|r| (*r).clone())

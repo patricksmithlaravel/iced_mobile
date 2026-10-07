@@ -1845,6 +1845,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     ctx.rep.set("notes", json!(notes));
     let total = records.len();
     let kept = filter.apply(records);
+    crate::grep::warn_unmatched(ctx, args.grep.as_deref(), kept.len(), total);
     for record in &kept {
         emit_record(ctx, record);
     }

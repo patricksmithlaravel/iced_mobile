@@ -275,8 +275,8 @@ pub struct Filter {
     pub level: Option<Level>,
     /// Only records at or after this time.
     pub since: Option<String>,
-    /// Alternatives (`a|b`), any of which the message or tag must contain.
-    pub grep: Vec<String>,
+    /// `--grep` ([`crate::grep`]).
+    pub grep: Option<crate::grep::Grep>,
 }
 
 impl Filter {
@@ -293,15 +293,7 @@ impl Filter {
                 Some(timestamp(from))
             }
         };
-        let grep = grep
-            .map(|pattern| {
-                pattern
-                    .split('|')
-                    .filter(|part| !part.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let grep = crate::grep::Grep::new(grep);
         Ok(Filter { level, since, grep })
     }
 
@@ -309,14 +301,9 @@ impl Filter {
     pub fn keeps(&self, record: &Record) -> bool {
         self.level.is_none_or(|level| record.level >= level)
             && self.since.as_ref().is_none_or(|since| record.ts >= *since)
-            && (self.grep.is_empty()
-                || self.grep.iter().any(|part| {
-                    record.msg.contains(part.as_str())
-                        || record
-                            .tag
-                            .as_deref()
-                            .is_some_and(|tag| tag.contains(part.as_str()))
-                }))
+            && self.grep.as_ref().is_none_or(|grep| {
+                grep.matches(&[record.tag.as_deref().unwrap_or(""), &record.msg])
+            })
     }
 }
 

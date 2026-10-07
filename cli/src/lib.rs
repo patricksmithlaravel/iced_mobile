@@ -25,6 +25,7 @@ pub mod doctor;
 pub mod error;
 pub mod exit;
 pub mod gitinfo;
+pub mod grep;
 pub mod harness;
 pub mod hash;
 pub mod hooks;

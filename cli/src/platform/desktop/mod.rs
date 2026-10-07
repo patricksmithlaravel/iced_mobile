@@ -1660,6 +1660,9 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     } else {
         Vec::new()
     };
+    if wanted {
+        crate::grep::warn_unmatched(ctx, args.grep.as_deref(), kept.len(), records.len());
+    }
     let shown = &kept[kept.len().saturating_sub(args.tail)..];
     if !args.raw {
         for record in shown {
