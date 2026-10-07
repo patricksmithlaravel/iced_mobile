@@ -120,6 +120,10 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   tests that spawn children, those calls got the children killed.
 - Fake tools: `ICM_TOOL_<NAME>=/path/to/script` replaces any external tool
   (`xcrun`, `adb`, `cargo`, ...).
+- `tests/ci.rs` checks the fork's CI in `.github/`: the release tag rule
+  (`.github/ci/tag.sh`), that the workflows run AGENTS.md's check commands
+  and only scripts that exist, and that nothing there formats with
+  `--all`, reads a secret or uploads.
 - `tests/project.rs` covers `new`, `check`, `doctor`, `stop`/`ps` and
   `explain config.<key>`. `check` compiles `tests/fixtures/checkapp`, whose
   `iced` is a local stand-in, offline in a second; `doctor` runs against a

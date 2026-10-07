@@ -1,0 +1,225 @@
+# icm's CI (design §17, with Appendix C item 29 and Appendix D): its own
+# checks on macOS and Linux, the install check, a fresh resolve of a new app,
+# the desktop release pipelines on their own hosts, and the release tag rule.
+# The scripts the jobs run are in .github/ci/ and run locally too.
+#
+# Nothing here signs, notarizes, uploads or publishes: releases are built
+# with `--sign none` and kept as workflow artifacts for 14 days. The owner
+# runs each release's UPLOAD.md.
+name: icm
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*-mobile.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tag:
+    name: tag matches the cli version
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: .github/ci/tag.sh "$GITHUB_REF_NAME"
+
+  cli:
+    name: cli (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # With wasm32, tests/web.rs drives the headless Chrome the macOS
+          # image has; without it (Linux) those two tests skip.
+          - os: macos-latest
+            targets: wasm32-unknown-unknown
+          - os: ubuntu-latest
+            targets: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v7
+      - run: ../.github/ci/toolchain.sh pinned ${{ matrix.targets }}
+      # `cargo install --locked` builds with cli/Cargo.lock as it is.
+      - name: cli/Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 >/dev/null
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  install:
+    name: install (cargo install --git)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # cargo fetches the commit (or the tag) from this checkout.
+          fetch-depth: 0
+      - run: .github/ci/toolchain.sh pinned
+      - name: Install icm from this commit and check what it pins
+        run: |
+          tag=""
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+              tag=$GITHUB_REF_NAME
+          fi
+          .github/ci/install-check.sh "$RUNNER_TEMP/icm" "$tag"
+
+  fresh-resolve:
+    name: fresh resolve (icm new, generate-lockfile, check --all)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      # The targets `icm check --all` compiles the template for. (`icm
+      # doctor desktop` adds only the host's to a toolchain already there.)
+      - run: .github/ci/toolchain.sh pinned aarch64-apple-ios-sim aarch64-linux-android wasm32-unknown-unknown
+      - run: .github/ci/build-icm.sh "$RUNNER_TEMP/icm"
+      - id: fresh
+        run: .github/ci/fresh-resolve.sh "$RUNNER_TEMP/fresh"
+      - name: Keep the fresh Cargo.lock and icm's results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fresh-resolve
+          path: ${{ steps.fresh.outputs.results }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  release-macos:
+    name: release macos (.app, .dmg; --sign none)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - run: .github/ci/toolchain.sh pinned
+      - run: .github/ci/build-icm.sh "$RUNNER_TEMP/icm"
+      - id: release
+        run: .github/ci/release.sh macos "$RUNNER_TEMP/release"
+      - name: Keep the release and icm's results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-macos
+          # dist/latest is a symlink to the release itself.
+          path: |
+            ${{ steps.release.outputs.work }}/results
+            ${{ steps.release.outputs.work }}/app/target/icm/dist
+            ${{ steps.release.outputs.work }}/app/target/icm/runs
+            !${{ steps.release.outputs.work }}/app/target/icm/dist/latest
+          if-no-files-found: warn
+          retention-days: 14
+
+  # WiX and NSIS installers are built on Windows (design §11.5), so icm runs
+  # there; it builds on a Windows host only once the Windows pipeline brings
+  # host support (cli/src/lib.rs refuses non-Unix hosts until then).
+  release-windows:
+    name: release windows (.msi, NSIS; --sign none)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - run: .github/ci/toolchain.sh pinned
+      # WiX v5 (design §11.5) with its UI extension; the Windows SDK's
+      # rc.exe and signtool are on the image.
+      - name: WiX v5
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          tools="$USERPROFILE\\.dotnet\\tools"
+          "$tools\\wix.exe" extension add -g WixToolset.UI.wixext/5.0.2
+          echo "$tools" >>"$GITHUB_PATH"
+      - name: NSIS
+        run: |
+          if command -v makensis >/dev/null; then
+              exit 0
+          fi
+          nsis="C:\\Program Files (x86)\\NSIS"
+          if [ ! -f "$nsis\\makensis.exe" ]; then
+              choco install nsis --yes --no-progress
+          fi
+          echo "$nsis" >>"$GITHUB_PATH"
+      - run: .github/ci/build-icm.sh "$RUNNER_TEMP/icm"
+      - id: release
+        run: .github/ci/release.sh windows "$RUNNER_TEMP/release"
+      - name: Keep the release and icm's results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          # dist/latest is a symlink to the release itself.
+          path: |
+            ${{ steps.release.outputs.work }}/results
+            ${{ steps.release.outputs.work }}/app/target/icm/dist
+            ${{ steps.release.outputs.work }}/app/target/icm/runs
+            !${{ steps.release.outputs.work }}/app/target/icm/dist/latest
+          if-no-files-found: warn
+          retention-days: 14
+
+  release-linux:
+    name: release linux (.deb, AppImage; --sign none)
+    runs-on: ubuntu-latest
+    # glibc 2.35, the template's [desktop.linux] glibc_floor (design §11.6);
+    # the digest pins the image (refresh it with
+    # `docker buildx imagetools inspect ubuntu:22.04`).
+    container: ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+    timeout-minutes: 60
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Build tools, packaging tools and what the smoke test runs
+        run: |
+          apt-get update -qq
+          # git before the checkout, so it is a repository; dpkg-dev for
+          # dpkg-shlibdeps; the four libraries the AppImage bundles; Xvfb
+          # and the X11, GL and Vulkan libraries the app opens at run time.
+          apt-get install -y --no-install-recommends \
+              build-essential ca-certificates curl desktop-file-utils dpkg-dev file git jq pkg-config xz-utils \
+              libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 \
+              xvfb xauth libx11-6 libx11-xcb1 libxcb1 libxcb-shm0 libxcursor1 libxi6 libxrandr2 \
+              libegl1 libgl1 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers
+          # The container runs as root over a workspace the runner owns, and
+          # icm's build script reads the checkout's git metadata.
+          git config --global --add safe.directory '*'
+      - uses: actions/checkout@v7
+      - name: rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+              sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+      - run: .github/ci/toolchain.sh pinned
+      - run: .github/ci/build-icm.sh "$RUNNER_TEMP/icm"
+      - id: release
+        run: .github/ci/release.sh linux "$RUNNER_TEMP/release"
+      - name: Keep the release and icm's results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux
+          # dist/latest is a symlink to the release itself.
+          path: |
+            ${{ steps.release.outputs.work }}/results
+            ${{ steps.release.outputs.work }}/app/target/icm/dist
+            ${{ steps.release.outputs.work }}/app/target/icm/runs
+            !${{ steps.release.outputs.work }}/app/target/icm/dist/latest
+          if-no-files-found: warn
+          retention-days: 14
