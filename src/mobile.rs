@@ -246,10 +246,9 @@
 //! # Android: Activity destruction
 //!
 //! Android destroys the Activity on Back (see [Android](#android)), for a
-//! configuration change the manifest does not list, with the developer
-//! option "Don't keep activities", or to reclaim memory while the app is
-//! in the background. The process often lives on, and the next Activity
-//! runs in it. iced follows the Activity:
+//! configuration change the manifest does not list, or with the developer
+//! option "Don't keep activities". The process often lives on, and the next
+//! Activity runs in it. iced follows the Activity:
 //!
 //! 1. [`Lifecycle::Suspended`] has come first, when the window went away
 //!    (just before, or when the app left the screen).
@@ -266,6 +265,12 @@
 //!
 //! Whatever the application keeps in memory is lost: save what must outlive
 //! the Activity on [`Lifecycle::Suspended`], which always comes before.
+//!
+//! Memory is another matter: Android never destroys a single Activity to
+//! free memory. It kills the whole process of an app in the background,
+//! without a word to it: nothing above runs, and the next launch starts a
+//! new process (a cold start). Saving on [`Lifecycle::Suspended`] covers
+//! that case too, since the app was suspended when it left the screen.
 //! What belongs to the process stays: the logger, the panic hook, the
 //! [`on_lifecycle`] hook (setting the same one again does nothing), the
 //! fonts loaded so far (a font the next application loads again, from its

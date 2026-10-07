@@ -66,8 +66,9 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 - Never call `iced::exit()` or close the last window on Android or iOS.
 - Keep `[android] back = "system"` unless `src/lib.rs` handles `Key::Named(Named::BrowserBack)`:
   `"key"` sends Back to the app, and an app that ignores it cannot be left with Back.
-- Android may end the app and start it over (Back at its root, memory reclaim): save what must
-  survive on `Lifecycle::Suspended` (`iced::mobile::on_lifecycle`).
+- Android may end the app and start it over (Back at its root, or killing its process in the
+  background to free memory): save what must survive on `Lifecycle::Suspended`
+  (`iced::mobile::on_lifecycle`).
 - Keep the root padding (`safe_area` in `src/lib.rs`): there is no safe-area API yet, and Android
   targetSdk 36 draws edge to edge.
 - `.ice` `click` and host tests use a mouse; phones use touch. Confirm UI changes with `icm run ios-sim`

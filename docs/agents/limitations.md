@@ -61,22 +61,24 @@ this file in the commit that fixes or finds a limitation.
   on it alone: an unlock that asks for Face ID suspends the app again, and
   loops.
 - **When Android destroys the activity, the app starts over.** Back at the
-  app's root, a configuration change missing from `configChanges`, the
-  "Don't keep activities" developer option and memory reclaim in the
-  background destroy the Android activity: the application is dropped
-  (after `Lifecycle::Suspended`) and the next activity starts it again,
-  from its boot function, often in the same process: `run()` runs again,
-  so what it sets up for the process (a logger of your own) must accept a
-  second call (`try_init()`, error ignored). Whatever it kept in memory is
-  gone. icm's generated manifest lists every `configChanges` value (with
-  `assetsPaths` from target_sdk 36: an emulator's theme overlays change
-  during its first boots), so rotation, dark mode and font scale keep the
-  state; never remove one. Save what must survive on
-  `Suspended`. Back is Android's by default (`[android] back = "system"`);
-  an app that handles Back itself (going back a screen) sets `back =
-  "key"`: Back then reaches it as `Key::Named(Named::BrowserBack)` and
-  never closes it, so at the root it does nothing. Launching the app again
-  a moment after Back can end the process; the next launch works.
+  app's root, a configuration change missing from `configChanges` and the
+  "Don't keep activities" developer option destroy the Android activity: the
+  application is dropped (after `Lifecycle::Suspended`) and the next
+  activity starts it again, from its boot function, often in the same
+  process: `run()` runs again, so what it sets up for the process (a logger
+  of your own) must accept a second call (`try_init()`, error ignored).
+  Whatever it kept in memory is gone. icm's generated manifest lists every
+  `configChanges` value (with `assetsPaths` from target_sdk 36: an
+  emulator's theme overlays change during its first boots), so rotation,
+  dark mode and font scale keep the state; never remove one. To free memory,
+  Android instead kills the process of an app in the background, without
+  warning; the next launch is a cold start. Save what must survive on
+  `Suspended`, which covers both. Back is Android's by default (`[android]
+  back = "system"`); an app that handles Back itself (going back a screen)
+  sets `back = "key"`: Back then reaches it as
+  `Key::Named(Named::BrowserBack)` and never closes it, so at the root it
+  does nothing. Launching the app again a moment after Back can end the
+  process; the next launch works.
 - **One window on Android.** A second `window::open` is refused with an error
   in the log, and its task ends without an id. Navigate inside one window.
   On iOS, a window being opened may replace the last one: open the new

@@ -41,14 +41,16 @@
 //! ```
 //!
 //! On Android the process can outlive the shell. When Android destroys the
-//! Activity (Back, a configuration change the manifest does not list, memory
-//! reclaim), the shell sends `lifecycle` `suspended`, then `exit` with
-//! `destroyed: true`, and `iced::android_main!` returns while the process
-//! lives on. The next Activity of that process starts the shell again: a new
+//! Activity (Back, a configuration change the manifest does not list, "Don't
+//! keep activities"), the shell sends `lifecycle` `suspended`, then `exit`
+//! with `destroyed: true`, and `iced::android_main!` returns while the
+//! process lives on. The next Activity of that process starts the shell again: a new
 //! `start` (with the same `pid`), then its own `ready`, whose `ms` counts
 //! from that `start`. An `exit` with `destroyed: false` on Android means the
 //! application stopped while its Activity was on screen, and the process
-//! ends next.
+//! ends next. When Android kills the process of an app in the background to
+//! free memory, there is no `exit`: the events stop after `lifecycle`
+//! `suspended`, and the next launch is a new process with its own `start`.
 //!
 //! Fields may be added to a kind, and kinds may be added, within version 1.
 //! A reader must ignore what it does not know.

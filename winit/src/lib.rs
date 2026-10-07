@@ -98,9 +98,11 @@ std::thread_local! {
 /// ended because Android destroyed its Activity.
 ///
 /// Android destroys an Activity on Back, for a configuration change the
-/// manifest's `android:configChanges` does not list, or to reclaim memory,
-/// and may then start a new one in the same process, which calls
-/// `android_main` again. When the Activity is destroyed, [`run`] returns
+/// manifest's `android:configChanges` does not list, or with the developer
+/// option "Don't keep activities", and may then start a new one in the same
+/// process, which calls `android_main` again. (To free memory it kills the
+/// whole process instead: nothing returns, and the next launch is a cold
+/// start.) When the Activity is destroyed, [`run`] returns
 /// once the application is dropped, and `android_main` must return too: the
 /// Activity's `onDestroy` waits for it.
 ///
