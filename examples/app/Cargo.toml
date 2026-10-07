@@ -28,8 +28,9 @@ harness = false
 icm-agent = ["iced/agent"]
 
 [dependencies]
-# Same source on every iced line, character for character. `icm new` turns
-# these paths into the fork's git URL and tag (or rev).
+# Same source on every iced line, character for character: the fork's git
+# URL with one tag (or rev). In the fork's own examples/app these are paths,
+# which `icm new` rewrites.
 iced = { path = "../..", features = ["fira-sans"] }
 log = "0.4"
 

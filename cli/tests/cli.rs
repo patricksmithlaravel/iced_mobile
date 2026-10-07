@@ -197,12 +197,7 @@ fn usage_errors_exit_two_with_a_result() {
 #[test]
 fn unimplemented_commands_say_so() {
     let sandbox = Sandbox::new();
-    for args in [
-        vec!["doctor"],
-        vec!["run", "ios-sim"],
-        vec!["new", "x"],
-        vec!["release", "ios"],
-    ] {
+    for args in [vec!["run", "ios-sim"], vec!["release", "ios"]] {
         let mut full = args.clone();
         full.extend(["--json", "-q"]);
         let result = result(&sandbox.run(&full));

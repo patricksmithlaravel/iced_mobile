@@ -1,0 +1,7 @@
+schema = 1
+min_icm = "0.14.1-mobile.1"
+
+[app]
+name = "Check"
+id = "com.acme.check"
+platforms = ["desktop", "web"]

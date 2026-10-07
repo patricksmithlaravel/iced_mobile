@@ -236,6 +236,23 @@ catalogue! {
         "The app icon is not a square PNG of at least 1024x1024",
         "Replace the file `[app] icon` names with a square PNG of at least 1024x1024.";
 
+    // ---- new, doctor's managed devices -----------------------------------------------
+    NewDirNotEmpty = "new.dir_not_empty", Usage, Fail, Agent,
+        "The directory for the new app is not empty",
+        "Choose a new or empty directory, or pass --force to write the template's files into it.";
+    NewFrameworkUnknown = "new.framework_unknown", Usage, Fail, Agent,
+        "icm cannot tell which framework source the new app should pin",
+        "Pass --framework tag:<tag>, rev:<full sha> or path:<checkout of iced_mobile>.";
+    EnvSimulatorMissing = "env.simulator_missing", Environment, Fail, Doctor,
+        "icm's managed iOS simulator does not exist yet",
+        "Run `icm doctor ios-sim --fix`, which creates it with `xcrun simctl create`.";
+    EnvAvdMissing = "env.avd_missing", Environment, Fail, Doctor,
+        "icm's managed Android emulator (AVD) does not exist yet",
+        "Run `icm doctor android --fix`, which creates it with `avdmanager create avd`.";
+    EnvDebugKeystoreMissing = "env.debug_keystore_missing", Environment, Fail, Doctor,
+        "The Android debug keystore does not exist",
+        "Run `icm doctor android --fix`, which creates ~/.android/debug.keystore with keytool.";
+
     // ---- review --------------------------------------------------------------------
     ReviewSnapshotStale = "review.snapshot_stale", CheckFailed, Fail, Agent,
         "The review snapshots in platform/generated differ from what icm generates",

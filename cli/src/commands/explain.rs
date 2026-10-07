@@ -1,4 +1,5 @@
-//! `icm explain <id> | exit-codes | --list`.
+//! `icm explain <id> | config.<key> | exit-codes | --list`. `config.<key>`
+//! explains an icm.toml key from the template's annotated icm.toml.
 
 use crate::catalogue::{self, CheckId};
 use crate::cli::ExplainArgs;
@@ -6,6 +7,12 @@ use crate::context::Ctx;
 use crate::error::{IcmError, Result};
 use crate::exit::Exit;
 use serde_json::{Value, json};
+
+/// The icm.toml key of a `config.<key>` id the template documents.
+fn config_key(id: &str) -> Option<&str> {
+    let key = id.strip_prefix("config.")?;
+    crate::template::config_key_doc(key).map(|_| key)
+}
 
 /// Runs `icm explain`.
 pub fn run(ctx: &mut Ctx, args: &ExplainArgs) -> Result<()> {
@@ -78,6 +85,15 @@ pub fn run(ctx: &mut Ctx, args: &ExplainArgs) -> Result<()> {
             ctx.rep.set("id", json!(id));
             ctx.rep.set("doc", json!(doc));
             ctx.rep.summary(format!("explained {id}"));
+            ctx.rep.content(doc);
+            Ok(())
+        }
+        None if config_key(id).is_some() => {
+            let key = config_key(id).unwrap_or_default();
+            let doc = crate::template::config_key_doc(key).unwrap_or_default();
+            ctx.rep.set("id", json!(id));
+            ctx.rep.set("doc", json!(doc));
+            ctx.rep.summary(format!("explained the icm.toml key {key}"));
             ctx.rep.content(doc);
             Ok(())
         }

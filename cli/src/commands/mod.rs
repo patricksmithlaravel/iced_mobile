@@ -1,10 +1,14 @@
 //! Command dispatch. Commands this build does not implement yet fail with
 //! `usage.not_implemented` (exit 2) and say so.
 
+pub mod check;
 pub mod detach;
+pub mod doctor;
 pub mod explain;
+pub mod new;
 pub mod print;
 pub mod selftest;
+pub mod stop;
 pub mod wait;
 
 use crate::catalogue::CheckId;
@@ -20,13 +24,13 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
         Command::Print(args) => print::run(ctx, args),
         Command::SelfTest(args) => selftest::run(ctx, args),
         Command::External(args) => external(&args),
-        Command::New(_) => not_implemented("new"),
-        Command::Doctor(_) => not_implemented("doctor"),
-        Command::Check(_) => not_implemented("check"),
+        Command::New(args) => new::run(ctx, &args),
+        Command::Doctor(args) => doctor::run(ctx, &args),
+        Command::Check(args) => check::run(ctx, &args),
         Command::Build(_) => not_implemented("build"),
         Command::Run(_) => not_implemented("run"),
-        Command::Stop(_) => not_implemented("stop"),
-        Command::Ps => not_implemented("ps"),
+        Command::Stop(args) => stop::stop(ctx, &args),
+        Command::Ps => stop::ps(ctx),
         Command::Devices(_) => not_implemented("devices"),
         Command::Shot(_) => not_implemented("shot"),
         Command::Logs(_) => not_implemented("logs"),

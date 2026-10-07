@@ -1,0 +1,21 @@
+# An app crate `icm check` can compile offline in a second: its `iced` is a
+# tiny local stand-in (vendor/iced), so Cargo.lock holds one path iced and
+# the lockfile checks pass. No Cargo.lock is committed: `icm check`
+# resolves it first, like a new app's.
+[package]
+name = "check-app"
+version = "0.2.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "check-app"
+path = "src/main.rs"
+
+[dependencies]
+iced = { path = "vendor/iced" }
+
+[workspace]

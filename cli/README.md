@@ -44,6 +44,10 @@ cargo test
 | `deps.rs` | lockfile checks (`deps.single_iced`, ...) |
 | `locks.rs` | per-project, per-platform locks |
 | `screen.rs` | preview/px/pt coordinates for `shot` and `input` |
+| `template.rs` | the embedded `examples/app` and how `icm new` fills it; `icm explain config.<key>` |
+| `doctor/` | what each platform needs (`gather`) and the fixes `doctor --fix [--yes]` runs (`fix.rs`) |
+| `managed.rs`, `simctl.rs` | the `icm-` simulator and AVD names, Android's per-user dirs; `simctl list -j` parsing |
+| `session.rs` | `target/icm/sessions/<platform>.json`, which `run` writes and `stop`/`ps` read |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
 
 ## Writing a command
@@ -86,6 +90,12 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   `project`, `lock`, `deployment`, `busy` (the signal watchdog).
 - Fake tools: `ICM_TOOL_<NAME>=/path/to/script` replaces any external tool
   (`xcrun`, `adb`, `cargo`, ...).
+- `tests/project.rs` covers `new`, `check`, `doctor`, `stop`/`ps` and
+  `explain config.<key>`. `check` compiles `tests/fixtures/checkapp`, whose
+  `iced` is a local stand-in, offline in a second; `doctor` runs against a
+  fake SDK, JDK, Rust sysroot (`ICM_TOOL_RUSTC`/`RUSTUP`) and Xcode
+  (`DEVELOPER_DIR`, `ICM_TOOL_XCRUN`/`XCODEBUILD`), so no test downloads
+  anything or touches a real simulator, emulator or `~/.android`.
 
 ## Environment
 
@@ -97,5 +107,6 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 | `ICM_HOST_CONFIG` | the host.toml to read |
 | `ICM_TOOL_<NAME>` | the path of an external tool |
 | `ICM_CHROME` | the Chrome executable |
+| `ANDROID_USER_HOME`, `ANDROID_AVD_HOME` | where the debug keystore and AVDs live (default `~/.android`, `~/.android/avd`); tests point them at a temp dir |
 | `ICM_BUILD_FRAMEWORK` | at build time: force the default framework pin (`tag:`/`rev:`/`path:`) |
 | `ICM_RUN_ID`, `ICM_RUN_DIR`, `ICM_RUN_ROOT`, `ICM_DETACHED` | internal: a detached child's run |
