@@ -29,7 +29,9 @@ pub mod res;
 pub mod session;
 pub mod zip;
 
-pub use pipeline::{build, devices, doctor, doctor_checks, input, logs, run, shot, stop};
+pub use pipeline::{
+    build, devices, doctor, doctor_checks, input, logs, run, shot, stop, stop_session,
+};
 
 use crate::catalogue::CheckId;
 use crate::error::{Evidence, IcmError};

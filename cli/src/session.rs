@@ -128,6 +128,13 @@ pub fn read(path: &Path) -> Result<Session, String> {
     {
         session.platform = stem.to_string_lossy().into_owned();
     }
+    // Android's app runs on the device: its pid (`app_pid`, `pid` in files
+    // written before that) is no host process to probe or signal.
+    if session.extra.get("schema").and_then(Value::as_str) == Some(crate::android::session::SCHEMA)
+        && let Some(pid) = session.pid.take()
+    {
+        let _ = session.extra.insert("app_pid".to_string(), pid.into());
+    }
     Ok(session)
 }
 

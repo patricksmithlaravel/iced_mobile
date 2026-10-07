@@ -1854,9 +1854,10 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
 
 /// Stops this project's ios-sim session, if any (for `icm stop --all` too):
 /// terminates the app and the log collector; with `shutdown`, shuts icm's
-/// own simulator down. A `--fresh` simulator is deleted. Returns whether
-/// there was a session.
-pub fn stop_session(ctx: &mut Ctx, shutdown: bool) -> Result<bool> {
+/// own simulator down. A `--fresh` simulator is deleted. Returns what it
+/// stopped (`{platform, app, pid, device, stopped, did}`), or `None`
+/// without a session.
+pub fn stop_session(ctx: &mut Ctx, shutdown: bool) -> Result<Option<Value>> {
     let project = ctx.project()?.clone();
     let sessions_dir = project.sessions_dir();
     let Some(mut session) = Session::read(&sessions_dir) else {
@@ -1865,7 +1866,7 @@ pub fn stop_session(ctx: &mut Ctx, shutdown: bool) -> Result<bool> {
             "no ios-sim session to stop",
         ));
         ctx.rep.summary("no ios-sim session to stop");
-        return Ok(false);
+        return Ok(None);
     };
     let xcode = crate::tools::xcode(&ctx.env)?;
     let _lock = ctx.lock_platform(PLATFORM)?;
@@ -1931,7 +1932,14 @@ pub fn stop_session(ctx: &mut Ctx, shutdown: bool) -> Result<bool> {
         json!({"pid": session.pid, "alive": session.app_alive(), "ready": null}),
     );
     ctx.rep.summary(did.join("; "));
-    Ok(true)
+    Ok(Some(json!({
+        "platform": PLATFORM,
+        "app": session.app_id,
+        "pid": session.pid,
+        "device": session.device.name,
+        "stopped": if was_alive { "terminated" } else { "was not running" },
+        "did": did,
+    })))
 }
 
 #[cfg(test)]

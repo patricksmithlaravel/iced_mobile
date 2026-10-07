@@ -1,14 +1,20 @@
 //! `icm stop [<platform>|--all] [--shutdown]` and `icm ps` (design §3
 //! "Sessions", §6).
 //!
-//! Both work from the session files `icm run` writes
-//! ([`crate::session`]): `stop` runs a session's recorded stop commands,
-//! ends the processes icm started and removes the file; `--shutdown` also
-//! shuts down the icm-managed simulator or emulator (`icm-` names only,
-//! never `icm-test-` ones and never a device icm did not create). The web
-//! session (the server and its headless Chrome) is asked to end over its
-//! control channel first ([`crate::web::stop`]). Stopping what is not
-//! running is not an error.
+//! Both work from the session files `icm run` writes under
+//! `target/icm/sessions/`. The dev platforms stop their own sessions,
+//! since they know their devices, log collectors and record formats:
+//! `icm stop <platform>` goes straight to the platform (`commands/mod.rs`),
+//! and `icm stop --all` here calls each of them in turn: desktop
+//! ([`crate::platform::desktop::stop_session`]), ios-sim
+//! ([`crate::platform::ios_sim::stop_session`]), android
+//! ([`crate::android::stop_session`]) and web ([`crate::web::stop`], which
+//! asks the session over its control channel first). Any other record
+//! ([`crate::session`]) is ended by what it says: its stop commands run,
+//! the processes icm started get SIGTERM (then SIGKILL), and the file is
+//! removed. `--shutdown` also shuts down the icm-managed simulator or
+//! emulator (`icm-` names only, never `icm-test-` ones and never a device
+//! icm did not create). Stopping what is not running is not an error.
 
 use crate::catalogue::CheckId;
 use crate::cli::{Platform, StopArgs};
@@ -37,19 +43,33 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     let host = ctx.host()?.clone();
     let dir = project.sessions_dir();
 
+    let platforms: Vec<Platform> = match args.platform {
+        Some(platform) => vec![platform],
+        None => Platform::ALL.to_vec(),
+    };
+
     let mut stopped: Vec<Value> = Vec::new();
+    for platform in &platforms {
+        match stop_platform(ctx, &project, &host, *platform, args.shutdown) {
+            Ok(entries) => stopped.extend(entries),
+            // Cleanup goes on: one platform's failure is a WARN.
+            Err(error) => ctx.rep.check(Check::from_error(error, Status::Warn)),
+        }
+    }
+
+    // Records no platform stops itself (ios-device until phase 2, a
+    // platform this icm does not know): by what the record says.
     for (path, session) in session::list(&dir) {
         let platform = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
+        if OWN_STOP.contains(&platform.as_str()) {
+            continue;
+        }
         if let Some(wanted) = args.platform
             && wanted.as_str() != platform
         {
-            continue;
-        }
-        if platform == crate::web::PLATFORM {
-            stopped.extend(crate::web::stop(&project));
             continue;
         }
         match session {
@@ -65,19 +85,15 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
 
     let mut shut_down: Vec<String> = Vec::new();
     if args.shutdown {
-        let platforms: Vec<Platform> = match args.platform {
-            Some(platform) => vec![platform],
-            None => Platform::ALL.to_vec(),
-        };
-        for platform in platforms {
-            shut_down.extend(shutdown_managed(ctx, &project, &host, platform));
+        for platform in &platforms {
+            shut_down.extend(shutdown_managed(ctx, &project, &host, *platform));
         }
     }
 
     // A record whose process had already exited stopped nothing.
     let count = stopped
         .iter()
-        .filter(|entry| entry["stopped"] != "was not running")
+        .filter(|entry| entry["stopped"] != "was not running" && entry["how"] != "already exited")
         .count();
     ctx.rep.set("stopped", Value::Array(stopped));
     ctx.rep.set("shutdown", json!(shut_down));
@@ -91,6 +107,44 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         (n, d) => format!("stopped {n} session(s) and shut down {d} managed device(s)"),
     });
     Ok(())
+}
+
+/// The platforms whose sessions their own module stops.
+const OWN_STOP: [&str; 4] = ["desktop", "ios-sim", "android", "web"];
+
+/// Stops one dev platform's session through its own module; a platform
+/// without a session costs nothing (no tool is looked up).
+fn stop_platform(
+    ctx: &mut Ctx,
+    project: &Project,
+    host: &crate::host::HostConfig,
+    platform: Platform,
+    shutdown: bool,
+) -> Result<Vec<Value>> {
+    let dir = project.sessions_dir();
+    Ok(match platform {
+        Platform::Desktop => crate::platform::desktop::stop_session(ctx, project)?
+            .into_iter()
+            .collect(),
+        Platform::IosSim => {
+            if !crate::platform::ios_sim::session::path(&dir).is_file() {
+                return Ok(Vec::new());
+            }
+            crate::platform::ios_sim::stop_session(ctx, shutdown)?
+                .into_iter()
+                .collect()
+        }
+        Platform::Android => {
+            // With --shutdown the managed emulator may run without a session.
+            if !crate::android::session::path(project).is_file() && !shutdown {
+                return Ok(Vec::new());
+            }
+            let tools = crate::android::Toolset::discover(host, &ctx.env)?;
+            crate::android::stop_session(ctx, project, host, &tools, shutdown)?
+        }
+        Platform::Web => crate::web::stop(project).into_iter().collect(),
+        Platform::IosDevice => Vec::new(),
+    })
 }
 
 /// Stops one session and removes its file.
@@ -210,9 +264,10 @@ fn shutdown_managed(
     host: &crate::host::HostConfig,
     platform: Platform,
 ) -> Vec<String> {
+    // Android's own stop already shut down the managed emulators
+    // ([`crate::android::stop_session`]).
     match platform {
         Platform::IosSim if cfg!(target_os = "macos") => shutdown_simulator(ctx, project, host),
-        Platform::Android => shutdown_emulator(ctx, project, host),
         _ => Vec::new(),
     }
 }
@@ -265,52 +320,6 @@ fn shutdown_simulator(ctx: &Ctx, project: &Project, host: &crate::host::HostConf
     done
 }
 
-fn shutdown_emulator(ctx: &Ctx, project: &Project, host: &crate::host::HostConfig) -> Vec<String> {
-    let Ok(sdk) = crate::tools::android_sdk(host, &ctx.env) else {
-        return Vec::new();
-    };
-    let adb = sdk.adb(&ctx.env);
-    if !adb.exists() {
-        return Vec::new();
-    }
-    let name = managed::avd_name(project.config.config.android.target_sdk);
-    let Ok(devices) = ctx.probe(
-        &Cmd::new(&adb)
-            .arg("devices")
-            .timeout(Duration::from_secs(30)),
-    ) else {
-        return Vec::new();
-    };
-
-    let mut done = Vec::new();
-    for serial in devices
-        .stdout_text()
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .filter(|serial| serial.starts_with("emulator-"))
-    {
-        let avd = ctx
-            .probe(
-                &Cmd::new(&adb)
-                    .args(["-s", serial, "emu", "avd", "name"])
-                    .timeout(Duration::from_secs(30)),
-            )
-            .ok()
-            .map(|o| o.stdout_text())
-            .and_then(|text| text.lines().next().map(|l| l.trim().to_string()))
-            .unwrap_or_default();
-        if avd == name && managed::is_managed(&avd) {
-            let cmd = Cmd::new(&adb)
-                .args(["-s", serial, "emu", "kill"])
-                .timeout(Duration::from_secs(60));
-            if run_quietly(ctx, "shutdown.android", &cmd) {
-                done.push(format!("{avd} ({serial})"));
-            }
-        }
-    }
-    done
-}
-
 /// Runs `icm ps`: the sessions and whether their processes still run.
 pub fn ps(ctx: &mut Ctx) -> Result<()> {
     let Some(project) = ctx.try_project().cloned() else {
@@ -342,7 +351,19 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
                         })
                     })
                     .collect();
-                let device = session.device.as_ref().map(|d| d.name.clone());
+                // Android records the device's serial at the top level.
+                let device = session
+                    .device
+                    .as_ref()
+                    .map(|d| d.name.clone())
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| {
+                        session
+                            .extra
+                            .get("serial")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    });
                 let mut line = format!("{}:", session.platform);
                 if alive.is_empty() && !session.all_pids().is_empty() {
                     line.push_str(" stale (its processes are gone)");

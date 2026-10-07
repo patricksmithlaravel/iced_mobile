@@ -5,6 +5,7 @@
 
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -1003,4 +1004,84 @@ fn stop_never_signals_a_reused_pid_or_shuts_down_foreign_devices() {
     assert!(alive(pid), "a pid the session does not own was signalled");
     assert!(!shut.exists(), "a device icm did not create was shut down");
     let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+}
+
+#[test]
+fn stop_all_hands_each_platform_its_own_session() {
+    let mut sandbox = Sandbox::with_fixture("app");
+    // A fake SDK whose adb sees no device.
+    fake_android(&mut sandbox, &[]);
+    let sessions = sandbox.cwd.join("target/icm/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+
+    // The desktop app icm launched, in the desktop pipeline's record: it
+    // leads its own process group, as `icm run desktop` starts it.
+    let mut child = Command::new("sleep")
+        .arg("120")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let app = child.id() as i32;
+    std::fs::write(
+        sessions.join("desktop.json"),
+        serde_json::json!({
+            "platform": "desktop", "pid": app, "pgid": app, "run": "r1", "run_dir": "/nonexistent",
+            "exe": "sleep", "cwd": "/", "stdout": "/dev/null", "stderr": "/dev/null",
+            "launched": "2026-10-06T00:00:00.000Z", "profile": "debug"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // Android's app pid is a pid on the device; a host process that
+    // happens to have the same number is not icm's.
+    let bystander = orphan_sleep();
+    std::fs::write(
+        sessions.join("android.json"),
+        serde_json::json!({
+            "schema": "icm.session.android/1", "run": "r2", "serial": "emulator-5554",
+            "kind": "emulator", "booted_by_icm": false, "abi": "arm64-v8a",
+            "app_id": "com.example.app", "pid": bystander, "started": "2026-10-06T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let listed = sandbox.json(&["ps"]);
+    let android = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["platform"] == "android")
+        .cloned()
+        .unwrap();
+    assert_eq!(android["pids"], serde_json::json!([]), "{listed}");
+
+    let stopped = sandbox.json(&["stop", "--all"]);
+    assert_eq!(stopped["exit"], 0, "{stopped}");
+    let until = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < until,
+            "the desktop app is still running: {stopped}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let desktop = stopped["stopped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["platform"] == "desktop")
+        .cloned()
+        .unwrap();
+    assert_eq!(desktop["pid"], app, "{stopped}");
+    assert!(
+        alive(bystander),
+        "a host process with the device app's pid was signalled"
+    );
+    assert!(!sessions.join("desktop.json").exists());
+    assert!(!sessions.join("android.json").exists());
+    let _ = Command::new("/bin/kill")
+        .arg(bystander.to_string())
+        .status();
 }

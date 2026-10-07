@@ -66,7 +66,10 @@ pub struct Session {
     pub abi: String,
     /// The app id.
     pub app_id: String,
-    /// The app's pid at launch.
+    /// The app's pid at launch, on the device. Written as `app_pid`: a
+    /// top-level `pid` in a session file is a host process that `icm stop`
+    /// and `icm ps` may signal or probe ([`crate::session`]).
+    #[serde(rename = "app_pid", alias = "pid")]
     pub pid: Option<u32>,
     /// The device clock at launch (`seconds.nanoseconds`).
     pub log_mark: Option<String>,

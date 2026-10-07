@@ -1330,9 +1330,30 @@ pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
 pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     let (project, host, tools) = setup(ctx)?;
     let ctx: &Ctx = ctx;
+    let stopped = stop_session(ctx, &project, &host, &tools, args.shutdown)?;
+    ctx.rep.summary(if stopped.is_empty() {
+        "nothing to stop on Android".to_string()
+    } else {
+        format!("stopped {} on Android", stopped.len())
+    });
+    ctx.rep.set("stopped", Value::Array(stopped));
+    Ok(())
+}
+
+/// Stops this project's app on its device (`am force-stop`) and, with
+/// `shutdown`, the icm-managed emulators it or the project's default AVD
+/// runs on; removes the session. Returns what it stopped (for `icm stop
+/// --all` too).
+pub fn stop_session(
+    ctx: &Ctx,
+    project: &Project,
+    host: &HostConfig,
+    tools: &Toolset,
+    shutdown: bool,
+) -> Result<Vec<Value>> {
     let app_id = project.config.config.app.id.clone();
-    let session = session::read(&project);
-    let listed = adb::devices(&tools)?;
+    let session = session::read(project);
+    let listed = adb::devices(tools)?;
     let online = |serial: &str| {
         listed
             .iter()
@@ -1343,7 +1364,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     if let Some(session) = &session
         && online(&session.serial)
     {
-        let adb = Adb::new(&tools, &session.serial)?;
+        let adb = Adb::new(tools, &session.serial)?;
         let outcome = ctx.step(
             "adb.force_stop",
             &adb.shell(&format!("am force-stop {}", adb::quote(&app_id)))
@@ -1352,10 +1373,10 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         if !outcome.success() {
             return Err(ctx.step_failure("adb.force_stop", CheckId::ToolFailed, &outcome));
         }
-        stopped.push(json!({"app": app_id, "serial": session.serial}));
+        stopped.push(json!({"platform": "android", "app": app_id, "serial": session.serial}));
     }
 
-    if args.shutdown {
+    if shutdown {
         let mut targets: Vec<(String, Option<u32>)> = Vec::new();
         if let Some(session) = &session
             && online(&session.serial)
@@ -1363,9 +1384,9 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         {
             targets.push((session.serial.clone(), session.emulator_pid));
         }
-        let default = device::default_avd(&host, project.config.config.android.target_sdk);
+        let default = device::default_avd(host, project.config.config.android.target_sdk);
         if avd::is_managed(&default) {
-            for (serial, name) in device::running_emulators(&tools, &listed) {
+            for (serial, name) in device::running_emulators(tools, &listed) {
                 if name.as_deref() == Some(default.as_str())
                     && !targets.iter().any(|(s, _)| *s == serial)
                 {
@@ -1375,19 +1396,13 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         }
         for (serial, pid) in targets {
             ctx.rep.progress(format!("shutting down {serial}"));
-            avd::shutdown(&tools, &serial, pid)?;
-            stopped.push(json!({"emulator": serial}));
+            avd::shutdown(tools, &serial, pid)?;
+            stopped.push(json!({"platform": "android", "emulator": serial}));
         }
     }
 
-    session::remove(&project);
-    ctx.rep.summary(if stopped.is_empty() {
-        "nothing to stop on Android".to_string()
-    } else {
-        format!("stopped {} on Android", stopped.len())
-    });
-    ctx.rep.set("stopped", Value::Array(stopped));
-    Ok(())
+    session::remove(project);
+    Ok(stopped)
 }
 
 // ---- devices -------------------------------------------------------------------
