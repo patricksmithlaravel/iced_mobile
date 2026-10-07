@@ -7,8 +7,8 @@
 //! android = ["platform/android/checks.sh", "scripts/smoke.py"]
 //! ```
 //!
-//! `run` calls [`run`] after a successful launch (and `test --on`, in a
-//! later phase, after each step). Each script:
+//! `run` calls [`run`] after a successful launch, and `test --on android
+//! --lifecycle` after each step that leaves the app in front. Each script:
 //!
 //! - runs from the project directory (where icm.toml is), with stdin closed,
 //!   in its own process group, for at most [`TIMEOUT`];

@@ -138,8 +138,8 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   `UPLOAD.md`, `upload.sh` (run with a fake `xcrun` and `icm`), the
   ledger, verify's hash check, THIRD_PARTY_NOTICES on `fixtures/release`
   (path dependencies with licence files, a build and a dev dependency, a
-  stand-in iced and iced_graphics with Fira Sans's licence), and the stub
-  pipelines' exit 2.
+  stand-in iced and iced_graphics with Fira Sans's licence), and every
+  target's `--dry-run` planning without writing a file.
 - `tests/ios_release.rs` runs `icm release ios`, `verify ios` and
   `diagnose altool` against fake `cargo`, `xcrun`, `codesign`, `security`,
   `xcodebuild` and `sw_vers` (`fixtures/fake-ios/`), a synthetic device

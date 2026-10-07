@@ -90,8 +90,13 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 ## Releases belong to the owner
 - `icm release ios --sign none --json -q` builds and checks the App Store `.ipa` without the
   owner's certificates; a signed release, `UPLOAD.md` and `upload.sh` are the owner's. App Store
-  screenshots: `icm run ios-sim --store`, then `icm shot ios-sim --store --name <screen>`. The
-  other stores' packages come with a later icm.
+  screenshots: `icm run ios-sim --store`, then `icm shot ios-sim --store --name <screen>`.
+- `icm release android --sign none --json -q` builds and checks the Google Play `.aab` without the
+  owner's upload key (`--apk` adds a universal APK); while icm's emulator runs, it also installs the
+  release there once (`--no-smoke` skips that).
+- `icm release macos --sign none --json -q`, then the same with `--dmg`, builds the macOS `.app`,
+  its zip and the DMG; `icm release linux --sign none --json -q` builds the `.deb` and the AppImage.
+  Each desktop target builds on its own OS, and icm does not run on Windows yet.
 - NEVER upload, publish or notarize anything, and never run `altool`, `notarytool`, `fastlane`,
   `wrangler` or any other command that does.
 - Signing identities, profiles, keystores and their passwords are the owner's. Don't create or guess them.

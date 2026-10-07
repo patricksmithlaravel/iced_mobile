@@ -11,8 +11,10 @@
 //!    flow's file and line) and likely causes. Flows in a `[test] flows`
 //!    directory other than `tests/flows` run through `icm-ice` one by one.
 //!
-//! `--on <platform>` and `--lifecycle` (tests on a device) come in a later
-//! phase.
+//! `icm test --on android --lifecycle` is the Android lifecycle suite
+//! (`crate::android::lifecycle`, routed before this module). Other tests on
+//! a device (`--on` without `--lifecycle`, or another platform) come in a
+//! later phase.
 
 use crate::cargo::Select;
 use crate::catalogue::CheckId;
@@ -33,11 +35,14 @@ pub fn run(ctx: &mut Ctx, args: &TestArgs) -> Result<()> {
     if args.device().is_some() || args.lifecycle {
         return Err(IcmError::new(
             CheckId::UsageNotImplemented,
-            "`icm test --on <platform>` and `--lifecycle` (tests on a device) come in a later phase; this icm runs host tests",
+            "`icm test --on` runs only the Android lifecycle suite (`--on android --lifecycle`) in this icm; other platforms and `--on` without `--lifecycle` come in a later phase",
         )
         .fix(
-            "Run the host tests, and check a device with `icm run <platform>`.",
-            &["icm test --json -q"],
+            "Run the host tests, or the Android lifecycle suite, and check a device with `icm run <platform>`.",
+            &[
+                "icm test --json -q",
+                "icm test --on android --lifecycle --json -q",
+            ],
         ));
     }
 

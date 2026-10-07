@@ -13,8 +13,8 @@ iced is a cross-platform GUI library for Rust in the style of [The Elm Architect
 messages, `update` and `view`. iced_mobile is upstream iced's 0.14 branch with Android and iOS
 support added. The same `update`, `view` and `run` work on a phone, and `icm` creates an app from a
 template, then checks, builds, runs, screenshots, logs and tests it on the desktop, the web, the iOS
-Simulator and Android. Publishing to the App Store, Google Play, web hosts and desktop installers is
-planned.
+Simulator and Android. `icm release` builds and checks what the App Store, Google Play, a web host
+and desktop installers take; the owner signs, uploads and publishes it.
 
 **Status: experimental.** The first release is `v0.14.1-mobile.1`. This is an independent fork of
 [iced-rs/iced](https://github.com/iced-rs/iced), not endorsed by the iced project. Upstream has
@@ -215,15 +215,14 @@ crates keep upstream's version numbers.
 
 ## Roadmap
 
-- **Releases** (design §11 and §18, phases 3 to 5; the App Store and iPhone runs are in): `icm
-  release` for Google Play (`.aab`) with a lifecycle test suite, static web hosting, and
-  desktop installers (`.app`/`.dmg`, `.msi`/`.exe`, `.deb`/AppImage). icm builds and checks the
-  artifacts and prints the upload commands, but the owner runs them.
+- **Releases:** phases 2 to 5 (design §11 and §18) are in. Still to come: icm on Windows hosts,
+  which the `.msi` and NSIS installers need, the lifecycle suite on the iOS Simulator and
+  `icm ci init`. The owner's first uploads will show whether the stores accept icm's artifacts.
 - **Framework:** safe-area insets, the clipboard and dark-mode detection on Android and iOS, and a
   lifecycle subscription that reaches `update` (today `on_lifecycle` takes a plain `fn`).
 - **Agent bridge** (phase 6): tap, type and read the widget tree of a running app on every platform.
-- **CI:** GitHub Actions does not run on this fork yet, and the workflows in `.github/workflows`
-  come from upstream. The plan for the fork's own CI is in design §17.
+- **CI:** the fork's workflows are in `.github/workflows` (design §17), but GitHub Actions does
+  not run on this fork yet: they start once the owner enables Actions.
 
 ## License and credits
 

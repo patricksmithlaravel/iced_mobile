@@ -1,9 +1,10 @@
 //! End-to-end tests of the release core: `icm release`, `verify`,
-//! `upload-commands`, `ledger` and `diagnose`. The target pipelines are
-//! stubs in this build, so most tests run the core through `icm __test
-//! release|verify <target>`, whose stand-in pipeline writes a small file
-//! where the artifact would be. Nothing is built, signed or uploaded;
-//! `upload.sh` runs against fake `xcrun` and `icm` scripts.
+//! `upload-commands`, `ledger` and `diagnose`. Most tests run the core
+//! through `icm __test release|verify <target>`, whose stand-in pipeline
+//! writes a small file where the artifact would be; each target's own
+//! pipeline has its own test file (`ios_release.rs`, `android_release.rs`,
+//! `web_release.rs`, `desktop_release.rs`). Nothing is built, signed or
+//! uploaded; `upload.sh` runs against fake `xcrun` and `icm` scripts.
 
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
@@ -177,38 +178,15 @@ fn ids(result: &Value, key: &str) -> Vec<String> {
 }
 
 #[test]
-fn the_target_pipelines_are_stubs_that_say_so() {
+fn every_target_pipeline_plans_without_writing() {
     let app = App::new();
     for target in ["ios", "android", "web", "macos", "windows", "linux"] {
-        // A pipeline this build implements plans its steps; its own tests
-        // cover it (the web: tests/web_release.rs).
+        // Every target has a pipeline; its own tests build with it.
         let plan = app.json(&["release", target, "--dry-run"]);
-        if plan["exit"] == 0 {
-            assert!(!app.dir().join("target/icm/dist").exists(), "{target}");
-            continue;
-        }
-        let result = app.json(&["release", target, "--sign", "none", "--allow-dirty"]);
-        assert_eq!(result["exit"], 2, "{target}: {result}");
-        assert_eq!(
-            result["errors"][0]["id"], "usage.not_implemented",
-            "{target}"
-        );
-        assert!(
-            result["errors"][0]["detail"]
-                .as_str()
-                .unwrap()
-                .contains(&format!("the {target} release pipeline")),
-            "{result}"
-        );
-        // --dry-run is honest about it too.
-        let plan = app.json(&["release", target, "--dry-run"]);
-        assert_eq!(plan["exit"], 2, "{target}: {plan}");
+        assert_eq!(plan["exit"], 0, "{target}: {plan}");
+        assert!(plan["plan"].is_array(), "{target}: {plan}");
         // Nothing was written.
         assert!(!app.dir().join("target/icm/dist").exists(), "{target}");
-
-        let verify = app.json(&["verify", target, "--artifact", "Cargo.toml"]);
-        assert_eq!(verify["exit"], 2, "{target}: {verify}");
-        assert_eq!(verify["errors"][0]["id"], "usage.not_implemented");
     }
     // The iOS pipeline's parser reads altool's JSON; a Cargo.toml is not.
     let diagnose = app.json(&["diagnose", "altool", "Cargo.toml"]);

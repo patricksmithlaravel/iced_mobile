@@ -60,9 +60,10 @@
 //! - never upload, publish or notarize; a secret reaches a tool only
 //!   through an environment variable or the keychain.
 //!
-//! The six pipelines in this build are stubs that fail with
-//! `usage.not_implemented`; `icm __test release <target>` runs the core
-//! with a stand-in pipeline ([`fake`]).
+//! Every target has its pipeline: [`ios`], [`android`], [`web`],
+//! [`macos`], [`windows`] and [`linux`] (with [`desktop`], what the three
+//! desktop ones share). `icm __test release <target>` runs the core with a
+//! stand-in pipeline ([`fake`]) for icm's tests.
 
 pub mod android;
 pub mod compile;
