@@ -243,19 +243,10 @@ pub fn main_display_scale() -> Option<f64> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn listing_windows_works_without_permission() {
-        // icm's test process owns no window.
-        let pid = std::process::id() as i32;
-        let all = windows();
-        assert!(all.iter().all(|window| window.pid != pid));
-        assert!(main_window(pid).is_none());
-        // Only a query: it must not prompt or crash.
-        let _ = screen_capture_allowed();
-        if let Some(scale) = main_display_scale() {
-            assert!((1.0..=4.0).contains(&scale), "{scale}");
-        }
-    }
+    // The CoreGraphics calls themselves are tested in
+    // `tests/macos_windows.rs`, a process of their own: run next to the
+    // unit tests that spawn children, they got those children killed
+    // (SIGKILL) now and then.
 
     #[test]
     fn the_main_window_is_the_largest_normal_one_on_screen() {
