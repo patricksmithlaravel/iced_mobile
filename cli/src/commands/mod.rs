@@ -19,7 +19,7 @@ use crate::catalogue::CheckId;
 use crate::cli::{Command, LATER_COMMANDS, Platform};
 use crate::context::Ctx;
 use crate::error::{IcmError, Result};
-use crate::platform::{desktop, ios_sim};
+use crate::platform::{desktop, ios_device, ios_sim};
 
 /// Runs a command.
 pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
@@ -108,6 +108,18 @@ fn route(ctx: &mut Ctx, command: Command) -> Result<()> {
         }
         Command::Input(args) if args.platform == Platform::IosSim => {
             ios_sim::input::input(ctx, &args)
+        }
+        // ios-device (design §10.5); its sessions stop by their record
+        Command::Build(args) if args.platform == Some(Platform::IosDevice) && !args.all => {
+            ios_device::build(ctx, &args)
+        }
+        Command::Run(args) if args.platform == Platform::IosDevice => ios_device::run(ctx, &args),
+        Command::Logs(args) if args.platform == Platform::IosDevice => ios_device::logs(ctx, &args),
+        Command::Shot(args) if !args.headless && args.platform == Some(Platform::IosDevice) => {
+            ios_device::shot(ctx, &args)
+        }
+        Command::Input(args) if args.platform == Platform::IosDevice => {
+            ios_device::input(ctx, &args)
         }
         // android (design §10.4); `icm doctor android` is the generic doctor
         Command::Build(args) if args.platform == android && !args.all => {

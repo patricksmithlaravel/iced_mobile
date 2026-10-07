@@ -197,7 +197,7 @@ fn usage_errors_exit_two_with_a_result() {
 #[test]
 fn unimplemented_commands_say_so() {
     let sandbox = Sandbox::new();
-    for args in [vec!["run", "ios-device"], vec!["version", "show"]] {
+    for args in [vec!["clean"], vec!["version", "show"]] {
         let mut full = args.clone();
         full.extend(["--json", "-q"]);
         let result = result(&sandbox.run(&full));
@@ -218,23 +218,14 @@ fn unimplemented_commands_say_so() {
 }
 
 #[test]
-fn devices_lists_the_desktop_and_refuses_ios_devices() {
+fn devices_lists_the_desktop() {
+    // Physical iOS devices: tests/ios_device.rs, with a fake devicectl.
     let sandbox = Sandbox::new();
     let desktop = result(&sandbox.run(&["devices", "desktop", "--json", "-q"]));
     assert_eq!(desktop["exit"], 0, "{desktop}");
     assert_eq!(
         desktop["platforms"]["desktop"]["devices"][0]["kind"],
         "desktop"
-    );
-    let device = result(&sandbox.run(&["devices", "ios-device", "--json", "-q"]));
-    assert_eq!(device["exit"], 2);
-    assert_eq!(device["errors"][0]["id"], "usage.not_implemented");
-    assert!(
-        device["errors"][0]["fix"]["commands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|command| command == "icm devices ios-sim --json -q")
     );
 }
 

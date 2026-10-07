@@ -28,7 +28,7 @@ not upstream.
 |---|---|---|
 | Desktop (macOS, Linux, Windows) | Behaves as upstream iced on its 0.14 branch. `icm run desktop` builds, launches, screenshots and reads logs on macOS and Linux hosts. | icm cannot build installers yet, and does not run on Windows hosts yet. |
 | Web (wasm32) | Behaves as upstream iced. `icm run web` builds with wasm-bindgen, serves the app locally and drives it in headless Chrome (screenshots, console logs, input). | No `icm release` for the web (a site to deploy) and no hosting yet. |
-| iOS (iPhone) | UIKit scene life cycle (required with the iOS 27 SDK), suspend/resume hook, logging to the unified log, Fira Sans by default with fallback to system fonts. `icm run ios-sim` builds the `.app`, installs and launches it on a managed simulator, screenshots it and reads its logs. | icm drives the simulator only: no runs on a physical iPhone and no App Store builds yet. No tap, swipe, text, key or rotate input on the simulator yet (appearance, font scale, background and foreground work), so test the UI with `.ice` flows and `icm ui --headless`. No iPad. |
+| iOS (iPhone) | UIKit scene life cycle (required with the iOS 27 SDK), suspend/resume hook, logging to the unified log, Fira Sans by default with fallback to system fonts. `icm run ios-sim` builds the `.app`, installs and launches it on a managed simulator, screenshots it and reads its logs. `icm release ios` builds a signed, store-checked `.ipa` with its dSYM and the owner's upload commands; `icm run ios-device` installs and launches on an iPhone through `devicectl`. | Device runs and signed releases need the owner's certificates and profiles, and device runs are tested with stand-in tools only so far. No input on a physical iPhone. No tap, swipe, text, key or rotate input on the simulator yet (appearance, font scale, background and foreground work), so test the UI with `.ice` flows and `icm ui --headless`. No iPad. |
 | Android | `NativeActivity` (no Java code), suspend/resume, a destroyed Activity (the app starts over in the next one), logging to logcat, Fira Sans with system-font fallback. `icm run android` builds and signs a debug APK and runs it on a managed emulator or a device connected over adb, with screenshots, logs and tap, swipe, text and key input. | No Google Play bundles yet. Text input gets key events only (no composition). One window. |
 
 Both phones: no safe-area insets, no clipboard and no dark-mode detection yet. Apps cannot quit
@@ -215,8 +215,8 @@ crates keep upstream's version numbers.
 
 ## Roadmap
 
-- **Releases** (design §11 and §18, phases 2 to 5): `icm release` for the App Store and runs on a
-  physical iPhone, Google Play (`.aab`) with a lifecycle test suite, static web hosting, and
+- **Releases** (design §11 and §18, phases 3 to 5; the App Store and iPhone runs are in): `icm
+  release` for Google Play (`.aab`) with a lifecycle test suite, static web hosting, and
   desktop installers (`.app`/`.dmg`, `.msi`/`.exe`, `.deb`/AppImage). icm builds and checks the
   artifacts and prints the upload commands, but the owner runs them.
 - **Framework:** safe-area insets, the clipboard and dark-mode detection on Android and iOS, and a

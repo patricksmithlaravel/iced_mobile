@@ -72,7 +72,8 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         }
     }
 
-    // Records no platform stops itself (ios-device until phase 2, a
+    // Records no platform stops itself (ios-device, whose record names its
+    // devicectl terminate command and console process; a
     // platform this icm does not know): by what the record says.
     for (path, session) in session::list(&dir) {
         let platform = path

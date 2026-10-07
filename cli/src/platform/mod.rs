@@ -3,4 +3,5 @@
 //! `commands/mod.rs` routes each platform's commands to its module.
 
 pub mod desktop;
+pub mod ios_device;
 pub mod ios_sim;

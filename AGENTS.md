@@ -161,4 +161,5 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
 - **winit itself:** `vendor/winit/src/platform_impl/android/` and `.../ios/`.
 - **What icm does per platform:** `cli/src/android/`, `cli/src/platform/ios_sim/`, `cli/src/web/` and
   `cli/src/platform/desktop/`. Pipelines are in `docs/icm/DESIGN.md` §10, and the output contract is
-  in §4.
+  in §4. Physical iPhones: `cli/src/platform/ios_device/`; the iOS release: `cli/src/release/ios.rs`
+  and `cli/src/ios/` (§11.1, §12.2).

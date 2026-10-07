@@ -14,24 +14,12 @@ use std::time::Duration;
 pub fn run(ctx: &mut Ctx, args: &DevicesArgs) -> Result<()> {
     let platforms = match args.platform {
         Some(Platform::Android) => return crate::android::devices(ctx),
-        Some(Platform::IosDevice) => {
-            return Err(IcmError::new(
-                CheckId::UsageNotImplemented,
-                "physical iOS devices come with a later phase of icm",
-            )
-            .fix(
-                "List the simulators, or the connected devices with Xcode's tool.",
-                &[
-                    "icm devices ios-sim --json -q",
-                    "xcrun devicectl list devices",
-                ],
-            ));
-        }
         Some(platform) => vec![platform],
         None => {
             let mut all = vec![Platform::Desktop, Platform::Web];
             if cfg!(target_os = "macos") {
                 all.push(Platform::IosSim);
+                all.push(Platform::IosDevice);
             }
             all.push(Platform::Android);
             all
@@ -55,7 +43,7 @@ pub fn run(ctx: &mut Ctx, args: &DevicesArgs) -> Result<()> {
                 let avds = value["avds"].as_array().map_or(0, Vec::len);
                 (lines, value, format!("{online} online, {avds} AVD(s)"))
             }),
-            Platform::IosDevice => continue,
+            Platform::IosDevice => crate::platform::ios_device::listing(ctx),
         };
         match found {
             Ok((lines, value, count)) => {

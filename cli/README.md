@@ -51,6 +51,7 @@ cargo test
 | `image.rs` | PNG decode/encode, previews, cropping, blank detection |
 | `platform/desktop/` | `build`/`run`/`shot`/`logs`/`stop desktop`: launch, readiness, window capture (`macos.rs` FFI, `linux.rs` X11), headless fallback (`headless.rs`), log records (`logs.rs`) |
 | `platform/ios_sim/` | `build`/`run`/`logs`/`shot`/`stop`/`input ios-sim`: simulator choice (`simctl.rs`), bundle and plists (`bundle.rs`, `plist.rs`), Mach-O gates (`macho.rs`), PNG preview and blank detection (`image.rs`), log normalization (`logs.rs`), the session file (`session.rs`); fake-tool tests in `tests/ios_sim.rs` |
+| `platform/ios_device/` | `build`/`run`/`shot`/`logs`/`devices ios-device` through `xcrun devicectl` (`devicectl.rs` parses its JSON): device choice, development signing, install, the detached `--console` launch, readiness, screenshots; the session record that `icm stop` ends; fake-tool tests in `tests/ios_device.rs` |
 | `preview.rs` | after a capture: PNG decode, `screen.preview.png`, blank detection (`run.screen_blank`) |
 | `sessions.rs` | `target/icm/sessions/<platform>.json` records: write (mode 0600), list, alive (pid plus a command-line marker), terminate |
 | `web/` | the web platform: build, wasm-bindgen and the site (`site.rs`); the detached session host (`host.rs`) with its std server (`server.rs`), headless Chrome over `--remote-debugging-pipe` (`cdp.rs`) and console capture (`console.rs`); the control client (`client.rs`); viewports (`viewport.rs`) |
