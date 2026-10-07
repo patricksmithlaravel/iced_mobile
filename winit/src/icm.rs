@@ -28,17 +28,27 @@
 //! | `kind` | Fields | When |
 //! |---|---|---|
 //! | `start` | `protocol` (1), `framework` (the iced version), `pid` (`null` on the web), `platform` (`macos`, `linux`, `windows`, `ios`, `android`, `web`, ...), `bridge` (the agent bridge protocol, `null` when it is not compiled in) | the shell starts |
-//! | `ready` | `ms` (since `start`), `window{size, physical, scale}` (logical and physical size, scale factor), `backend` (`wgpu`, `tiny-skia`), `adapter`, `api` (`Metal`, `Vulkan`, `Gl`, ...) | the first frame was presented |
+//! | `ready` | `ms` (since `start`), `window{size, physical, scale}` (logical and physical size, scale factor), `backend` (`wgpu`, `tiny-skia`), `adapter`, `api` (`Metal`, `Vulkan`, `Gl`, ...) | the shell's first frame was presented, once per `start` |
 //! | `lifecycle` | `state` (`suspended`, `resumed`) | winit reports the application suspended or resumed; see [`Lifecycle`](crate::Lifecycle) |
 //! | `panic` | `message`, `location` (`file:line:column` or `null`), `thread` | a thread panics, once [`install_panic_hook`] ran |
 //! | `warning` | `code`, `message` | something degraded; see [`warning`] |
-//! | `exit` | `code` (0, or 1 when the shell stopped with an error) | the shell stopped; iOS and the web never send it |
+//! | `exit` | `code` (0, or 1 when the shell stopped with an error), `destroyed` (`true` when Android destroyed the Activity) | the shell stopped; iOS and the web never send it |
 //!
 //! For example:
 //!
 //! ```text
 //! ICM_EVENT {"v":1,"kind":"ready","ms":812,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu","adapter":"Apple M4","api":"Metal"}
 //! ```
+//!
+//! On Android the process can outlive the shell. When Android destroys the
+//! Activity (Back, a configuration change the manifest does not list, memory
+//! reclaim), the shell sends `lifecycle` `suspended`, then `exit` with
+//! `destroyed: true`, and `iced::android_main!` returns while the process
+//! lives on. The next Activity of that process starts the shell again: a new
+//! `start` (with the same `pid`), then its own `ready`, whose `ms` counts
+//! from that `start`. An `exit` with `destroyed: false` on Android means the
+//! application stopped while its Activity was on screen, and the process
+//! ends next.
 //!
 //! Fields may be added to a kind, and kinds may be added, within version 1.
 //! A reader must ignore what it does not know.
@@ -47,8 +57,8 @@ use crate::core::time::Instant;
 use crate::graphics::compositor;
 
 use std::fmt::Write as _;
-use std::sync::OnceLock;
 use std::sync::atomic::{self, AtomicBool};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// The version of the protocol, in every line as `"v"` and in `start` as
 /// `"protocol"`.
@@ -134,16 +144,20 @@ pub fn install_panic_hook() {
     });
 }
 
-/// When the shell started, for `ready`'s `ms`.
-static STARTED: OnceLock<Instant> = OnceLock::new();
+/// When the shell last started, for `ready`'s `ms`.
+static STARTED: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// Emits `start`. Called once, as the shell starts.
+/// Emits `start`. Called each time the shell starts: once per process,
+/// except on Android, where each Activity of the process starts it again.
+/// `ready` is then due again, and its `ms` counts from this `start`.
 pub(crate) fn start() {
     if !enabled() {
         return;
     }
 
-    let _ = STARTED.get_or_init(Instant::now);
+    *STARTED.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some(Instant::now());
+    READY.store(false, atomic::Ordering::Relaxed);
 
     install_panic_hook();
 
@@ -164,7 +178,7 @@ pub(crate) fn start() {
     );
 }
 
-/// Whether `ready` was emitted.
+/// Whether `ready` was emitted since the last `start`.
 static READY: AtomicBool = AtomicBool::new(false);
 
 /// Whether events are on and `ready` is still to come, so that the shell
@@ -173,7 +187,7 @@ pub(crate) fn awaits_ready() -> bool {
     enabled() && !READY.load(atomic::Ordering::Relaxed)
 }
 
-/// Emits `ready`, the first time it is called in the process.
+/// Emits `ready`, the first time it is called since the last `start`.
 pub(crate) fn ready(
     logical: Size<f32>,
     physical: Size<u32>,
@@ -185,8 +199,8 @@ pub(crate) fn ready(
         return;
     }
 
-    let ms = STARTED
-        .get()
+    let started = *STARTED.lock().unwrap_or_else(PoisonError::into_inner);
+    let ms = started
         .map(|started| started.elapsed().as_millis())
         .unwrap_or_default();
 
@@ -221,14 +235,19 @@ pub(crate) fn lifecycle(state: &str) {
     emit(Event::new("lifecycle").str("state", state));
 }
 
-/// Emits `exit`.
+/// Emits `exit`; `destroyed` when the shell stopped because Android
+/// destroyed its Activity.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) fn exit(code: i32) {
+pub(crate) fn exit(code: i32, destroyed: bool) {
     if !enabled() {
         return;
     }
 
-    emit(Event::new("exit").number("code", code));
+    emit(
+        Event::new("exit")
+            .number("code", code)
+            .boolean("destroyed", destroyed),
+    );
 }
 
 /// The name `start` gives the platform.
@@ -415,6 +434,10 @@ impl Event {
         }
     }
 
+    fn boolean(self, key: &str, value: bool) -> Self {
+        self.raw(key, if value { "true" } else { "false" })
+    }
+
     fn null(self, key: &str) -> Self {
         self.raw(key, "null")
     }
@@ -479,11 +502,12 @@ mod tests {
             .opt_str("location", None)
             .number("pid", 42)
             .opt_number("missing", None::<u32>)
+            .boolean("flag", true)
             .finish();
 
         assert_eq!(
             event,
-            "{\"v\":1,\"kind\":\"panic\",\"message\":\"a \\\"quoted\\\"\\nline\\\\ with \\u0000\\u001b and \\u2028\",\"location\":null,\"pid\":42,\"missing\":null}"
+            "{\"v\":1,\"kind\":\"panic\",\"message\":\"a \\\"quoted\\\"\\nline\\\\ with \\u0000\\u001b and \\u2028\",\"location\":null,\"pid\":42,\"missing\":null,\"flag\":true}"
         );
         assert!(!event.contains('\n'));
     }

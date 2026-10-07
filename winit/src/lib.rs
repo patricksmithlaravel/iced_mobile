@@ -784,7 +784,13 @@ where
         let mut runner = runner;
         let _ = event_loop.run_app(&mut runner);
 
-        icm::exit(if runner.error.is_some() { 1 } else { 0 });
+        #[cfg(target_os = "android")]
+        let destroyed = ACTIVITY_DESTROYED.get();
+
+        #[cfg(not(target_os = "android"))]
+        let destroyed = false;
+
+        icm::exit(if runner.error.is_some() { 1 } else { 0 }, destroyed);
 
         runner.error.map(Err).unwrap_or(Ok(()))
     }
