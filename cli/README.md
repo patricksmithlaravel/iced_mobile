@@ -59,6 +59,7 @@ cargo test
 | `signatures.rs` | known failure signatures (design §13.4) → `likely_causes`; `signatures::annotate(error, text, &Facts)` |
 | `hooks.rs` | project hooks, `[checks] <platform>` scripts; every platform's `run` calls `hooks::run_for` once the app is up |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
+| `release/` | `release`, `verify`, `upload-commands`, `ledger`, `diagnose`: the core every target shares (`mod.rs`: preconditions, owner items, the `Pipeline` contract), `gates.rs` (`--sign none` and owner items), `dist.rs` and `manifest.rs` (`target/icm/dist/`, `artifacts.json`), `upload.rs` (`UPLOAD.md`, `upload.sh`), `owner_plans.rs` (the only file with upload or notarize argv), `ledger.rs`, `verify.rs`; one stub per target (`ios.rs`, `android.rs`, `web.rs`, `macos.rs`, `windows.rs`, `linux.rs`) and `fake.rs`, the stand-in pipeline of `icm __test release` |
 | `pinned.rs` | the tools icm downloads itself (`tools.toml`, embedded: version, URL, size, sha256 per host): find, install with `--yes` (curl, sha256 check, unpack), doctor's WARN and `--fix --yes` |
 | `policy.rs` | the dated store policy table (`policy/stores.toml`, embedded): the floor in force on a day, `env.policy_stale`, upcoming floors; `icm print policy` |
 | `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices` for Android (`doctor android` is `doctor/`): APK pipeline, managed AVD, adb, logcat, session (`android/mod.rs` has the module map) |
@@ -121,7 +122,14 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   `iced` is a local stand-in, offline in a second; `doctor` runs against a
   fake SDK, JDK, Rust sysroot (`ICM_TOOL_RUSTC`/`RUSTUP`) and Xcode
   (`DEVELOPER_DIR`, `ICM_TOOL_XCRUN`/`XCODEBUILD`), so no test downloads
-  anything or touches a real simulator, emulator or `~/.android`.
+  anything or touches a real simulator, emulator or `~/.android`. Its
+  fake `curl` copies `file://` URLs and refuses the network, so pinned
+  tools install from local files (`ICM_TOOLS_TOML`).
+- `tests/release.rs` runs the release core through `icm __test
+  release|verify <target>` (a stand-in pipeline that writes a small file):
+  owner items and `--sign none`, `artifacts.json`, `dist/latest`,
+  `UPLOAD.md`, `upload.sh` (run with a fake `xcrun` and `icm`), the
+  ledger, verify's hash check, and the stub pipelines' exit 2.
 
 ## Environment
 

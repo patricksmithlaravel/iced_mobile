@@ -354,7 +354,7 @@ fn triple(project: &Project, platform: Platform) -> Option<String> {
 /// `app.icon.invalid` (exit 3) unless `[app] icon` is a square PNG of at
 /// least 1024x1024; `app.icon.placeholder` (WARN) while it is the
 /// template's.
-fn icon_check(project: &Project) -> Check {
+pub fn icon_check(project: &Project) -> Check {
     let config = &project.config;
     let Some(icon) = config.config.app.icon.as_deref() else {
         return Check::warn(

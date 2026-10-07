@@ -694,6 +694,18 @@ catalogue! {
     StorePolicyUpcoming = "store.policy_upcoming", CheckFailed, Info, Agent,
         "A store floor in icm's policy table takes effect soon",
         "Plan for it before the date in the detail; `icm print policy` lists every floor.";
+    StoreMetadataMissing = "store.metadata_missing", NeedsOwner, Warn, Owner,
+        "The store listing needs a URL icm.toml does not have yet",
+        "The owner sets the `[store]` key the detail names (a privacy policy or support URL); UPLOAD.md lists it either way.";
+    ReleaseDirtyTree = "release.dirty_tree", CheckFailed, Fail, Agent,
+        "The release is not built from a clean git commit",
+        "Commit the changes, or pass --allow-dirty (artifacts.json then records `dirty: true`).";
+    ReleaseNotFound = "release.not_found", Usage, Fail, Agent,
+        "There is no release of that target (or no artifact at that path)",
+        "Make one with `icm release <target>`, or pass `--artifact <path>` of an existing artifact.";
+    ReleaseArtifactChanged = "release.artifact_changed", CheckFailed, Fail, Agent,
+        "A release file differs from what artifacts.json recorded",
+        "Something changed the file after the release; rerun `icm release <target>` rather than editing its outputs.";
     StoreNoAgentBridge = "store.no_agent_bridge", CheckFailed, Fail, Agent,
         "A release build contains the agent bridge",
         "Build releases without the `icm-agent` feature.";

@@ -151,6 +151,12 @@ fn route(ctx: &mut Ctx, command: Command) -> Result<()> {
         Command::Ui(args) => headless::ui(ctx, &args),
         Command::Test(args) => test::run(ctx, &args),
         Command::Clean(_) => not_implemented("clean"),
+        // releases (design §11, §12)
+        Command::Release(args) => crate::release::run(ctx, &args),
+        Command::Verify(args) => crate::release::verify::run(ctx, &args),
+        Command::UploadCommands(args) => crate::release::upload_commands(ctx, args.target),
+        Command::Ledger(args) => crate::release::ledger::run(ctx, &args),
+        Command::Diagnose(args) => crate::release::diagnose::run(ctx, &args),
     }
 }
 

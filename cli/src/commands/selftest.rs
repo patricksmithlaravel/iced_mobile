@@ -114,6 +114,12 @@ pub fn run(ctx: &mut Ctx, args: SelfTestArgs) -> Result<()> {
             }
             Ok(())
         }
+        Scenario::Release(args) => {
+            crate::release::run_with(ctx, &args, &crate::release::fake::Fake)
+        }
+        Scenario::Verify(args) => {
+            crate::release::verify::run_with(ctx, &args, &crate::release::fake::Fake)
+        }
         Scenario::Pinned { name } => {
             ensure_run_dir(ctx);
             let found = crate::pinned::require(ctx, &name)?;

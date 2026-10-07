@@ -197,7 +197,7 @@ fn usage_errors_exit_two_with_a_result() {
 #[test]
 fn unimplemented_commands_say_so() {
     let sandbox = Sandbox::new();
-    for args in [vec!["run", "ios-device"], vec!["release", "ios"]] {
+    for args in [vec!["run", "ios-device"], vec!["version", "show"]] {
         let mut full = args.clone();
         full.extend(["--json", "-q"]);
         let result = result(&sandbox.run(&full));
@@ -860,8 +860,24 @@ fn print_commands_lists_the_surface() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
     for expected in [
-        "new", "doctor", "check", "run", "logs", "shot", "input", "ui", "test", "stop", "explain",
-        "wait", "print",
+        "new",
+        "doctor",
+        "check",
+        "run",
+        "logs",
+        "shot",
+        "input",
+        "ui",
+        "test",
+        "stop",
+        "explain",
+        "wait",
+        "print",
+        "release",
+        "verify",
+        "upload-commands",
+        "ledger",
+        "diagnose",
     ] {
         assert!(
             names.contains(&expected),

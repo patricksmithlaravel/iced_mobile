@@ -42,6 +42,7 @@ pub mod policy;
 pub mod preview;
 pub mod process;
 pub mod raster;
+pub mod release;
 pub mod screen;
 pub mod session;
 pub mod sessions;

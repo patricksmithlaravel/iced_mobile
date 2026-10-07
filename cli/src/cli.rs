@@ -220,6 +220,37 @@ pub enum Command {
     /// Remove icm outputs
     Clean(CleanArgs),
 
+    /// Build store-gated release artifacts, artifacts.json, UPLOAD.md and upload.sh (never uploads)
+    #[command(
+        after_help = "Examples:\n  icm release ios --sign none --allow-dirty --json -q   # unsigned, for CI and agents\n  icm release android --json -q                        # signed; exit 9 hands errors[0].fix to the owner\n\nOutputs go to target/icm/dist/<version>+<build>/<target>/ (dist/latest/<target> points at the newest).\nicm never uploads, publishes or notarizes: the owner runs UPLOAD.md or upload.sh."
+    )]
+    Release(ReleaseArgs),
+
+    /// Run the store gates on a release artifact
+    #[command(
+        after_help = "Examples:\n  icm verify ios --json -q                         # the newest release in dist/latest/ios\n  icm verify android --artifact app-1.0.0-12.aab   # any artifact; artifacts.json next to it sets the severities"
+    )]
+    Verify(VerifyArgs),
+
+    /// Print UPLOAD.md of the newest release of a target
+    #[command(
+        name = "upload-commands",
+        after_help = "Examples:\n  icm upload-commands ios\n  icm upload-commands web --json -q"
+    )]
+    UploadCommands(UploadCommandsArgs),
+
+    /// The record of store uploads: show it, or mark a build uploaded (upload.sh's last line)
+    #[command(
+        after_help = "Examples:\n  icm ledger show\n  icm ledger mark-uploaded ios --build 12   # the owner, after the upload"
+    )]
+    Ledger(LedgerArgs),
+
+    /// Map a store tool's saved output (altool, notarytool, Play) to catalogue ids
+    #[command(
+        after_help = "Examples:\n  icm diagnose altool target/icm/dist/1.0.0+12/ios/upload.json\n  xcrun notarytool log <id> | icm diagnose notarytool -"
+    )]
+    Diagnose(DiagnoseArgs),
+
     /// Internal: the detached session host `run` spawns
     #[command(name = "__session", hide = true)]
     Session(RawArgs),
@@ -234,20 +265,7 @@ pub enum Command {
 }
 
 /// The commands planned for later phases (design §6, Appendix C item 30).
-pub const LATER_COMMANDS: &[&str] = &[
-    "init",
-    "release",
-    "verify",
-    "upload-commands",
-    "diagnose",
-    "ledger",
-    "version",
-    "framework",
-    "docs",
-    "ci",
-    "self",
-    "mcp",
-];
+pub const LATER_COMMANDS: &[&str] = &["init", "version", "framework", "docs", "ci", "self", "mcp"];
 
 impl Command {
     /// The command's name and target, for run ids and results.
@@ -299,6 +317,18 @@ impl Command {
             Command::Wait(_) => ("wait".into(), None),
             Command::Print(args) => ("print".into(), Some(args.what.name().into())),
             Command::Clean(args) => ("clean".into(), platform(&args.platform)),
+            Command::Release(args) => ("release".into(), Some(args.target.as_str().into())),
+            Command::Verify(args) => ("verify".into(), Some(args.target.as_str().into())),
+            Command::UploadCommands(args) => {
+                ("upload-commands".into(), Some(args.target.as_str().into()))
+            }
+            Command::Ledger(args) => match &args.action {
+                LedgerAction::Show => ("ledger".into(), Some("show".into())),
+                LedgerAction::MarkUploaded { target, .. } => {
+                    ("ledger".into(), Some(target.as_str().into()))
+                }
+            },
+            Command::Diagnose(args) => ("diagnose".into(), Some(args.tool.as_str().into())),
             Command::Session(_) => ("session".into(), None),
             Command::SelfTest(args) => ("selftest".into(), Some(args.scenario.name().into())),
             Command::External(args) => {
@@ -316,6 +346,10 @@ impl Command {
                 | Command::Print(_)
                 | Command::Ps
                 | Command::Session(_)
+                | Command::UploadCommands(_)
+                | Command::Ledger(LedgerArgs {
+                    action: LedgerAction::Show
+                })
         )
     }
 
@@ -323,7 +357,14 @@ impl Command {
     pub fn is_content(&self) -> bool {
         matches!(
             self,
-            Command::Explain(_) | Command::Print(_) | Command::Ps | Command::Ui(_)
+            Command::Explain(_)
+                | Command::Print(_)
+                | Command::Ps
+                | Command::Ui(_)
+                | Command::UploadCommands(_)
+                | Command::Ledger(LedgerArgs {
+                    action: LedgerAction::Show
+                })
         )
     }
 }
@@ -829,6 +870,177 @@ pub struct CleanArgs {
     pub runs: bool,
 }
 
+/// A release target (design §6 "Release targets").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, ValueEnum)]
+pub enum ReleaseTarget {
+    /// The App Store (an .ipa).
+    Ios,
+    /// Google Play (an .aab).
+    Android,
+    /// A static web host (a site).
+    Web,
+    /// macOS (.app and .dmg, notarized by the owner).
+    Macos,
+    /// Windows (.msi and NSIS .exe).
+    Windows,
+    /// Linux (.deb and AppImage).
+    Linux,
+}
+
+impl ReleaseTarget {
+    /// The target's name, e.g. `ios`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReleaseTarget::Ios => "ios",
+            ReleaseTarget::Android => "android",
+            ReleaseTarget::Web => "web",
+            ReleaseTarget::Macos => "macos",
+            ReleaseTarget::Windows => "windows",
+            ReleaseTarget::Linux => "linux",
+        }
+    }
+
+    /// Every target.
+    pub const ALL: [ReleaseTarget; 6] = [
+        ReleaseTarget::Ios,
+        ReleaseTarget::Android,
+        ReleaseTarget::Web,
+        ReleaseTarget::Macos,
+        ReleaseTarget::Windows,
+        ReleaseTarget::Linux,
+    ];
+}
+
+/// `--sign`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum SignMode {
+    /// Sign with the configured assets; missing ones exit 9 with the owner's steps.
+    #[default]
+    Auto,
+    /// Unsigned artifacts (`uploadable: false`): owner-dependent checks become WARNs.
+    None,
+}
+
+impl SignMode {
+    /// The mode's name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SignMode::Auto => "auto",
+            SignMode::None => "none",
+        }
+    }
+}
+
+/// `icm release`.
+#[derive(Clone, Debug, Args)]
+pub struct ReleaseArgs {
+    /// The target
+    #[arg(value_enum)]
+    pub target: ReleaseTarget,
+    /// auto: sign (exit 9 when the owner's assets are missing); none: unsigned, owner items WARN
+    #[arg(long, value_enum, default_value_t = SignMode::Auto)]
+    pub sign: SignMode,
+    /// Release from a git tree with uncommitted changes (artifacts.json records it)
+    #[arg(long)]
+    pub allow_dirty: bool,
+    /// Android: skip the smoke install on a device or emulator
+    #[arg(long)]
+    pub no_smoke: bool,
+    /// Android: also build a universal APK for sideloading
+    #[arg(long)]
+    pub apk: bool,
+    /// macOS: stage 2, the DMG of the notarized and stapled app
+    #[arg(long)]
+    pub dmg: bool,
+    /// macOS: arm64 and x86_64 in one binary
+    #[arg(long)]
+    pub universal: bool,
+    /// iOS: package through `xcodebuild -exportArchive` (the fallback)
+    #[arg(long)]
+    pub via_xcode_export: bool,
+}
+
+/// `icm verify`.
+#[derive(Clone, Debug, Args)]
+pub struct VerifyArgs {
+    /// The target
+    #[arg(value_enum)]
+    pub target: ReleaseTarget,
+    /// The artifact (default: the upload file of dist/latest/<target>)
+    #[arg(long, value_name = "PATH")]
+    pub artifact: Option<PathBuf>,
+    /// macOS: also check notarization and Gatekeeper (spctl, stapler)
+    #[arg(long)]
+    pub after_notarize: bool,
+    /// Web: check the deployed site at this URL instead
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
+}
+
+/// `icm upload-commands`.
+#[derive(Clone, Debug, Args)]
+pub struct UploadCommandsArgs {
+    /// The target
+    #[arg(value_enum)]
+    pub target: ReleaseTarget,
+}
+
+/// `icm ledger`.
+#[derive(Clone, Debug, Args)]
+pub struct LedgerArgs {
+    /// What to do
+    #[command(subcommand)]
+    pub action: LedgerAction,
+}
+
+/// A ledger action.
+#[derive(Clone, Debug, Subcommand)]
+pub enum LedgerAction {
+    /// List the recorded uploads
+    Show,
+    /// Record that the owner uploaded a build (upload.sh's last line)
+    MarkUploaded {
+        /// The target
+        #[arg(value_enum)]
+        target: ReleaseTarget,
+        /// The build number (default: the newest release of the target)
+        #[arg(long)]
+        build: Option<u64>,
+    },
+}
+
+/// A store tool whose output `icm diagnose` reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DiagnoseTool {
+    /// `xcrun altool --output-format json`.
+    Altool,
+    /// `xcrun notarytool --output-format json` (or its log).
+    Notarytool,
+    /// Google Play's upload errors (from fastlane or the Play Console).
+    Play,
+}
+
+impl DiagnoseTool {
+    /// The tool's name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiagnoseTool::Altool => "altool",
+            DiagnoseTool::Notarytool => "notarytool",
+            DiagnoseTool::Play => "play",
+        }
+    }
+}
+
+/// `icm diagnose`.
+#[derive(Clone, Debug, Args)]
+pub struct DiagnoseArgs {
+    /// The tool
+    #[arg(value_enum)]
+    pub tool: DiagnoseTool,
+    /// Its saved output, or `-` for stdin
+    pub file: String,
+}
+
 /// Arguments passed through untouched.
 #[derive(Debug, Args)]
 pub struct RawArgs {
@@ -902,6 +1114,10 @@ pub enum Scenario {
         /// The tool's name
         name: String,
     },
+    /// `icm release` with a stand-in pipeline that writes a small file
+    Release(ReleaseArgs),
+    /// `icm verify` with the stand-in pipeline's gates
+    Verify(VerifyArgs),
 }
 
 impl Scenario {
@@ -919,6 +1135,8 @@ impl Scenario {
             Scenario::Busy { .. } => "busy",
             Scenario::Hooks { .. } => "hooks",
             Scenario::Pinned { .. } => "pinned",
+            Scenario::Release(_) => "release",
+            Scenario::Verify(_) => "verify",
         }
     }
 }
@@ -957,11 +1175,52 @@ mod tests {
 
     #[test]
     fn later_commands_parse_as_external() {
-        let cli = Cli::try_parse_from(["icm", "release", "ios"]).unwrap();
+        let cli = Cli::try_parse_from(["icm", "version", "show"]).unwrap();
         match cli.command {
-            Command::External(args) => assert_eq!(args, vec!["release", "ios"]),
+            Command::External(args) => assert_eq!(args, vec!["version", "show"]),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn release_commands_parse() {
+        let cli = Cli::try_parse_from(["icm", "release", "ios", "--sign", "none", "--allow-dirty"])
+            .unwrap();
+        match cli.command {
+            Command::Release(args) => {
+                assert_eq!(args.target, ReleaseTarget::Ios);
+                assert_eq!(args.sign, SignMode::None);
+                assert!(args.allow_dirty);
+            }
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from(["icm", "release", "android"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Release(ReleaseArgs {
+                sign: SignMode::Auto,
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["icm", "release", "tvos"]).is_err());
+
+        let cli = Cli::try_parse_from(["icm", "ledger", "mark-uploaded", "ios", "--build", "12"])
+            .unwrap();
+        assert_eq!(
+            cli.command.name_and_target(),
+            ("ledger".to_string(), Some("ios".to_string()))
+        );
+        assert!(!cli.command.is_view());
+        let show = Cli::try_parse_from(["icm", "ledger", "show"]).unwrap();
+        assert!(show.command.is_view() && show.command.is_content());
+        let upload = Cli::try_parse_from(["icm", "upload-commands", "web"]).unwrap();
+        assert!(upload.command.is_view() && upload.command.is_content());
+        let verify =
+            Cli::try_parse_from(["icm", "verify", "web", "--url", "https://x.dev"]).unwrap();
+        assert_eq!(
+            verify.command.name_and_target(),
+            ("verify".to_string(), Some("web".to_string()))
+        );
     }
 
     #[test]
