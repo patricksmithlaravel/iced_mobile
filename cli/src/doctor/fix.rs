@@ -83,7 +83,7 @@ pub enum Fix {
         /// The app's Cargo.toml.
         manifest: PathBuf,
     },
-    /// `cargo install wasm-bindgen-cli --version =<lock> --locked --root <cache>`.
+    /// `cargo install wasm-bindgen-cli --version <lock> --locked --root <cache>`.
     WasmBindgen {
         /// The version; `None` reads it from the lock when the fix runs.
         version: Option<String>,
@@ -209,7 +209,7 @@ impl Fix {
     pub fn display(&self, env: &Env) -> String {
         if let Fix::WasmBindgen { version: None, .. } = self {
             return format!(
-                "cargo install wasm-bindgen-cli --version =<the lock's wasm-bindgen> --locked --root {}",
+                "cargo install wasm-bindgen-cli --version <the lock's wasm-bindgen> --locked --root {}",
                 crate::process::shell_quote(
                     &tools::wasm_bindgen_root("<version>").display().to_string()
                 )
@@ -403,7 +403,7 @@ impl Fix {
                 let tools_dir = crate::paths::tools_dir();
                 let mut cmd = Cmd::tool("cargo")
                     .args(["install", "wasm-bindgen-cli", "--version"])
-                    .arg(format!("={version}"))
+                    .arg(version)
                     .args(["--locked", "--root"])
                     .arg(&root)
                     .cwd(tools_dir)
@@ -506,7 +506,7 @@ mod tests {
         }
         .display(&Env::default());
         assert!(
-            wasm.starts_with("cargo install wasm-bindgen-cli --version =0.2.105 --locked --root "),
+            wasm.starts_with("cargo install wasm-bindgen-cli --version 0.2.105 --locked --root "),
             "{wasm}"
         );
     }

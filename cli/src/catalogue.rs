@@ -338,7 +338,7 @@ catalogue! {
         "Disable the feature that pulls it in for iOS (see the detail).";
     DepsWasmBindgenCli = "deps.wasm_bindgen_cli", Environment, Fail, DoctorYes,
         "The wasm-bindgen CLI does not match the app's wasm-bindgen version",
-        "Run `icm doctor web --fix --yes` (cargo install wasm-bindgen-cli --version =<lock version>).";
+        "Run `icm doctor web --fix --yes` (cargo install wasm-bindgen-cli --version <lock version>).";
     DepsGetrandomBackend = "deps.getrandom_backend", Config, Fail, Agent,
         "getrandom resolves for wasm32 without a web backend",
         "Add the `[web] rustflags` line and feature the detail names.";

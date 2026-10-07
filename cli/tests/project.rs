@@ -767,7 +767,7 @@ fn doctor_web_installs_the_wasm_bindgen_of_the_apps_lock() {
     assert_eq!(fixed["exit"], 0, "{fixed}");
     let log = tool_log(&sandbox);
     assert!(
-        log.contains("cargo install wasm-bindgen-cli --version =0.2.100 --locked --root "),
+        log.contains("cargo install wasm-bindgen-cli --version 0.2.100 --locked --root "),
         "{log}"
     );
     assert!(

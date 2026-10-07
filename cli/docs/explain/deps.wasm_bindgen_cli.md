@@ -10,5 +10,5 @@ and accepts a copy on `PATH` only when `wasm-bindgen --version` matches.
 ```sh
 icm doctor web --fix --yes
 # which runs:
-cargo install wasm-bindgen-cli --version =<lock version> --locked --root <cache>/tools/wasm-bindgen/<lock version>
+cargo install wasm-bindgen-cli --version <lock version> --locked --root <cache>/tools/wasm-bindgen/<lock version>
 ```

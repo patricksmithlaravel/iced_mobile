@@ -833,7 +833,7 @@ pub fn wasm_bindgen_root(version: &str) -> PathBuf {
 /// The command that installs the wasm-bindgen CLI matching the app's lock.
 pub fn wasm_bindgen_install(version: &str) -> String {
     format!(
-        "cargo install wasm-bindgen-cli --version ={version} --locked --root {}",
+        "cargo install wasm-bindgen-cli --version {version} --locked --root {}",
         process::shell_quote(&wasm_bindgen_root(version).display().to_string())
     )
 }
@@ -1143,7 +1143,7 @@ mod tests {
         let command = wasm_bindgen_install("0.2.105");
         assert!(
             command
-                .starts_with("cargo install wasm-bindgen-cli --version =0.2.105 --locked --root ")
+                .starts_with("cargo install wasm-bindgen-cli --version 0.2.105 --locked --root ")
         );
         assert!(command.contains("wasm-bindgen/0.2.105"));
     }
