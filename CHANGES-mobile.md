@@ -88,9 +88,13 @@ New states go into `LifecycleEvent`, which is `#[non_exhaustive]`.
 - `icm stop --shutdown` leaves running a simulator that another project's run booted, as it
   already did for the emulator, and `stop --all --shutdown` without a session considers only the
   simulator the project's runs use.
-- Android: the run directory's log files redact secret values, readiness and logs count only the
-  app's own processes, the lifecycle suite tells a destroyed Activity from a live one after a
-  rotation, and a rotation warns when the app is locked to one axis.
+- Every file a run directory keeps from an app's or a tool's output (log copies, consoles, crash
+  reports) redacts secret values on every platform, as stdout does, also where the output escapes
+  them as JSON or percent-encodes them. The live files in `target/icm/sessions/` stay the app's own
+  output.
+- Android: readiness and logs count only the app's own processes, the lifecycle suite tells a
+  destroyed Activity from a live one after a rotation, and a rotation warns when the app is locked
+  to one axis.
 - Releases: `icm ledger mark-uploaded` refuses a release that cannot have been uploaded, literal
   signing secrets stay out of every finding and record, `upload.sh` runs `icm diagnose` when a
   store tool fails, `THIRD_PARTY_NOTICES` lists the Rust standard library, the AppImage leaves
