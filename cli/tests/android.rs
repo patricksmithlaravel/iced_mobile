@@ -12,7 +12,7 @@ use std::process::{Command, Output, Stdio};
 const BIN: &str = env!("CARGO_BIN_EXE_icm");
 
 /// The fake adb: one emulator, `emulator-5580`, running the AVD
-/// `icm-api36` with a 1080x2400 display at 420 dpi. Every call is appended
+/// `icm-api36` (or `$FAKE_AVD`) with a 1080x2400 display at 420 dpi. Every call is appended
 /// to `$FAKE_ADB_LOG`; `emu kill` removes the emulator.
 const FAKE_ADB: &str = r#"#!/bin/sh
 echo "$*" >> "$FAKE_ADB_LOG"
@@ -26,7 +26,7 @@ fi
 case "$1" in
   emu)
     if [ "$2" = "kill" ]; then touch "$state_dir/killed"; echo OK; exit 0; fi
-    echo "icm-api36"; echo "OK"; exit 0 ;;
+    echo "${FAKE_AVD:-icm-api36}"; echo "OK"; exit 0 ;;
   shell)
     case "$2" in
       "getprop ro.product.cpu.abi") echo "arm64-v8a" ;;
@@ -231,6 +231,27 @@ fn another_avd_is_never_shut_down() {
     )
     .unwrap();
     let result = sandbox.result(&["stop", "android", "--shutdown"]);
+    assert_eq!(result["exit"], 0, "{result}");
+    assert!(!sandbox.adb_calls().contains("emu kill"));
+}
+
+#[test]
+fn a_test_runs_avd_is_never_shut_down() {
+    // An `icm-test-` AVD belongs to the test run that made it: even as the
+    // configured AVD, `--shutdown` leaves it running unless icm booted it.
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.root.path().join("host.toml"),
+        format!(
+            "android_sdk = \"{}\"\n[android]\navd = \"icm-test-api36\"\n",
+            sandbox.root.path().join("sdk").display()
+        ),
+    )
+    .unwrap();
+    let result = sandbox.result_with(
+        &["stop", "android", "--shutdown"],
+        &[("FAKE_AVD", "icm-test-api36")],
+    );
     assert_eq!(result["exit"], 0, "{result}");
     assert!(!sandbox.adb_calls().contains("emu kill"));
 }

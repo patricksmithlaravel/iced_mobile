@@ -1397,16 +1397,23 @@ pub fn stop_session(
         stopped.push(json!({"platform": "android", "app": app_id, "serial": session.serial}));
     }
 
+    // `--shutdown` stops the emulator icm booted for this session, and
+    // otherwise only icm's own AVDs: never an `icm-test-` one a test run
+    // made and owns (crate::managed::is_managed), nor anyone else's.
     if shutdown {
         let mut targets: Vec<(String, Option<u32>)> = Vec::new();
         if let Some(session) = &session
             && online(&session.serial)
-            && (session.booted_by_icm || session.avd.as_deref().is_some_and(avd::is_managed))
+            && (session.booted_by_icm
+                || session
+                    .avd
+                    .as_deref()
+                    .is_some_and(crate::managed::is_managed))
         {
             targets.push((session.serial.clone(), session.emulator_pid));
         }
         let default = device::default_avd(host, project.config.config.android.target_sdk);
-        if avd::is_managed(&default) {
+        if crate::managed::is_managed(&default) {
             for (serial, name) in device::running_emulators(tools, &listed) {
                 if name.as_deref() == Some(default.as_str())
                     && !targets.iter().any(|(s, _)| *s == serial)
