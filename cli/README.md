@@ -27,7 +27,7 @@ cargo test
 |---|---|
 | `lib.rs` | entry: parse, `--detach`, reporter, panic hook (exit 70), signal watchdog |
 | `cli.rs` | the clap surface; later-phase commands parse as `External` |
-| `commands/` | one file per command; `mod.rs` dispatches (unimplemented ones exit 2 `usage.not_implemented`) |
+| `commands/` | one file per command (`stop.rs` holds `stop` and `ps`, `build.rs` `build --all`); `mod.rs` dispatches, per platform where a platform owns the command (unimplemented ones exit 2 `usage.not_implemented`) |
 | `context.rs` | `Ctx` (flags, reporter, env, deadline, host.toml, project) and `Project` (icm.toml + `cargo metadata` + paths) |
 | `output/` | the output contract: `Reporter`, human lines (`human.rs`), run dirs (`rundir.rs`) |
 | `catalogue.rs` | every check/error id with exit code, level, `by`, title, fix; `docs/explain/<id>.md` adds detail |
@@ -47,7 +47,7 @@ cargo test
 | `template.rs` | the embedded `examples/app` and how `icm new` fills it; `icm explain config.<key>` |
 | `doctor/` | what each platform needs (`gather`) and the fixes `doctor --fix [--yes]` runs (`fix.rs`) |
 | `managed.rs`, `simctl.rs` | the `icm-` simulator and AVD names, Android's per-user dirs; `simctl list -j` parsing |
-| `session.rs` | `target/icm/sessions/<platform>.json`, which `run` writes and `stop`/`ps` read |
+| `session.rs` | `target/icm/sessions/<platform>.json` read generically: `ps` lists every record; `stop --all` (`commands/stop.rs`) hands the dev platforms' records to their own stop and ends any other by what it says |
 | `image.rs` | PNG decode/encode, previews, cropping, blank detection |
 | `platform/desktop/` | `build`/`run`/`shot`/`logs`/`stop desktop`: launch, readiness, window capture (`macos.rs` FFI, `linux.rs` X11), headless fallback (`headless.rs`), log records (`logs.rs`) |
 | `platform/ios_sim/` | `build`/`run`/`logs`/`shot`/`stop`/`input ios-sim`: simulator choice (`simctl.rs`), bundle and plists (`bundle.rs`, `plist.rs`), Mach-O gates (`macho.rs`), PNG preview and blank detection (`image.rs`), log normalization (`logs.rs`), the session file (`session.rs`); fake-tool tests in `tests/ios_sim.rs` |
@@ -57,7 +57,7 @@ cargo test
 | `raster.rs` | screenshots as pixels: PNG decode/encode, the preview, blank detection (`raster::examine` for every capture) |
 | `harness/` | the app's headless harness (`tests/icm.rs`, protocol 1): build it, run `icm-shot`/`icm-tree`/`icm-ice`, judge the answer; `libtest.rs` reads `cargo test` output |
 | `signatures.rs` | known failure signatures (design §13.4) → `likely_causes`; `signatures::annotate(error, text, &Facts)` |
-| `hooks.rs` | project hooks, `[checks] <platform>` scripts; `run` calls `hooks::run(ctx, &HookContext)` after a launch |
+| `hooks.rs` | project hooks, `[checks] <platform>` scripts; every platform's `run` calls `hooks::run_for` once the app is up |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
 | `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices` for Android (`doctor android` is `doctor/`): APK pipeline, managed AVD, adb, logcat, session (`android/mod.rs` has the module map) |
 
@@ -110,6 +110,8 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 - Harness commands (`test`, `shot --headless`, `ui`) run against a fake
   cargo and a fake harness in `tests/harness.rs`; the real one is the
   template's.
+- `tests/macos_windows.rs` calls CoreGraphics on its own: next to unit
+  tests that spawn children, those calls got the children killed.
 - Fake tools: `ICM_TOOL_<NAME>=/path/to/script` replaces any external tool
   (`xcrun`, `adb`, `cargo`, ...).
 - `tests/project.rs` covers `new`, `check`, `doctor`, `stop`/`ps` and
