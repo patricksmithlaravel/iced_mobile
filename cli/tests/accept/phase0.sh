@@ -31,6 +31,25 @@ check_matrix() {
     evidence "cargo check -p iced: host, aarch64-apple-ios-sim, aarch64-linux-android, wasm32-unknown-unknown"
 }
 
+# iced must also build on the rust-version the workspace declares (Tawara
+# pins iced_winit directly and keeps a floor of its own). Runs when that
+# toolchain is installed (`rustup toolchain install <version>`), in its own
+# target directory.
+msrv_version() {
+    sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml | head -n1
+}
+
+msrv_toolchain() {
+    rustup toolchain list | awk '{print $1}' | grep -E "^$(msrv_version)(\.0)?-" | head -n1 || true
+}
+
+msrv() {
+    local toolchain
+    toolchain=$(msrv_toolchain)
+    CARGO_TARGET_DIR="$ACCEPT/msrv-target" cargo "+$toolchain" check -p iced
+    evidence "cargo +$toolchain check -p iced (workspace rust-version $(msrv_version))"
+}
+
 # What phase 0 adds besides code: the template, the agents' limitations
 # page, the Fira Sans licence, the empty `agent` feature (F7 stub) and the
 # repository metadata.
@@ -120,6 +139,11 @@ owner_tag() {
 # to this file during a run cannot change what the run does.
 main() {
     step check-matrix check_matrix
+    if [ -n "$(msrv_toolchain)" ]; then
+        step msrv msrv
+    else
+        skip msrv "Rust $(msrv_version), the workspace's rust-version, is not installed (rustup toolchain install $(msrv_version))"
+    fi
     step deliverables deliverables
     must build-app build_app
     step events-opt-in events_on
