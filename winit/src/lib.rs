@@ -204,7 +204,8 @@ where
             android:configChanges=\"mcc|mnc|locale|touchscreen|keyboard|\
             keyboardHidden|navigation|orientation|screenLayout|uiMode|\
             screenSize|smallestScreenSize|density|layoutDirection|colorMode|\
-            grammaticalGender|fontScale|fontWeightAdjustment\"."
+            grammaticalGender|fontScale|fontWeightAdjustment\", plus \
+            |assetsPaths when it is linked against API 36 or later."
         ),
         error => panic!("Create event loop: {error:?}"),
     });

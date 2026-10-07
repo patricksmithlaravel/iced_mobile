@@ -132,10 +132,13 @@
 //! - The manifest's `android.app.lib_name` meta-data must be the library's
 //!   name (`myapp` for `libmyapp.so`), or Android finds no `android_main`.
 //! - Give the activity the full `android:configChanges` list:
-//!   `mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density|layoutDirection|colorMode|grammaticalGender|fontScale|fontWeightAdjustment`.
-//!   Without it Android destroys and recreates the activity on rotation, a
-//!   dark-mode switch and the like, which freezes the app (see the known
-//!   limitations below).
+//!   `mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density|layoutDirection|colorMode|grammaticalGender|fontScale|fontWeightAdjustment`,
+//!   and `assetsPaths` when the manifest is linked against API 36 or later
+//!   (older android.jar files do not know the name). Without it Android
+//!   destroys and recreates the activity on rotation, a dark-mode switch, a
+//!   change of resource overlays (SystemUI applies its theme overlays during
+//!   an emulator's first boots) and the like, which freezes the app (see the
+//!   known limitations below).
 //! - Keep Back from finishing the activity, for the same reason: set
 //!   `android:enableOnBackInvokedCallback="false"` on the `<application>`.
 //!   Back then reaches the app as a key press,
