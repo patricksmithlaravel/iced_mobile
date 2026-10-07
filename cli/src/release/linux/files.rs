@@ -30,22 +30,87 @@ pub struct Facts {
 }
 
 /// The libraries winit and wgpu load with `dlopen` (so `ldd` and
-/// dpkg-shlibdeps cannot see them): the `.deb` recommends them.
+/// dpkg-shlibdeps cannot see them): the `.deb` recommends them. wgpu takes
+/// Vulkan (`libvulkan.so.1`) first and falls back to GLES through EGL
+/// (`libEGL.so.1`, libegl1); it has no GLX path, so `libgl1` would not
+/// give it a fallback.
 pub const RECOMMENDS: &[&str] = &[
     "libxkbcommon0",
     "libxkbcommon-x11-0",
     "libwayland-client0",
-    "libvulkan1 | libgl1",
+    "libvulkan1",
+    "libegl1",
 ];
 
 /// The libraries the AppImage bundles from the build host (glibc-floor
 /// matched when built in the ubuntu:22.04 container), with the Debian
-/// package whose copyright file covers each.
+/// package whose copyright file covers each. None may be on
+/// [`EXCLUDELIST`]: `libwayland-client.so.0` is not bundled, since the
+/// host's Mesa needs symbols an older copy lacks, and it is ABI-stable and
+/// present on every Wayland host.
 pub const BUNDLED: &[(&str, &str)] = &[
     ("libxkbcommon.so.0", "libxkbcommon0"),
     ("libxkbcommon-x11.so.0", "libxkbcommon-x11-0"),
-    ("libwayland-client.so.0", "libwayland-client0"),
     ("libwayland-cursor.so.0", "libwayland-cursor0"),
+];
+
+/// The AppImage project's excludelist
+/// (<https://github.com/AppImageCommunity/pkg2appimage/blob/master/excludelist>):
+/// libraries an AppImage must take from the host, never bundle, because
+/// they belong to the C library, the graphics drivers or the session.
+pub const EXCLUDELIST: &[&str] = &[
+    "ld-linux.so.2",
+    "ld-linux-x86-64.so.2",
+    "libanl.so.1",
+    "libBrokenLocale.so.1",
+    "libcidn.so.1",
+    "libc.so.6",
+    "libdl.so.2",
+    "libm.so.6",
+    "libmvec.so.1",
+    "libnss_compat.so.2",
+    "libnss_dns.so.2",
+    "libnss_files.so.2",
+    "libnss_hesiod.so.2",
+    "libnss_nisplus.so.2",
+    "libnss_nis.so.2",
+    "libpthread.so.0",
+    "libresolv.so.2",
+    "librt.so.1",
+    "libthread_db.so.1",
+    "libutil.so.1",
+    "libstdc++.so.6",
+    "libGL.so.1",
+    "libEGL.so.1",
+    "libGLdispatch.so.0",
+    "libGLX.so.0",
+    "libOpenGL.so.0",
+    "libdrm.so.2",
+    "libglapi.so.0",
+    "libgbm.so.1",
+    "libxcb.so.1",
+    "libX11.so.6",
+    "libX11-xcb.so.1",
+    "libwayland-client.so.0",
+    "libasound.so.2",
+    "libfontconfig.so.1",
+    "libfreetype.so.6",
+    "libharfbuzz.so.0",
+    "libcom_err.so.2",
+    "libexpat.so.1",
+    "libgcc_s.so.1",
+    "libgpg-error.so.0",
+    "libICE.so.6",
+    "libSM.so.6",
+    "libusb-1.0.so.0",
+    "libuuid.so.1",
+    "libz.so.1",
+    "libjack.so.0",
+    "libpipewire-0.3.so.0",
+    "libxcb-dri3.so.0",
+    "libxcb-dri2.so.0",
+    "libfribidi.so.0",
+    "libgmp.so.10",
 ];
 
 /// A Debian package name from a Cargo package name: lower case, `_` as
@@ -311,7 +376,7 @@ mod tests {
         assert!(control.starts_with("Package: notes\nVersion: 1.2.3-45\nArchitecture: amd64\nMaintainer: Acme Ltd <dev@acme.example>\nInstalled-Size: 1234\n"));
         assert!(control.contains("Depends: libc6 (>= 2.34), libgcc-s1 (>= 4.2), libssl3\n"));
         assert!(control.contains(
-            "Recommends: libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libvulkan1 | libgl1, fonts-noto\n"
+            "Recommends: libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libvulkan1, libegl1, fonts-noto\n"
         ));
         assert!(control.contains("Section: misc\n"), "{control}");
         assert!(control.contains("Homepage: https://acme.example\n"));
@@ -342,6 +407,19 @@ mod tests {
         );
         assert!(problems.iter().any(|p| p.contains("appears twice")));
         assert!(!desktop_problems("Type=Application\n").is_empty());
+    }
+
+    #[test]
+    fn the_appimage_bundles_nothing_the_excludelist_names() {
+        for (lib, _) in BUNDLED {
+            assert!(
+                !EXCLUDELIST.contains(lib),
+                "{lib} is on the AppImage excludelist"
+            );
+        }
+        assert!(EXCLUDELIST.contains(&"libwayland-client.so.0"));
+        // The libraries the .deb only recommends stay the host's.
+        assert!(EXCLUDELIST.contains(&"libEGL.so.1"));
     }
 
     #[test]

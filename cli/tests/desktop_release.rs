@@ -991,11 +991,13 @@ fn linux_fakes(app: &mut App, glibc: &str) {
     let runtime = app.path("fakebin/runtime");
     std::fs::write(&runtime, "runtime").unwrap();
     app.set("ICM_TOOL_APPIMAGE_RUNTIME", &runtime);
-    // Two of the four libraries the AppImage bundles.
+    // Two of the three libraries the AppImage bundles, and
+    // libwayland-client, which it leaves to the host.
     let libs = app.path("libs");
     std::fs::create_dir_all(&libs).unwrap();
     std::fs::write(libs.join("libxkbcommon.so.0.0.0"), "xkb").unwrap();
     std::os::unix::fs::symlink("libxkbcommon.so.0.0.0", libs.join("libxkbcommon.so.0")).unwrap();
+    std::fs::write(libs.join("libwayland-cursor.so.0"), "wl-cursor").unwrap();
     std::fs::write(libs.join("libwayland-client.so.0"), "wl").unwrap();
     app.set("ICM_LINUX_LIB_DIRS", &libs);
     let _ = app.fake(
@@ -1066,10 +1068,12 @@ fn a_linux_release_packages_a_deb_and_an_appimage() {
         "./.DirIcon",
         "./usr/bin/release-app",
         "./usr/lib/libxkbcommon.so.0",
-        "./usr/lib/libwayland-client.so.0",
+        "./usr/lib/libwayland-cursor.so.0",
     ] {
         assert!(listing.lines().any(|l| l == entry), "{entry} in {listing}");
     }
+    // Mesa needs the host's libwayland-client (the AppImage excludelist).
+    assert!(!listing.contains("libwayland-client"), "{listing}");
 
     // verify unpacks the .deb itself.
     app.set("ICM_HOST_OS", "macos");

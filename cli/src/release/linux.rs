@@ -28,8 +28,10 @@
 //!    (icm's own checks, and `desktop-file-validate` when installed) and
 //!    `linux.deb.lint` (lintian, a WARN, when installed).
 //! 4. The AppImage: an AppDir with `AppRun`, the `.desktop` entry, the
-//!    icon, the executable, the notices and the bundled libxkbcommon and
-//!    libwayland (`linux.appimage_libs` WARN when the host lacks one), then
+//!    icon, the executable, the notices and the bundled libxkbcommon(-x11)
+//!    and libwayland-cursor (`linux.appimage_libs` WARN when the host lacks
+//!    one; libwayland-client is the host's, as the AppImage excludelist
+//!    says, [`files::BUNDLED`]), then
 //!    `appimagetool --appimage-extract-and-run --runtime-file <pinned
 //!    runtime>`, so the build downloads nothing.
 //!
@@ -679,7 +681,7 @@ fn plan(rel: &Release) -> Plan {
             Step::internal(
                 "linux.appimage.layout",
                 &format!(
-                    "lay out {}: AppRun, the .desktop entry and icon, usr/, the bundled libxkbcommon and libwayland",
+                    "lay out {}: AppRun, the .desktop entry and icon, usr/, the bundled libxkbcommon(-x11) and libwayland-cursor",
                     crate::paths::display(&appdir)
                 ),
             )

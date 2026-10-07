@@ -192,7 +192,8 @@ jobs:
         run: |
           apt-get update -qq
           # git before the checkout, so it is a repository; dpkg-dev for
-          # dpkg-shlibdeps; the four libraries the AppImage bundles; Xvfb
+          # dpkg-shlibdeps; the libraries the AppImage bundles and the
+          # libwayland-client it leaves to the host; Xvfb
           # and the X11, GL and Vulkan libraries the app opens at run time.
           apt-get install -y --no-install-recommends \
               build-essential ca-certificates curl desktop-file-utils dpkg-dev file git jq pkg-config xz-utils \

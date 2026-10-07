@@ -1445,13 +1445,13 @@ Because the owner runs notarization, the flow has **two stages**. That way the a
 2. `.deb`:
    - Lay out `gen/linux/deb/{DEBIAN/control, usr/bin/<bin>, usr/share/applications/<id>.desktop, usr/share/icons/hicolor/*/apps/<id>.png}`.
    - Depends = `dpkg-shlibdeps -O` output (run against a stub `debian/control`) + `deb_depends`.
-   - Recommends = `libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libvulkan1 | libgl1` (dlopened by winit and wgpu, so `ldd` cannot see them) + `deb_recommends`.
+   - Recommends = `libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libvulkan1, libegl1` (dlopened by winit and wgpu, so `ldd` cannot see them; wgpu falls back from Vulkan to GLES through EGL and has no GLX path, so `libgl1` is no fallback) + `deb_recommends`.
    - `[desktop.linux] maintainer` is required.
    - `dpkg-deb --build --root-owner-group gen/linux/deb <dist>/linux/<pkg>_<version>-<build>_amd64.deb`.
    - Gates: `dpkg-deb --info`; `desktop-file-validate` (`linux.desktop_file`) if installed; `lintian` as WARN only.
 3. AppImage:
    - Lay out `gen/linux/AppDir/{AppRun, <id>.desktop, <id>.png, usr/bin/<bin>, usr/lib/}`.
-   - `usr/lib` bundles `libxkbcommon.so.0`, `libxkbcommon-x11.so.0`, `libwayland-client.so.0` and `libwayland-cursor.so.0`, copied from the same 22.04 image, so they match the glibc floor. GPU drivers come from the host. `AppRun` sets `LD_LIBRARY_PATH`.
+   - `usr/lib` bundles `libxkbcommon.so.0`, `libxkbcommon-x11.so.0` and `libwayland-cursor.so.0`, copied from the same 22.04 image, so they match the glibc floor. GPU drivers and `libwayland-client.so.0` come from the host: the AppImage excludelist forbids bundling the latter, since a newer Mesa needs symbols an older copy lacks. `AppRun` sets `LD_LIBRARY_PATH`.
    - `appimagetool --appimage-extract-and-run gen/linux/AppDir <dist>/linux/<Name>-<version>-x86_64.AppImage`, with `appimagetool` pinned in `tools.toml`, sha256-checked.
    - Smoke: run under Xvfb with `ICM_EVENTS=1` and wait for `ICM_EVENT ready`.
 
@@ -2571,9 +2571,9 @@ The iOS pipeline is no longer a stub: `icm release ios`, `icm verify ios` and `i
   - `[desktop.linux] maintainer` is `config.owner_decision`, the owner's before the build. Under `--sign none` the package says `<publisher> <maintainer-unset@invalid>`.
   - The package name is `deb_package`, else the Cargo package's name made a Debian name (lower case, `_` as `-`); an invalid one is `config.invalid`. dpkg-deb and dpkg-shlibdeps are required for `deb` (`env.tool_missing` naming `apt-get install`), and the pinned appimagetool and runtime for `appimage` (`--yes` downloads them).
   - The executable is built for the host. `linux.glibc_floor` reads `.gnu.version_r` (`release/desktop/elf.rs`).
-  - The `.deb` carries `usr/share/doc/<package>/{THIRD_PARTY_NOTICES.txt, copyright}` and resources under `usr/share/<package>/`. `Installed-Size` is computed. Depends comes from `dpkg-shlibdeps -O` against a stub `debian/control`, Recommends from §11.6 plus `deb_recommends`, and Section and `Categories=` map `[app] category`. It is built with `dpkg-deb -Zxz --build --root-owner-group`: xz, which every Debian-based dpkg reads, where Ubuntu's default zstd is not read by older Debian.
+  - The `.deb` carries `usr/share/doc/<package>/{THIRD_PARTY_NOTICES.txt, copyright}` and resources under `usr/share/<package>/`. `Installed-Size` is computed. Depends comes from `dpkg-shlibdeps -O` against a stub `debian/control`, Recommends from §11.6 (`libvulkan1, libegl1`, not `libvulkan1 | libgl1`: wgpu's GL fallback opens `libEGL.so.1`) plus `deb_recommends`, and Section and `Categories=` map `[app] category`. It is built with `dpkg-deb -Zxz --build --root-owner-group`: xz, which every Debian-based dpkg reads, where Ubuntu's default zstd is not read by older Debian.
   - `dpkg-deb --info` must show the package. `linux.desktop_file` is icm's own checks plus `desktop-file-validate` when installed. `linux.deb.lint` is lintian's E/W tags (WARN) when installed, SKIP otherwise.
-  - The AppImage's AppDir bundles libxkbcommon(-x11) and libwayland-client/cursor from the host's library directories (`ICM_LINUX_LIB_DIRS` for tests), with their Debian copyright files when present. A missing one is `linux.appimage_libs` (new, WARN). `appimagetool --appimage-extract-and-run --runtime-file <pinned runtime>` runs with `ARCH`.
+  - The AppImage's AppDir bundles libxkbcommon(-x11) and libwayland-cursor from the host's library directories (`ICM_LINUX_LIB_DIRS` for tests), with their Debian copyright files when present. libwayland-client stays the host's: it is on the AppImage project's excludelist (a Mesa built against a newer wayland fails to load against an older bundled copy, and wgpu then finds no adapter), and a unit test keeps every bundled library off that list (`files::EXCLUDELIST`). A missing one is `linux.appimage_libs` (new, WARN). `appimagetool --appimage-extract-and-run --runtime-file <pinned runtime>` runs with `ARCH`.
   - Linux packages carry no signature, so `signed` is true under `--sign auto`. The Xvfb smoke test is the CI job's, not icm's.
   - `icm verify linux` unpacks a `.deb` with its own `ar` reader and `tar` on any host, and an AppImage with `--appimage-extract` on Linux only (SKIP elsewhere). It checks glibc, the `.desktop` entries and the notices.
 - **Shared** (`release/desktop.rs`): `[app] resources` (the web's glob rules, made relative to the project), `[app] publisher` (else the name) for installers and packages, and the category maps.

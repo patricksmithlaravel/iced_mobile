@@ -708,7 +708,7 @@ catalogue! {
         "Keep `#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = \"windows\")]` at the top of src/main.rs.";
     LinuxAppimageLibs = "linux.appimage_libs", CheckFailed, Warn, Agent,
         "The AppImage lacks a library it bundles for older hosts",
-        "Build in the ubuntu:22.04 container, or install libxkbcommon0, libxkbcommon-x11-0, libwayland-client0 and libwayland-cursor0 on the build host.";
+        "Build in the ubuntu:22.04 container, or install libxkbcommon0, libxkbcommon-x11-0 and libwayland-cursor0 on the build host.";
 
     // ---- run -----------------------------------------------------------------------
     RunReady = "run.ready", Ok, Pass, Agent,
