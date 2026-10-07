@@ -578,7 +578,7 @@
 //! }
 //! ```
 //!
-//! - Android reads the night bits of the `uiMode` in the Activity's
+//! - Android reads the night bits of the `uiMode` in the application's
 //!   resources (through JNI; the copy android-activity keeps is not updated
 //!   when the Activity handles the change itself). Keep `uiMode` in the
 //!   manifest's `configChanges` (see [Android](#android)): without it, a

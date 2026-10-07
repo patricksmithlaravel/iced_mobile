@@ -2,8 +2,10 @@
 //!
 //! The calls run on the thread of `android_main`, which runs the event loop:
 //! android-activity attaches it to the JVM for good and gives `ndk-context`
-//! the Activity before `android_main` starts. A Java exception comes back as
-//! an error, which is logged.
+//! a context before `android_main` starts: the Application from
+//! android-activity 0.6.1 on (what apps resolve), the Activity with 0.6.0.
+//! Either serves: the clipboard service and `coerceToText` take any context.
+//! A Java exception comes back as an error, which is logged.
 #![allow(unsafe_code)]
 
 use jni::objects::{JObject, JString, JValue};
@@ -14,7 +16,7 @@ use jni::{Env, jni_sig, jni_str};
 /// Android refuses the read: from Android 10, only the app with the input
 /// focus may read it.
 pub(super) fn read() -> Option<String> {
-    with_activity(read_text).unwrap_or_else(|error| {
+    with_context(read_text).unwrap_or_else(|error| {
         log::warn!("Reading the clipboard failed: {error}");
         None
     })
@@ -23,7 +25,7 @@ pub(super) fn read() -> Option<String> {
 /// Puts `contents` on the clipboard, as plain text.
 pub(super) fn write(contents: &str) {
     if let Err(error) =
-        with_activity(|env, activity| write_text(env, activity, contents))
+        with_context(|env, context| write_text(env, context, contents))
     {
         log::warn!("Writing to the clipboard failed: {error}");
     }
@@ -31,9 +33,9 @@ pub(super) fn write(contents: &str) {
 
 fn read_text(
     env: &mut Env<'_>,
-    activity: &JObject<'_>,
+    context: &JObject<'_>,
 ) -> jni::errors::Result<Option<String>> {
-    let manager = clipboard_manager(env, activity)?;
+    let manager = clipboard_manager(env, context)?;
 
     let clip = env
         .call_method(
@@ -88,7 +90,7 @@ fn read_text(
                 &item,
                 jni_str!("coerceToText"),
                 jni_sig!((android.content.Context) -> java.lang.CharSequence),
-                &[JValue::Object(activity)],
+                &[JValue::Object(context)],
             )?
             .l()?;
     }
@@ -143,10 +145,10 @@ fn is_text(env: &mut Env<'_>, clip: &JObject<'_>) -> jni::errors::Result<bool> {
 
 fn write_text(
     env: &mut Env<'_>,
-    activity: &JObject<'_>,
+    context: &JObject<'_>,
     contents: &str,
 ) -> jni::errors::Result<()> {
-    let manager = clipboard_manager(env, activity)?;
+    let manager = clipboard_manager(env, context)?;
     let label = env.new_string("")?;
     let text = env.new_string(contents)?;
 
@@ -172,16 +174,16 @@ fn write_text(
     Ok(())
 }
 
-/// `activity.getSystemService(Context.CLIPBOARD_SERVICE)`.
+/// `context.getSystemService(Context.CLIPBOARD_SERVICE)`.
 fn clipboard_manager<'local>(
     env: &mut Env<'local>,
-    activity: &JObject<'_>,
+    context: &JObject<'_>,
 ) -> jni::errors::Result<JObject<'local>> {
     let name = env.new_string("clipboard")?;
 
     let manager = env
         .call_method(
-            activity,
+            context,
             jni_str!("getSystemService"),
             jni_sig!((java.lang.String) -> java.lang.Object),
             &[JValue::Object(&name)],
@@ -195,9 +197,9 @@ fn clipboard_manager<'local>(
     Ok(manager)
 }
 
-/// Runs `f` with the thread's JNI environment and the Activity, in a local
-/// frame of its own, so no local reference outlives the call.
-fn with_activity<T>(
+/// Runs `f` with the thread's JNI environment and `ndk-context`'s context,
+/// in a local frame of its own, so no local reference outlives the call.
+fn with_context<T>(
     f: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
 ) -> jni::errors::Result<T> {
     let context = ndk_context::android_context();
@@ -205,15 +207,15 @@ fn with_activity<T>(
     // SAFETY: android-activity gives `ndk-context` the process's JavaVM
     // before `android_main` starts, and keeps it while the shell runs.
     let vm = unsafe { JavaVM::from_raw(context.vm().cast()) };
-    let activity = context.context() as jni::sys::jobject;
+    let context = context.context() as jni::sys::jobject;
 
     vm.attach_current_thread(|env| {
-        // SAFETY: the NativeActivity's global reference, which
-        // android-activity deletes only after `android_main` returns. The
-        // cast borrows it: it is never wrapped in an owning reference, and
-        // never deleted here.
-        let activity = unsafe { env.as_cast_raw::<JObject<'_>>(&activity)? };
+        // SAFETY: a global reference that android-activity keeps at least
+        // until `android_main` returns (the Application's for good, the
+        // NativeActivity's until then). The cast borrows it: it is never
+        // wrapped in an owning reference, and never deleted here.
+        let context = unsafe { env.as_cast_raw::<JObject<'_>>(&context)? };
 
-        f(env, &activity)
+        f(env, &context)
     })
 }

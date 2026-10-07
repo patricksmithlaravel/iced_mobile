@@ -10,11 +10,13 @@
 //! A switch wakes the event loop on both platforms, so the next turn sees
 //! it:
 //!
-//! - Android: the night bits of the `uiMode` of the Activity's resources'
-//!   configuration (`getResources().getConfiguration()`), read through JNI.
-//!   The manifest lists `uiMode` in `configChanges`, so a switch keeps the
-//!   Activity and arrives as `onConfigurationChanged`, which Android calls
-//!   once it has updated those resources, and which wakes the event loop.
+//! - Android: the night bits of the `uiMode` of the application's resources'
+//!   configuration (`getResources().getConfiguration()` of `ndk-context`'s
+//!   context: the Application from android-activity 0.6.1 on, the Activity
+//!   with 0.6.0), read through JNI. The manifest lists `uiMode` in
+//!   `configChanges`, so a switch keeps the Activity and arrives as its
+//!   `onConfigurationChanged`, which Android calls once it has updated those
+//!   resources, and which wakes the event loop.
 //!   android-activity's own copy of the configuration
 //!   (`AndroidApp::config`) cannot be used after launch: it is read again
 //!   from the AssetManager the Activity had when it started, which Android
@@ -70,7 +72,7 @@ fn system_mode(event_loop: &winit::event_loop::ActiveEventLoop) -> theme::Mode {
         Err(error) => {
             WARNING.call_once(|| {
                 log::warn!(
-                    "Reading the Activity's uiMode failed: {error}; the \
+                    "Reading the application's uiMode failed: {error}; the \
                     system theme is the one it had at launch"
                 );
             });
@@ -125,17 +127,20 @@ mod android {
     use jni::vm::JavaVM;
     use jni::{Env, jni_sig, jni_str};
 
-    /// `getResources().getConfiguration().uiMode` of the Activity.
+    /// `getResources().getConfiguration().uiMode` of `ndk-context`'s
+    /// context: the Application, or the Activity with android-activity
+    /// 0.6.0.
     ///
     /// It runs on the thread of `android_main`, which android-activity
     /// attaches to the JVM for good. The UI thread replaces what this reads
-    /// before it calls `onConfigurationChanged`, and that call is what wakes
-    /// the event loop, so the read after a switch sees the new mode.
+    /// before it calls the Activity's `onConfigurationChanged`, and that
+    /// call is what wakes the event loop, so the read after a switch sees
+    /// the new mode.
     pub(super) fn ui_mode() -> jni::errors::Result<i32> {
-        with_activity(|env, activity| {
+        with_context(|env, context| {
             let resources = env
                 .call_method(
-                    activity,
+                    context,
                     jni_str!("getResources"),
                     jni_sig!(() -> android.content.res.Resources),
                     &[],
@@ -156,9 +161,10 @@ mod android {
         })
     }
 
-    /// Runs `f` with the thread's JNI environment and the Activity, in a
-    /// local frame of its own, so no local reference outlives the call.
-    fn with_activity<T>(
+    /// Runs `f` with the thread's JNI environment and `ndk-context`'s
+    /// context, in a local frame of its own, so no local reference outlives
+    /// the call.
+    fn with_context<T>(
         f: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
     ) -> jni::errors::Result<T> {
         let context = ndk_context::android_context();
@@ -166,17 +172,17 @@ mod android {
         // SAFETY: android-activity gives `ndk-context` the process's JavaVM
         // before `android_main` starts, and keeps it while the shell runs.
         let vm = unsafe { JavaVM::from_raw(context.vm().cast()) };
-        let activity = context.context() as jni::sys::jobject;
+        let context = context.context() as jni::sys::jobject;
 
         vm.attach_current_thread(|env| {
-            // SAFETY: the NativeActivity's global reference, which
-            // android-activity deletes only after `android_main` returns.
-            // The cast borrows it: it is never wrapped in an owning
-            // reference, and never deleted here.
-            let activity =
-                unsafe { env.as_cast_raw::<JObject<'_>>(&activity)? };
+            // SAFETY: a global reference that android-activity keeps at
+            // least until `android_main` returns (the Application's for
+            // good, the NativeActivity's until then). The cast borrows it:
+            // it is never wrapped in an owning reference, and never deleted
+            // here.
+            let context = unsafe { env.as_cast_raw::<JObject<'_>>(&context)? };
 
-            f(env, &activity)
+            f(env, &context)
         })
     }
 }
