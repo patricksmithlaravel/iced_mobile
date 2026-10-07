@@ -10,6 +10,9 @@
 //!   (unless set), `RUSTUP_AUTO_INSTALL=0`, `CARGO_TERM_COLOR=never` and,
 //!   unless the step opts out, `LC_ALL=C`;
 //! - is logged with its argv and environment delta, secrets redacted.
+//!
+//! The secret values icm knows ([`secret_values`]) are also what the
+//! reporter redacts from every event and result.
 
 use crate::signals;
 use crate::time::{Utc, format_duration};
@@ -20,7 +23,7 @@ use std::os::unix::fs::FileExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 /// The placeholder secrets are replaced with.
@@ -253,7 +256,8 @@ pub enum End {
 pub struct Outcome {
     /// How it ended.
     pub end: End,
-    /// Captured stdout (empty when stdout went to the log).
+    /// Captured stdout (empty when stdout went to the log), not redacted
+    /// (see [`run`]).
     pub stdout: Vec<u8>,
     /// stderr (and stdout when not captured separately).
     pub stderr: Vec<u8>,
@@ -316,6 +320,11 @@ impl Outcome {
 /// child's stderr (and stdout unless captured) live, and a footer; captured
 /// stdout is kept next to it as `<log stem>.stdout`. `on_stdout_line` sees
 /// each stdout line as it arrives.
+///
+/// The log files and `Outcome::stderr` are redacted. Captured stdout and
+/// the lines `on_stdout_line` sees are not: they are data for icm's parsers
+/// (a cargo artifact path must stay a path). Whatever of them icm reports
+/// is redacted by the reporter ([`redact_values`], [`secret_values`]).
 pub fn run(
     cmd: &Cmd,
     log: Option<&Path>,
@@ -460,35 +469,30 @@ pub fn run(
 }
 
 /// The secret values a command's output must not keep: the values of
-/// secret-named variables it was given, and those in icm's environment.
+/// secret-named variables it was given (remembered from now on, so the
+/// reporter redacts them too) and those in icm's environment.
 fn secrets_for(cmd: &Cmd) -> Vec<String> {
-    let mut secrets: Vec<String> = cmd
-        .env
-        .iter()
-        .filter(|(key, _)| is_secret_name(&key.to_string_lossy()))
-        .filter_map(|(_, value)| value.as_ref())
-        .map(|value| value.to_string_lossy().into_owned())
-        .filter(|value| value.len() >= 4)
-        .collect();
-    secrets.extend(secret_values().iter().cloned());
-    secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
-    secrets.dedup();
-    secrets
+    remember_secrets(cmd);
+    secret_values()
 }
 
 fn redact_bytes(bytes: Vec<u8>, secrets: &[String]) -> Vec<u8> {
-    if secrets.is_empty() {
-        return bytes;
-    }
     let text = String::from_utf8_lossy(&bytes);
     if !secrets.iter().any(|secret| text.contains(secret.as_str())) {
         return bytes;
     }
-    let mut text = text.into_owned();
+    redact_with(&text, secrets).into_bytes()
+}
+
+/// Replaces each of `secrets` (longest first) in a text.
+pub fn redact_with(text: &str, secrets: &[String]) -> String {
+    let mut text = text.to_string();
     for secret in secrets {
-        text = text.replace(secret.as_str(), REDACTED);
+        if text.contains(secret.as_str()) {
+            text = text.replace(secret.as_str(), REDACTED);
+        }
     }
-    text.into_bytes()
+    text
 }
 
 fn redact_file(path: &Path, secrets: &[String]) {
@@ -769,33 +773,73 @@ pub fn redact_argv(argv: &[String]) -> Vec<String> {
     out
 }
 
-/// Replaces the values of secret variables in icm's environment.
+/// Replaces the secret values icm knows ([`secret_values`]).
 pub fn redact_values(text: &str) -> String {
-    let mut text = text.to_string();
-    for secret in secret_values() {
-        if text.contains(secret.as_str()) {
-            text = text.replace(secret.as_str(), REDACTED);
-        }
-    }
-    text
+    redact_with(text, &secret_values())
 }
 
-fn secret_values() -> &'static [String] {
-    static SECRETS: OnceLock<Vec<String>> = OnceLock::new();
+/// The secret values icm knows, longest first (so a secret containing
+/// another is replaced whole): those of secret-named variables in its own
+/// environment (at least 6 bytes, not a path), and those it has handed to
+/// a child under a secret name (at least 4 bytes). A multi-line value also
+/// counts line by line, since output is read and reported by the line.
+pub fn secret_values() -> Vec<String> {
+    secret_registry()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+fn secret_registry() -> &'static Mutex<Vec<String>> {
+    static SECRETS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
     SECRETS.get_or_init(|| {
-        let mut values: Vec<String> = std::env::vars()
-            .filter(|(name, value)| {
-                is_secret_name(name)
-                    && value.len() >= 6
-                    && !value.starts_with('/')
-                    && !value.starts_with('~')
-            })
-            .map(|(_, value)| value)
-            .collect();
-        // Longest first, so a secret containing another is replaced whole.
-        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
-        values
+        let mut values = Vec::new();
+        for (name, value) in std::env::vars_os() {
+            let value = value.to_string_lossy();
+            if is_secret_name(&name.to_string_lossy())
+                && !value.starts_with('/')
+                && !value.starts_with('~')
+            {
+                add_secret(&mut values, &value, 6);
+            }
+        }
+        Mutex::new(values)
     })
+}
+
+/// Remembers the secret-named values a command is given.
+fn remember_secrets(cmd: &Cmd) {
+    let given: Vec<String> = cmd
+        .env
+        .iter()
+        .filter(|(key, _)| is_secret_name(&key.to_string_lossy()))
+        .filter_map(|(_, value)| value.as_ref())
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect();
+    if given.is_empty() {
+        return;
+    }
+    let mut values = secret_registry()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    for value in &given {
+        add_secret(&mut values, value, 4);
+    }
+}
+
+/// Adds a secret (and the lines of a multi-line one) at least `min` bytes
+/// long, keeping the list longest first.
+fn add_secret(values: &mut Vec<String>, value: &str, min: usize) {
+    let lines = value
+        .lines()
+        .map(str::trim)
+        .filter(|_| value.contains('\n'));
+    for text in std::iter::once(value).chain(lines) {
+        if text.len() >= min && !values.iter().any(|known| known == text) {
+            values.push(text.to_string());
+        }
+    }
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
 }
 
 /// Quotes an argument for display in a POSIX shell.
@@ -1003,6 +1047,52 @@ mod tests {
         for name in ["PATH", "JAVA_HOME", "ANDROID_HOME", "ICM_RUN_ID"] {
             assert!(!is_secret_name(name), "{name}");
         }
+    }
+
+    #[test]
+    fn secrets_handed_to_a_child_are_redacted_everywhere_after() {
+        let echo = "echo \"$ICM_UNIT_KEY_PASS\"; echo \"$ICM_UNIT_KEY_PASS\" >&2";
+        let outcome = run(
+            &sh(echo).env("ICM_UNIT_KEY_PASS", "child-only-pw"),
+            None,
+            None,
+        )
+        .unwrap();
+        // stderr is redacted; captured stdout stays raw for parsers.
+        assert_eq!(outcome.stderr_text(), "<redacted>\n");
+        assert_eq!(outcome.stdout_text(), "child-only-pw\n");
+        // The reporter's redaction knows it from now on.
+        assert!(secret_values().iter().any(|s| s == "child-only-pw"));
+        assert_eq!(
+            redact_values("detail: child-only-pw!"),
+            "detail: <redacted>!"
+        );
+    }
+
+    #[test]
+    fn multi_line_secrets_count_line_by_line() {
+        let mut values = Vec::new();
+        add_secret(
+            &mut values,
+            "-----BEGIN KEY-----\nAAAABBBBCCCC\r\nab\n-----END KEY-----",
+            6,
+        );
+        assert_eq!(values.len(), 4, "{values:?}");
+        assert!(values[0].contains('\n'));
+        assert!(values.contains(&"AAAABBBBCCCC".to_string()));
+        assert!(!values.contains(&"ab".to_string()));
+        assert_eq!(
+            redact_with("line: AAAABBBBCCCC", &values),
+            "line: <redacted>"
+        );
+
+        // Longest first: a secret containing another is replaced whole.
+        let mut values = Vec::new();
+        add_secret(&mut values, "abcdef", 6);
+        add_secret(&mut values, "abcdefghij", 6);
+        add_secret(&mut values, "abcdef", 6);
+        assert_eq!(values, ["abcdefghij", "abcdef"]);
+        assert_eq!(redact_with("abcdefghij", &values), "<redacted>");
     }
 
     #[test]

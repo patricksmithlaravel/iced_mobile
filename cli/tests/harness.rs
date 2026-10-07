@@ -709,3 +709,83 @@ fn project_hooks_report_checks() {
     assert_eq!(none["exit"], 0);
     assert_eq!(none["summary"], "no [checks] hooks for android in icm.toml");
 }
+
+/// Every file under `dir` that contains `needle`.
+fn files_containing(dir: &Path, needle: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if std::fs::read(&path)
+                .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// A hook that prints a secret-named variable from icm's environment in a
+/// CHECK line: the secret reaches neither the events, the result, the run
+/// directory nor stdout, in either output mode (design §1 principle 5).
+#[test]
+fn hook_output_never_carries_a_secret_into_the_report() {
+    let fake = Fake::new(true);
+    let config = fake.project.join("icm.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("\n[checks]\ndesktop = [\"hooks/token.sh\"]\n");
+    write(&config, &text);
+    write(
+        &fake.project.join("hooks/token.sh"),
+        "echo \"stdout: given $FIXTURE_API_TOKEN\"\n\
+         echo \"stderr: given $FIXTURE_API_TOKEN\" >&2\n\
+         echo \"CHECK WARN token: the hook was given $FIXTURE_API_TOKEN\"\n\
+         echo \"CHECK FAIL $FIXTURE_API_TOKEN: as a name\"\n",
+    );
+    let secret = "s3cr3t-fixture-value-hush";
+
+    for json in [true, false] {
+        let mut args = vec!["__test", "hooks", "desktop"];
+        if json {
+            args.push("--json");
+        }
+        let output = fake.run_with(&args, &[("FIXTURE_API_TOKEN", secret)]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Not even sanitized into a check id (`hook.s3cr3t_fixture_…`).
+        assert!(!stdout.contains("s3cr3t"), "stdout: {stdout}");
+        assert!(!stderr.contains("s3cr3t"), "stderr: {stderr}");
+        assert!(
+            stdout.contains("the hook was given <redacted>"),
+            "stdout: {stdout}"
+        );
+        assert!(stdout.contains("hook.redacted"), "stdout: {stdout}");
+
+        let last = fake.project.join("target/icm/last.json");
+        let result: Value = serde_json::from_str(&std::fs::read_to_string(&last).unwrap()).unwrap();
+        assert_eq!(
+            result["warnings"][0]["detail"], "the hook was given <redacted>",
+            "{result:#}"
+        );
+        let run_dir = fake.path(&result["run_dir"]);
+        let leaks = files_containing(&run_dir, "s3cr3t");
+        assert!(leaks.is_empty(), "the secret is in {leaks:?}");
+        assert!(
+            !std::fs::read_to_string(&last).unwrap().contains("s3cr3t"),
+            "the secret is in last.json"
+        );
+        // The hook's own output keeps its lines, redacted.
+        let log = fake.path(&result["hooks"][0]["log"]);
+        let log_text = std::fs::read_to_string(&log).unwrap();
+        assert!(log_text.contains("stderr: given <redacted>"), "{log_text}");
+        let stdout_text = std::fs::read_to_string(log.with_extension("stdout")).unwrap();
+        assert!(
+            stdout_text.contains("stdout: given <redacted>"),
+            "{stdout_text}"
+        );
+    }
+}

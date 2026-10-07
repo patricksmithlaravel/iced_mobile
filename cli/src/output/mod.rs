@@ -8,6 +8,11 @@
 //! - Either way, a command that does work writes `runs/<id>/events.ndjson`,
 //!   `runs/<id>/result.json` and `last.json` under its icm root
 //!   (`<target>/icm`, or the cache dir outside a project).
+//! - No secret values (design §1 principle 5): every string in every event
+//!   and in the result, progress and content has the secret values icm
+//!   knows replaced with `<redacted>` ([`crate::process::secret_values`]),
+//!   whatever produced it (a hook's CHECK line, a tool's output, an app's
+//!   log).
 //!
 //! Exit-code rules (§4.4): the first blocking failure (the error a command
 //! returns) sets the exit code and is `errors[0]`; non-blocking FAILs set
@@ -259,7 +264,8 @@ impl Reporter {
     pub fn progress(&self, message: impl AsRef<str>) {
         let mut inner = self.lock();
         if !inner.mode.json && !inner.mode.quiet {
-            let _ = writeln!(inner.stderr, "{}", message.as_ref());
+            let message = crate::process::redact_values(message.as_ref());
+            let _ = writeln!(inner.stderr, "{message}");
         }
     }
 
@@ -268,7 +274,7 @@ impl Reporter {
     pub fn content(&self, text: impl AsRef<str>) {
         let mut inner = self.lock();
         if !inner.mode.json {
-            let text = text.as_ref();
+            let text = crate::process::redact_values(text.as_ref());
             let _ = inner.stdout.write_all(text.as_bytes());
             if !text.ends_with('\n') {
                 let _ = inner.stdout.write_all(b"\n");
@@ -552,8 +558,10 @@ impl Inner {
         self.print(&kind, &line);
     }
 
-    /// The NDJSON line for an event: `v`, `type`, `run` and `t` first.
+    /// The NDJSON line for an event: `v`, `type`, `run` and `t` first,
+    /// secrets redacted.
     fn line(&self, mut event: Value) -> (String, String) {
+        redact(&mut event);
         let t = self.started.elapsed().as_millis() as u64;
         let kind = event
             .get("type")
@@ -840,12 +848,42 @@ impl Inner {
             }
         }
 
+        redact(&mut result);
         result
     }
 }
 
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
+}
+
+/// Replaces the secret values icm knows in every string of a JSON value.
+fn redact(value: &mut Value) {
+    let secrets = crate::process::secret_values();
+    if !secrets.is_empty() {
+        redact_strings(value, &secrets);
+    }
+}
+
+fn redact_strings(value: &mut Value, secrets: &[String]) {
+    match value {
+        Value::String(text) => {
+            if secrets.iter().any(|secret| text.contains(secret.as_str())) {
+                *text = crate::process::redact_with(text, secrets);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_strings(item, secrets);
+            }
+        }
+        Value::Object(map) => {
+            for (_, item) in map.iter_mut() {
+                redact_strings(item, secrets);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -1134,6 +1172,51 @@ mod tests {
                 .unwrap();
         assert_eq!(last["run"], result["run"]);
         assert!(root.path().join("latest/web/result.json").exists());
+    }
+
+    #[test]
+    fn secrets_are_redacted_in_events_results_and_files() {
+        // A secret icm handed to a child under a secret name.
+        let given = crate::process::Cmd::new("/usr/bin/true")
+            .env("ICM_UNIT_REPORT_TOKEN", "rep-unit-secret");
+        let _ = crate::process::run(&given, None, None).unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let (rep, out, err) = reporter(Mode::default(), true);
+        let dir = rep.attach(root.path()).unwrap();
+        rep.progress("using rep-unit-secret");
+        rep.check(Check::warn(
+            CheckId::RunScreenBlank,
+            "the hook was given rep-unit-secret",
+        ));
+        rep.set(
+            "hooks",
+            json!([{"log": "x", "nested": ["rep-unit-secret"]}]),
+        );
+        let _ = rep.finish(Ok(()));
+
+        for text in [
+            out.text(),
+            err.text(),
+            std::fs::read_to_string(dir.join("events.ndjson")).unwrap(),
+            std::fs::read_to_string(dir.join("result.json")).unwrap(),
+            std::fs::read_to_string(root.path().join("last.json")).unwrap(),
+        ] {
+            assert!(!text.contains("rep-unit-secret"), "{text}");
+        }
+        assert!(
+            out.text()
+                .contains("CHECK WARN run.screen_blank: the hook was given <redacted>")
+        );
+        assert_eq!(err.text(), "using <redacted>\n");
+        let result: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("result.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            result["warnings"][0]["detail"],
+            "the hook was given <redacted>"
+        );
+        assert_eq!(result["hooks"][0]["nested"][0], "<redacted>");
     }
 
     #[test]

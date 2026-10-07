@@ -21,7 +21,7 @@
 //!   item 2);
 //! - reports checks by printing `CHECK PASS <name>: <detail>` or
 //!   `CHECK FAIL <name>: <detail>` (also `WARN`, `SKIP`, `INFO`) on stdout,
-//!   which become `hook.<name>` checks;
+//!   which become `hook.<name>` checks, secret values redacted;
 //! - fails as `hook.<script>` when it exits non-zero, times out or is
 //!   missing. A script that exits 0 and prints no CHECK line passes as
 //!   `hook.<script>`.
@@ -276,7 +276,10 @@ fn run_one(
     let rep = ctx.rep.clone();
     let mut reported: Vec<(String, Status)> = Vec::new();
     let mut on_line = |line: &str| {
-        if let Some((status, name, detail)) = parse_check_line(line) {
+        // Redacted before parsing: a secret in the name would otherwise
+        // reach the check id sanitized, where the reporter cannot see it.
+        let line = crate::process::redact_values(line);
+        if let Some((status, name, detail)) = parse_check_line(&line) {
             let detail = if detail.is_empty() {
                 format!("reported by {script}")
             } else {
