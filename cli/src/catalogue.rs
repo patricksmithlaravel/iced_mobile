@@ -199,7 +199,7 @@ catalogue! {
         "Remove or rename the key at the file:line in the evidence; the detail lists the keys allowed there.";
     ConfigManagedKey = "config.managed_key", Config, Fail, Agent,
         "An overlay sets a key icm generates",
-        "Remove the key from the overlay and set the icm.toml key the detail names instead.";
+        "Remove the key from the overlay; set the icm.toml key the detail names instead, if it names one (a value only icm writes stays as icm writes it).";
     ConfigRawXmlForbidden = "config.raw_xml_forbidden", Config, Fail, Agent,
         "Raw manifest XML sets something icm manages",
         "Remove the element or attribute from `extra_manifest_xml`/`extra_application_xml`; use the icm.toml key the detail names.";

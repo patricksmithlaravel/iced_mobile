@@ -737,7 +737,6 @@ allow_backup = false
 res = "platform/android/res"               # keeps res/xml/data_extraction_rules.xml
 [android.manifest]
 application = { "android:dataExtractionRules" = "@xml/data_extraction_rules" }
-activity = { "android:windowSoftInputMode" = "adjustResize|stateHidden" }
 EOF
     icmd check --all >"$ACCEPT/tawara-check.json" || true
     jqe '.ok and .exit == 0 and .checks.fail == 0' "$ACCEPT/tawara-check.json"

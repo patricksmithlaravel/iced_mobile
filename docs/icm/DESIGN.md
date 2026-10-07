@@ -641,7 +641,7 @@ Per-platform tables may override `package` and `bin`. Release-only fields are ch
 **Managed keys** are always generated. Setting one in an overlay is `config.managed_key` (exit 3), naming the right icm.toml key.
 
 - **iOS:** CFBundleIdentifier, CFBundleExecutable, CFBundleName, CFBundleDisplayName, CFBundlePackageType, CFBundleShortVersionString, CFBundleVersion, CFBundleSupportedPlatforms, CFBundleInfoDictionaryVersion, MinimumOSVersion, LSRequiresIPhoneOS, UIDeviceFamily, UIRequiredDeviceCapabilities, UISupportedInterfaceOrientations, UIApplicationSceneManifest, UILaunchScreen, CFBundleIcons, CFBundleIconName, ITSAppUsesNonExemptEncryption, ITSEncryptionExportComplianceCode, every `DT*` key, BuildMachineOSBuild, and the NS*UsageDescription keys produced by `[app.permissions]`.
-- **Android:** `package`, `versionCode`, `versionName`, `<uses-sdk>`, `android:hasCode`, `android:extractNativeLibs`, `android:debuggable`, the activity name, `android.app.lib_name`, the launcher intent filter, `android:icon`, `android:roundIcon`, and `android:configChanges`. Users may *add* configChanges values but never remove any.
+- **Android:** `package`, `versionCode`, `versionName`, `<uses-sdk>`, `android:hasCode`, `android:extractNativeLibs`, `android:debuggable`, `android:label`, `android:allowBackup`, `android:enableOnBackInvokedCallback` (`[android] back`), the application's `android:theme`, the activity name, `android:exported`, `android:launchMode`, `android:windowSoftInputMode`, `android:screenOrientation`, `android.app.lib_name`, the launcher intent filter, `android:icon`, `android:roundIcon`, and `android:configChanges`. The configChanges list already names every change the target SDK knows, and no value can be removed. An overlay attribute would be written next to the generated one, which aapt2 rejects as a duplicate attribute only at link time, so validation refuses it first; a value only icm writes is refused with the reason it is fixed.
 
 **Overlays.**
 - `[ios.info_plist]`, `[ios.entitlements]` and `[android.manifest] application|activity` add keys.
@@ -1727,11 +1727,11 @@ Hooks run with stdin closed and a 300 s timeout. Output lines of the form `CHECK
    res = "platform/android/res"               # keeps res/xml/data_extraction_rules.xml
    [android.manifest]
    application = { "android:dataExtractionRules" = "@xml/data_extraction_rules" }
-   activity = { "android:windowSoftInputMode" = "adjustResize|stateHidden" }
    [checks]                                   # added by hand in step 4, once the scripts exist
    # ios-sim = ["platform/ios/checks.sh"]     # TAWARA lines, xattr, 0700 mode, background lock
    # android = ["platform/android/checks.sh"] # FLAG_SECURE, no_backup mode, Home/Back
    ```
+   Tawara's `android:windowSoftInputMode="adjustResize|stateHidden"` is not carried over: icm generates that value, and an overlay of a generated attribute is `config.managed_key` (§7.4).
 2. **Review the reported diff.** CFBundleVersion stops being a literal `1` and comes from `build`. configChanges gains `mcc|mnc|grammaticalGender` (the one manifest fix Tawara needs). The output also gains icons, `IcmTheme` and `targetSdk 36`.
 3. **Run on the emulator** to cover the targetSdk 36 behaviour (edge-to-edge, Back as a key):
    - `icm run ios-sim --json -q`
