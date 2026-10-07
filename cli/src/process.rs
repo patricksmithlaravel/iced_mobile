@@ -909,7 +909,7 @@ pub fn redact_values(text: &str) -> String {
 
 /// The secret values icm knows, longest first (so a secret containing
 /// another is replaced whole): those of secret-named variables in its own
-/// environment (at least 6 bytes, not a path), and those it has handed to
+/// environment (at least 6 bytes, not a path: [`names_a_path`]), and those it has handed to
 /// a child under a secret name (at least 4 bytes). A multi-line value also
 /// counts line by line, since output is read and reported by the line.
 /// Each also counts JSON-escaped, once and twice (a JSON line inside a JSON
@@ -926,19 +926,55 @@ pub fn secret_values() -> Vec<String> {
 
 fn secret_registry() -> &'static Mutex<Vec<String>> {
     static SECRETS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
-    SECRETS.get_or_init(|| {
-        let mut values = Vec::new();
-        for (name, value) in std::env::vars_os() {
-            let value = value.to_string_lossy();
-            if is_secret_name(&name.to_string_lossy())
-                && !value.starts_with('/')
-                && !value.starts_with('~')
-            {
-                add_secret(&mut values, &value, 6);
-            }
+    SECRETS.get_or_init(|| Mutex::new(environment_secrets(std::env::vars_os())))
+}
+
+/// The secret values of an environment's secret-named variables, in every
+/// form: at least 6 bytes, and not a path ([`names_a_path`]).
+fn environment_secrets(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Vec<String> {
+    let mut values = Vec::new();
+    for (name, value) in vars {
+        let (name, value) = (name.to_string_lossy(), value.to_string_lossy());
+        if is_secret_name(&name) && !names_a_path(&name, &value) {
+            add_secret(&mut values, &value, 6);
         }
-        Mutex::new(values)
-    })
+    }
+    values
+}
+
+/// The words of a variable's name that say its value is a location.
+const PATH_WORDS: &[&str] = &[
+    "PATH",
+    "FILE",
+    "DIR",
+    "DIRECTORY",
+    "HOME",
+    "KEYCHAIN",
+    "KEYSTORE",
+];
+
+/// Whether a secret-named variable's value is a path, not a secret: an
+/// absolute or `~/` path that the variable's name says is one (a word of
+/// it is `PATH`, `FILE`, `DIR`, `KEYCHAIN`, `KEYSTORE`, ...:
+/// `ICM_KEYCHAIN`, `SSH_KEY_PATH`), or that names something that exists, or
+/// a file not made yet in a directory that exists (not the root). Any other
+/// value that starts with `/` stays a secret: a base64 key or password does
+/// one time in 64.
+fn names_a_path(name: &str, value: &str) -> bool {
+    let path = match value.strip_prefix("~/") {
+        Some(rest) => match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(rest),
+            None => PathBuf::from(value),
+        },
+        None if value.starts_with('/') => PathBuf::from(value),
+        None => return false,
+    };
+    let upper = name.to_ascii_uppercase();
+    upper.split('_').any(|word| PATH_WORDS.contains(&word))
+        || path.exists()
+        || path
+            .parent()
+            .is_some_and(|parent| parent.parent().is_some() && parent.is_dir())
 }
 
 /// Remembers the secret-named values a command is given.
@@ -1245,6 +1281,49 @@ mod tests {
         for name in ["PATH", "JAVA_HOME", "ANDROID_HOME", "ICM_RUN_ID"] {
             assert!(!is_secret_name(name), "{name}");
         }
+    }
+
+    /// A value that starts with `/` is a secret unless it is a path: a
+    /// base64 password does one time in 64.
+    #[test]
+    fn slash_prefixed_values_are_secrets_unless_they_are_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("upload.jks");
+        std::fs::write(&key, b"keystore").unwrap();
+        let unmade = dir.path().join("no-signing.keychain-db");
+        let os = |text: &str| OsString::from(text);
+        let values = environment_secrets([
+            (os("DB_PASSWORD"), os("/9j4QSkZJRgDBMARKERq7w8+abc=")),
+            (os("JWT_SECRET"), os("/9j/4AAQSkZJRgABAQ+abc=")),
+            (os("PROFILE_TOKEN"), os("/Zq9XMARKERa1b2c3")),
+            (os("UPLOAD_KEY"), key.clone().into_os_string()),
+            (os("RELEASE_KEY"), unmade.clone().into_os_string()),
+            (os("ICM_KEYCHAIN"), os("/k/build.keychain-db")),
+            (os("SSH_KEY_PATH"), os("/nowhere/id_ed25519")),
+            (os("ANDROID_KEYSTORE"), os("~/keys/upload.jks")),
+            (os("PLAIN"), os("/not/a/secret/name")),
+        ]);
+        for secret in [
+            "/9j4QSkZJRgDBMARKERq7w8+abc=",
+            "/9j/4AAQSkZJRgABAQ+abc=",
+            "/Zq9XMARKERa1b2c3",
+        ] {
+            assert!(values.iter().any(|value| value == secret), "{values:?}");
+        }
+        for path in ["upload.jks", "keychain-db", "id_ed25519", "/not/"] {
+            assert!(
+                values.iter().all(|value| !value.contains(path)),
+                "{path}: {values:?}"
+            );
+        }
+        assert!(!names_a_path("DB_PASSWORD", "/9j4QSkZJRgDBMARKERq7w8+abc="));
+        assert!(!names_a_path("API_TOKEN", "relative/secret"));
+        assert!(names_a_path("API_TOKEN", &key.to_string_lossy()));
+        assert!(names_a_path("API_TOKEN", &unmade.to_string_lossy()));
+        assert_eq!(
+            redact_with("LEAK raw=/9j4QSkZJRgDBMARKERq7w8+abc= end", &values),
+            "LEAK raw=<redacted> end"
+        );
     }
 
     #[test]
