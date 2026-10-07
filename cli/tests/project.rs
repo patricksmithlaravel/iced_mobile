@@ -822,7 +822,7 @@ fn doctor_ios_sim_creates_the_managed_simulator_with_fake_xcode() {
     assert_eq!(fixed["exit"], 0, "{fixed}");
     let log = tool_log(&sandbox);
     assert!(
-        log.contains("xcrun simctl create icm-iPhone 17 (iOS 27.0) com.apple.CoreSimulator.SimDeviceType.iPhone-17 com.apple.CoreSimulator.SimRuntime.iOS-27-0"),
+        log.contains("xcrun simctl create icm-iphone-17-ios-27.0 com.apple.CoreSimulator.SimDeviceType.iPhone-17 com.apple.CoreSimulator.SimRuntime.iOS-27-0"),
         "{log}"
     );
     assert!(log.contains(&format!("DEVELOPER_DIR={}", developer.display())));

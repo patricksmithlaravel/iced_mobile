@@ -1885,7 +1885,7 @@ pub fn stop_session(ctx: &mut Ctx, shutdown: bool) -> Result<bool> {
     }
     stop_collector(&mut session);
 
-    let managed = session.device.name.starts_with(simctl::MANAGED_PREFIX);
+    let managed = crate::managed::is_managed(&session.device.name);
     let mut did = vec![if was_alive {
         format!("terminated {}", session.app_id)
     } else {
@@ -1916,7 +1916,7 @@ pub fn stop_session(ctx: &mut Ctx, shutdown: bool) -> Result<bool> {
         ctx.rep.check(Check::info(
             CheckId::RunNoSession,
             format!(
-                "left {} running: icm shuts down only the simulators it created (icm-*)",
+                "left {} running: icm shuts down only the simulators it created (icm-*, never icm-test-*)",
                 session.device.name
             ),
         ));

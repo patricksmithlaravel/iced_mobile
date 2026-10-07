@@ -190,7 +190,7 @@ mod tests {
     fn devices_carry_their_runtime() {
         let json = r#"{"devices":{
           "com.apple.CoreSimulator.SimRuntime.iOS-27-0":[
-            {"udid":"A","name":"icm-iPhone 17 (iOS 27.0)","state":"Booted","isAvailable":true,"deviceTypeIdentifier":"x"},
+            {"udid":"A","name":"icm-iphone-17-ios-27.0","state":"Booted","isAvailable":true,"deviceTypeIdentifier":"x"},
             {"udid":"B","name":"iPhone 17","state":"Shutdown","isAvailable":true}],
           "com.apple.CoreSimulator.SimRuntime.iOS-18-1":[]}}"#;
         let devices = parse_devices(json).unwrap();

@@ -71,7 +71,7 @@ pub enum Fix {
     SimCreate {
         /// The Xcode developer directory.
         developer_dir: PathBuf,
-        /// The name (`icm-iPhone 17 (iOS 27.0)`).
+        /// The name (`icm-iphone-17-ios-27.0`).
         name: String,
         /// The device type identifier.
         device_type: String,
@@ -475,7 +475,7 @@ mod tests {
         assert_eq!(
             Fix::SimCreate {
                 developer_dir: "/x".into(),
-                name: "icm-iPhone 17 (iOS 27.0)".into(),
+                name: "icm-iphone-17-ios-27.0".into(),
                 device_type: "t".into(),
                 runtime: "r".into()
             }

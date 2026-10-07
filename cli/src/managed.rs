@@ -36,9 +36,25 @@ pub fn avd_name(target_sdk: u32) -> String {
 }
 
 /// The managed simulator for a device type and runtime:
-/// `icm-iPhone 17 (iOS 27.0)`.
+/// `icm-iphone-17-ios-27.0` (no spaces, so it is easy to pass to `--sim`).
+/// `icm doctor ios-sim --fix` creates it and `icm run ios-sim` uses it (or
+/// creates it when missing).
 pub fn simulator_name(device_type: &str, runtime_version: &str) -> String {
-    format!("{PREFIX}{device_type} (iOS {runtime_version})")
+    format!("{PREFIX}{}-ios-{runtime_version}", slug(device_type))
+}
+
+/// A device type's name in lower case with runs of other characters as
+/// one `-`: `iPhone 17 Pro` gives `iphone-17-pro`.
+pub fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 /// Whether icm created a device of this name and may shut it down.
@@ -104,9 +120,14 @@ mod tests {
         assert_eq!(avd_name(36), "icm-api36");
         assert_eq!(
             simulator_name("iPhone 17", "27.0"),
-            "icm-iPhone 17 (iOS 27.0)"
+            "icm-iphone-17-ios-27.0"
+        );
+        assert_eq!(
+            slug("iPhone SE (3rd generation)"),
+            "iphone-se-3rd-generation"
         );
         assert!(is_managed("icm-api36"));
+        assert!(is_managed("icm-fresh-iphone-17-ios-27.0-ab12"));
         assert!(!is_managed("icm-test-proto"));
         assert!(!is_managed("cn_api36"));
         assert!(!is_managed("iPhone 17"));

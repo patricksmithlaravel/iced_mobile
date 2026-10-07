@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 /// The prefix of every simulator icm creates.
-pub const MANAGED_PREFIX: &str = "icm-";
+pub const MANAGED_PREFIX: &str = crate::managed::PREFIX;
 
 /// A simulator device type.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,7 +74,7 @@ pub struct Device {
 impl Device {
     /// Whether icm created it (and may shut it down or delete it).
     pub fn is_managed(&self) -> bool {
-        self.name.starts_with(MANAGED_PREFIX)
+        crate::managed::is_managed(&self.name)
     }
 
     /// Whether it is booted.
@@ -322,26 +322,15 @@ pub fn choose_device_type<'a>(
         .ok_or_else(|| format!("{} supports no iPhone device type", runtime.name))
 }
 
-/// `iPhone 17` gives `iphone-17`.
+/// `iPhone 17` gives `iphone-17` ([`crate::managed::slug`]).
 pub fn slug(name: &str) -> String {
-    let mut out = String::new();
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-        } else if !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    out.trim_matches('-').to_string()
+    crate::managed::slug(name)
 }
 
-/// The managed simulator's name, e.g. `icm-iphone-17-ios-27.0`.
+/// The managed simulator's name, e.g. `icm-iphone-17-ios-27.0`
+/// ([`crate::managed::simulator_name`], which `icm doctor` uses too).
 pub fn managed_name(device_type: &DeviceType, runtime: &Runtime) -> String {
-    format!(
-        "{MANAGED_PREFIX}{}-ios-{}",
-        slug(&device_type.name),
-        runtime.version
-    )
+    crate::managed::simulator_name(&device_type.name, &runtime.version)
 }
 
 /// A simulator by UDID or exact name (an available one first).

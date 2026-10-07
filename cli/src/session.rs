@@ -9,7 +9,7 @@
 //!  "pid":14879,                                   // the app or session host icm started
 //!  "pids":[{"pid":14880,"what":"emulator"}],      // more processes icm started
 //!  "app":{"id":"com.example.app"},
-//!  "device":{"kind":"simulator","id":"6F1…","name":"icm-iPhone 17 (iOS 27.0)","managed":true},
+//!  "device":{"kind":"simulator","id":"6F1…","name":"icm-iphone-17-ios-27.0","managed":true},
 //!  "stop":[["xcrun","simctl","terminate","6F1…","com.example.app"]],
 //!  "shutdown":[["xcrun","simctl","shutdown","6F1…"]],
 //!  "url":"http://127.0.0.1:8787/"}
@@ -91,7 +91,7 @@ pub struct SessionDevice {
     /// The UDID or serial.
     #[serde(default, alias = "udid", alias = "serial")]
     pub id: String,
-    /// Its name (`icm-iPhone 17 (iOS 27.0)`, `icm-api36`).
+    /// Its name (`icm-iphone-17-ios-27.0`, `icm-api36`).
     #[serde(default)]
     pub name: String,
     /// Whether icm created it (and may shut it down).
@@ -272,7 +272,7 @@ mod tests {
     fn sessions_round_trip_and_keep_unknown_keys() {
         let dir = tempfile::tempdir().unwrap();
         let text = r#"{"v":1,"platform":"web","pid":123,"url":"http://127.0.0.1:8787/","ports":{"http":8787},
-            "device":{"kind":"simulator","udid":"ABC","name":"icm-iPhone 17 (iOS 27.0)","managed":true}}"#;
+            "device":{"kind":"simulator","udid":"ABC","name":"icm-iphone-17-ios-27.0","managed":true}}"#;
         std::fs::write(dir.path().join("web.json"), text).unwrap();
         let sessions = list(dir.path());
         assert_eq!(sessions.len(), 1);
