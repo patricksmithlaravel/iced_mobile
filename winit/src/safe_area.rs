@@ -245,6 +245,19 @@ impl Shell {
             return;
         };
 
+        // Android: the root insets can still hold another app's keyboard
+        // for a moment after the app comes back, and the system shows one
+        // over this window only when it asks: a keyboard counts while a
+        // window asks for it, and for the second it takes to slide away.
+        #[cfg(target_os = "android")]
+        let area = if window.ime_requested()
+            || self.polls.keyboard_wanted(Instant::now())
+        {
+            area
+        } else {
+            area.with_keyboard(0.0)
+        };
+
         let id = window.raw.id();
 
         match self.windows.iter_mut().find(|(known, _area)| *known == id) {
@@ -501,6 +514,12 @@ impl Polls {
         due
     }
 
+    /// Whether a keyboard over the window can be the application's at
+    /// `now`: a window asks for it, or let it go less than a second ago.
+    fn keyboard_wanted(&self, now: Instant) -> bool {
+        self.typing || self.typed_until.is_some_and(|until| now <= until)
+    }
+
     /// A window was drawn at `now`: compare the display's rotation soon, no
     /// sooner than [`TURN_EVERY`](Self::TURN_EVERY) after the last time.
     fn redrawn(&mut self, now: Instant) {
@@ -724,6 +743,24 @@ mod tests {
         // A redraw long after compares at once again.
         polls.redrawn(at(2000));
         assert!(polls.turn_due(at(2000)));
+    }
+
+    #[test]
+    fn android_polls_count_a_keyboard_only_while_one_is_asked_for() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut polls = Polls::default();
+
+        // Back from another app that had its keyboard up: not this one's.
+        assert!(!polls.keyboard_wanted(start));
+
+        polls.typing(true, start);
+        assert!(polls.keyboard_wanted(at(100)));
+
+        // Let go: it slides away for a second.
+        polls.typing(false, at(500));
+        assert!(polls.keyboard_wanted(at(1500)));
+        assert!(!polls.keyboard_wanted(at(1501)));
     }
 
     #[test]

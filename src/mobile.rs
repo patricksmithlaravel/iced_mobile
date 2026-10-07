@@ -270,10 +270,13 @@
 //! while a text input has the focus, since the keyboard sends no event of
 //! its own when the app draws edge to edge. A turn from one landscape to
 //! the other resizes nothing either: the shell compares the display's
-//! rotation after a redraw, which Android asks for then. On iOS the window
-//! can report zero insets for a frame, under the launch screen, before it
-//! is in its scene. On phones every window fills the screen, so they share
-//! one safe area.
+//! rotation after a redraw, which Android asks for then. A keyboard counts
+//! only while a text input of the app has the focus (and for the second it
+//! takes to slide away), so the keyboard another app left up does not
+//! raise the bottom when the app comes back. On iOS the window can report
+//! zero insets for a frame, under the launch screen, before it is in its
+//! scene. On phones every window fills the screen, so they share one safe
+//! area.
 //!
 //! [`SafeArea::keyboard`] is measured from the bottom edge, so it covers the
 //! bottom inset: [`SafeArea::padding`] takes the larger of the two.
