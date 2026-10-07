@@ -32,6 +32,8 @@ pub mod icm;
 
 mod broadcast;
 mod error;
+#[cfg(any(target_os = "android", test))]
+mod modifiers;
 mod proxy;
 mod window;
 
@@ -896,6 +898,8 @@ async fn run_instance<P>(
     let mut events = Vec::new();
     let mut messages = Vec::new();
     let mut actions = 0;
+    #[cfg(target_os = "android")]
+    let mut modifier_keys = modifiers::Modifiers::default();
 
     let mut ui_caches = FxHashMap::default();
     let mut user_interfaces = ManuallyDrop::new(FxHashMap::default());
@@ -1505,6 +1509,22 @@ async fn run_instance<P>(
                             continue;
                         };
 
+                        // Android: winit sends no `ModifiersChanged`. The
+                        // shell follows a hardware keyboard's modifier keys,
+                        // for the shortcuts of text fields, and lets go of
+                        // them when the window loses the focus.
+                        #[cfg(target_os = "android")]
+                        if let Some(state) = modifier_keys.update(&window_event)
+                        {
+                            modifiers::notify(
+                                &program,
+                                id,
+                                window,
+                                state,
+                                &mut events,
+                            );
+                        }
+
                         match window_event {
                             winit::event::WindowEvent::Resized(_) => {
                                 window.raw.request_redraw();
@@ -1741,6 +1761,21 @@ async fn run_instance<P>(
                         // `Resumed`.
                         for (_id, window) in window_manager.iter_mut() {
                             window.surface = None;
+                        }
+
+                        // Android: a modifier key released while the app is
+                        // away never reaches it.
+                        #[cfg(target_os = "android")]
+                        if let Some(state) = modifier_keys.release_all() {
+                            for (id, window) in window_manager.iter_mut() {
+                                modifiers::notify(
+                                    &program,
+                                    id,
+                                    window,
+                                    state,
+                                    &mut events,
+                                );
+                            }
                         }
                     }
                     event::Event::Resumed => {

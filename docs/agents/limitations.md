@@ -21,9 +21,11 @@ this file in the commit that fixes or finds a limitation.
   the keyboard. The desktop and the web report zero, a phone browser's
   notch included. Keep controls away from the rounded corners.
 - **No edit menu on phones.** A long press in a text field shows no menu
-  and no selection handles, and the Cmd/Ctrl shortcuts of text fields never
-  fire. The clipboard itself works: `iced::clipboard::read` and `write`
-  use the system's, so give fields that need it Copy and Paste buttons.
+  and no selection handles, and the Ctrl shortcuts of text fields fire
+  only from a hardware keyboard on Android (iOS hardware keyboards send no
+  modifier keys). The clipboard itself works: `iced::clipboard::read` and
+  `write` use the system's, so give fields that need it Copy and Paste
+  buttons.
   Read only when the user asks to paste: Android 10 and later give `None`
   to an app without the input focus, and iOS 16 and later ask the user
   ("Allow Paste") before an app reads what another app copied.

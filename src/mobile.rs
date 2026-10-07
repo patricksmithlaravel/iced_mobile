@@ -326,6 +326,13 @@
 //! selection. There is no long-press edit menu: give the fields that need
 //! it Copy and Paste buttons.
 //!
+//! On Android, `text_input` and `text_editor` also take Ctrl+C, X, V and A
+//! from a hardware keyboard (an emulator's host keyboard, ChromeOS, a
+//! keyboard over USB or Bluetooth): winit reports no modifier keys there,
+//! so the shell follows them itself, and lets go of them when the window
+//! loses the focus. iOS hardware keyboards send no modifier keys, so the
+//! shortcuts never fire there.
+//!
 //! ```no_run
 //! use iced::Task;
 //!
@@ -633,8 +640,9 @@
 //!   task ends without an id.
 //! - **No edit menu.** A long press in a text field shows no menu and no
 //!   selection handles, and the copy, cut and paste shortcuts of text
-//!   fields never fire on phones. The [clipboard](#clipboard) itself works:
-//!   offer Copy and Paste buttons where they matter.
+//!   fields fire only from a hardware keyboard on Android. The
+//!   [clipboard](#clipboard) itself works: offer Copy and Paste buttons
+//!   where they matter.
 //! - **Android activity destruction** ends the application, which starts
 //!   over in the next Activity ([Activity
 //!   destruction](#android-activity-destruction)). The manifest settings
