@@ -48,8 +48,19 @@ simctl)
     touch "$S/created"
     echo "FAKE-UDID"
     ;;
-  boot | bootstatus | install | uninstall | shutdown | delete | ui) ;;
+  boot | bootstatus | install | uninstall | delete | ui) ;;
+  shutdown)
+    # A shutdown clears the simulator's launchd environment.
+    rm -f "$S/owner-$1"
+    ;;
+  getenv)
+    # The launchd environment holds only what `launchctl setenv` put there
+    # ($S/owner-<udid>); like simctl, an unset variable is a message on
+    # stderr and exit 0.
+    if [ -f "$S/owner-$1" ]; then cat "$S/owner-$1"; else echo "'$2' not found" >&2; fi
+    ;;
   spawn)
+    udid="$1"
     shift
     case "$1" in
     log)
@@ -59,7 +70,9 @@ simctl)
       fi
       ;;
     launchctl)
-      if [ -f "$S/app.pid" ] && kill -0 "$(cat "$S/app.pid")" 2>/dev/null; then
+      if [ "$2" = setenv ]; then
+        printf '%s\n' "$4" > "$S/owner-$udid"
+      elif [ -f "$S/app.pid" ] && kill -0 "$(cat "$S/app.pid")" 2>/dev/null; then
         printf '%s\t0\tUIKitApplication:com.acme.fixture[1a2b][rb-legacy]\n' "$(cat "$S/app.pid")"
       fi
       ;;

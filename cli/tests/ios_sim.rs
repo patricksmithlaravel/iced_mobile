@@ -70,6 +70,16 @@ impl Fake {
             }
         }
         image::write_png(&state.join("screen.png"), &screen, false).unwrap();
+        std::fs::write(
+            state.join("adb"),
+            "#!/bin/sh\n[ \"$1\" = devices ] && printf 'List of devices attached\\n\\n'\nexit 0\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(state.join("adb"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
 
         let iphone = |name: &str| {
             json!({"name": name, "productFamily": "iPhone",
@@ -148,7 +158,11 @@ impl Fake {
             .env("ICM_TOOL_RUSTUP", fakes.join("rustup"))
             .env("ICM_TOOL_XCODEBUILD", fakes.join("xcodebuild"))
             .env("ICM_TOOL_CODESIGN", fakes.join("ok"))
-            .env("ICM_TOOL_XATTR", fakes.join("ok"));
+            .env("ICM_TOOL_XATTR", fakes.join("ok"))
+            // `stop --all` also asks Android: an adb with no device online,
+            // so no test reaches the host's real adb.
+            .env("ICM_TOOL_ADB", self.state.join("adb"))
+            .env("ICM_TOOL_EMULATOR", fakes.join("ok"));
         for var in [
             "ICM_JSON",
             "ICM_CONFIG",
@@ -193,6 +207,55 @@ impl Fake {
 
     fn xcrun_log(&self) -> String {
         std::fs::read_to_string(self.state.join("xcrun.log")).unwrap_or_default()
+    }
+
+    /// Every NDJSON line of a `--json` run (its result last).
+    fn events(&self, scenario: &str, args: &[&str]) -> Vec<Value> {
+        let output = self.run(scenario, args);
+        let events: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events.last().map(|e| e["type"].clone()),
+            Some(json!("result")),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        events
+    }
+
+    /// Writes the host.toml icm reads.
+    fn host(&self, text: &str) {
+        std::fs::write(self.root.path().join("no-host.toml"), text).unwrap();
+    }
+
+    /// The owner variable icm set in a simulator's launchd environment.
+    fn owner(&self, udid: &str) -> Option<String> {
+        std::fs::read_to_string(self.state.join(format!("owner-{udid}")))
+            .ok()
+            .map(|text| text.trim().to_string())
+    }
+
+    fn set_owner(&self, udid: &str, tag: &str) {
+        std::fs::write(self.state.join(format!("owner-{udid}")), format!("{tag}\n")).unwrap();
+    }
+
+    /// Two booted simulators and no session: icm's managed one
+    /// (`MANAGED-UDID`, the one a run picks without a pin) and a test run's
+    /// `icm-test-pinned` (`TEST-UDID`).
+    fn booted_pair(&self) {
+        let device = |udid: &str, name: &str| {
+            json!({"udid": udid, "name": name, "state": "Booted", "isAvailable": true,
+                   "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17"})
+        };
+        write_json(
+            &self.state.join("devices.json"),
+            &json!({"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
+                device("MANAGED-UDID", "icm-iphone-17-ios-27.0"),
+                device("TEST-UDID", "icm-test-pinned")
+            ]}}),
+        );
     }
 
     fn kill_app(&self) {
@@ -475,4 +538,123 @@ fn store_screenshots_need_a_store_size_simulator() {
             .starts_with("icm run ios-sim --store")
     );
     let _ = fake.result("ok", &["stop", "ios-sim", "--json", "-q"]);
+}
+
+fn checks<'a>(events: &'a [Value], id: &str) -> Vec<&'a Value> {
+    events
+        .iter()
+        .filter(|event| event["type"] == "check" && event["id"] == id)
+        .collect()
+}
+
+/// With host.toml pinning a test run's simulator and no ios-sim session,
+/// `stop --all --shutdown` shuts down neither the pinned simulator (not
+/// icm's) nor icm's managed one (not the one this project uses: another
+/// project may be running on it).
+#[test]
+fn shutdown_without_a_session_honours_the_pinned_simulator() {
+    let fake = Fake::new();
+    fake.booted_pair();
+    fake.host("[ios]\nsimulator_udid = \"TEST-UDID\"\n");
+
+    let events = fake.events("ok", &["stop", "--all", "--shutdown", "--json"]);
+    let stop = events.last().unwrap();
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["shutdown"], json!([]), "{stop}");
+    let log = fake.xcrun_log();
+    assert!(!log.contains("simctl shutdown"), "{log}");
+    let left = checks(&events, "run.no_session");
+    assert!(
+        left.iter().any(|check| check["detail"]
+            .as_str()
+            .unwrap()
+            .contains("left icm-test-pinned (TEST-UDID) running")),
+        "{events:?}"
+    );
+}
+
+/// Without a session, the managed simulator is shut down unless icm booted
+/// it for another project; then the advice names that simulator only.
+#[test]
+fn shutdown_without_a_session_leaves_another_projects_simulator() {
+    let fake = Fake::new();
+    fake.booted_pair();
+    fake.set_owner("MANAGED-UDID", "0123456789abcdef");
+
+    let events = fake.events("ok", &["stop", "--all", "--shutdown", "--json"]);
+    let stop = events.last().unwrap();
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["shutdown"], json!([]), "{stop}");
+    assert!(!fake.xcrun_log().contains("simctl shutdown"));
+    assert!(
+        fake.xcrun_log()
+            .contains("simctl getenv MANAGED-UDID ICM_BOOTED_BY")
+    );
+    let shared = checks(&events, "ios.sim.shared");
+    assert_eq!(shared.len(), 1, "{events:?}");
+    assert_eq!(shared[0]["status"], "info");
+    let detail = shared[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("icm-iphone-17-ios-27.0 (MANAGED-UDID)")
+            && detail.contains("0123456789abcdef"),
+        "{detail}"
+    );
+    assert_eq!(
+        shared[0]["fix"]["commands"],
+        json!(["xcrun simctl shutdown MANAGED-UDID"]),
+        "{events:?}"
+    );
+
+    // Nobody's (booted outside icm, or by an icm before owners): shut down,
+    // as before; the test run's simulator stays.
+    std::fs::remove_file(fake.state.join("owner-MANAGED-UDID")).unwrap();
+    let stop = fake.result("ok", &["stop", "--all", "--shutdown", "--json", "-q"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(
+        stop["shutdown"],
+        json!(["icm-iphone-17-ios-27.0 (MANAGED-UDID)"])
+    );
+    let log = fake.xcrun_log();
+    assert!(log.contains("simctl shutdown MANAGED-UDID"), "{log}");
+    assert!(!log.contains("simctl shutdown TEST-UDID"), "{log}");
+}
+
+/// A run that boots icm's simulator marks it as this project's; the
+/// session's `stop --shutdown` shuts down only a simulator no other project
+/// claims.
+#[test]
+fn a_run_claims_the_simulator_it_boots() {
+    let fake = Fake::new();
+    let run = fake.result("ok", &["run", "ios-sim", "--json", "-q"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let ours = fake.owner("FAKE-UDID").expect("the run set no owner");
+    assert_eq!(ours.len(), 16, "{ours}");
+    assert!(
+        fake.xcrun_log().contains(&format!(
+            "simctl spawn FAKE-UDID launchctl setenv ICM_BOOTED_BY {ours}"
+        )),
+        "{}",
+        fake.xcrun_log()
+    );
+
+    // Another project booted it since: left running.
+    fake.set_owner("FAKE-UDID", "0123456789abcdef");
+    let events = fake.events("ok", &["stop", "ios-sim", "--shutdown", "--json"]);
+    let stop = events.last().unwrap();
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(!fake.xcrun_log().contains("simctl shutdown"), "{stop}");
+    assert_eq!(checks(&events, "ios.sim.shared").len(), 1, "{events:?}");
+
+    // Ours: shut down.
+    fake.set_owner("FAKE-UDID", &ours);
+    let stop = fake.result("ok", &["stop", "ios-sim", "--shutdown", "--json", "-q"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(
+        stop["summary"]
+            .as_str()
+            .unwrap()
+            .contains("shut down icm-iphone-17-ios-27.0"),
+        "{stop}"
+    );
+    assert!(fake.xcrun_log().contains("simctl shutdown FAKE-UDID"));
 }

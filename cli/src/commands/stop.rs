@@ -13,8 +13,12 @@
 //! ([`crate::session`]) is ended by what it says: its stop commands run,
 //! the processes icm started get SIGTERM (then SIGKILL), and the file is
 //! removed. `--shutdown` also shuts down the icm-managed simulator or
-//! emulator (`icm-` names only, never `icm-test-` ones and never a device
-//! icm did not create). Stopping what is not running is not an error.
+//! emulator (`icm-` names only, never `icm-test-` ones, never a device
+//! icm did not create, and never one icm booted for another project:
+//! [`crate::platform::ios_sim::owner`], [`crate::android::session::OWNER_PROP`]).
+//! Without a session, only the one this project's runs pick is a
+//! candidate: for iOS, host.toml's pinned simulator when there is one.
+//! Stopping what is not running is not an error.
 
 use crate::catalogue::CheckId;
 use crate::cli::{Platform, StopArgs};
@@ -310,8 +314,8 @@ fn run_quietly(ctx: &Ctx, name: &str, cmd: &Cmd) -> bool {
     }
 }
 
-/// `--shutdown` without a session: the project's managed simulator or
-/// emulator, when it is running.
+/// `--shutdown` without a session: the simulator or emulator the project's
+/// runs use, when it is running and icm may shut it down.
 fn shutdown_managed(
     ctx: &Ctx,
     project: &Project,
@@ -326,6 +330,13 @@ fn shutdown_managed(
     }
 }
 
+/// The iOS half of [`shutdown_managed`]. The simulator is the one `icm run
+/// ios-sim` picks without flags: host.toml's pinned `simulator_udid` when
+/// set (never icm's managed one then, which another project may be
+/// running on), else icm's managed simulator for the project's runtime. It
+/// is shut down only when it is booted, managed (`icm-`, never `icm-test-`)
+/// and not booted by icm for another project
+/// ([`crate::platform::ios_sim::owner`]).
 fn shutdown_simulator(ctx: &Ctx, project: &Project, host: &crate::host::HostConfig) -> Vec<String> {
     let Ok(xcode) = crate::tools::xcode(&ctx.env) else {
         return Vec::new();
@@ -340,29 +351,65 @@ fn shutdown_simulator(ctx: &Ctx, project: &Project, host: &crate::host::HostConf
             .filter(|o| o.success())
             .map(|o| o.stdout_text())
     };
-    let Some(runtimes) = list("runtimes").and_then(|j| crate::simctl::parse_runtimes(&j).ok())
-    else {
-        return Vec::new();
-    };
-    let Some(runtime) = crate::simctl::newest_runtime(&runtimes, &project.config.config.ios.min_os)
-    else {
-        return Vec::new();
-    };
-    let Some(device_type) =
-        crate::simctl::choose_device_type(runtime, host.ios.simulator_type.as_deref())
-    else {
-        return Vec::new();
-    };
-    let name = managed::simulator_name(&device_type.name, &runtime.version);
     let Some(devices) = list("devices").and_then(|j| crate::simctl::parse_devices(&j).ok()) else {
         return Vec::new();
     };
+    let pinned = host
+        .ios
+        .simulator_udid
+        .as_deref()
+        .map(str::trim)
+        .filter(|selector| !selector.is_empty());
+    let chosen: Vec<&crate::simctl::Device> = match pinned {
+        // As `icm run ios-sim` finds it: the UDID, else the exact name.
+        Some(selector) => devices
+            .iter()
+            .find(|d| d.udid.eq_ignore_ascii_case(selector))
+            .or_else(|| devices.iter().find(|d| d.name == selector))
+            .into_iter()
+            .collect(),
+        None => {
+            let Some(runtimes) =
+                list("runtimes").and_then(|j| crate::simctl::parse_runtimes(&j).ok())
+            else {
+                return Vec::new();
+            };
+            let Some(runtime) =
+                crate::simctl::newest_runtime(&runtimes, &project.config.config.ios.min_os)
+            else {
+                return Vec::new();
+            };
+            let Some(device_type) =
+                crate::simctl::choose_device_type(runtime, host.ios.simulator_type.as_deref())
+            else {
+                return Vec::new();
+            };
+            let name = managed::simulator_name(&device_type.name, &runtime.version);
+            devices.iter().filter(|d| d.name == name).collect()
+        }
+    };
 
     let mut done = Vec::new();
-    for device in devices
-        .iter()
-        .filter(|d| d.name == name && d.state == "Booted" && managed::is_managed(&d.name))
-    {
+    for device in chosen.into_iter().filter(|d| d.state == "Booted") {
+        if !managed::is_managed(&device.name) {
+            ctx.rep.check(Check::info(
+                CheckId::RunNoSession,
+                format!(
+                    "left {} ({}) running: icm shuts down only the simulators it created (icm-*, never icm-test-*)",
+                    device.name, device.udid
+                ),
+            ));
+            continue;
+        }
+        if crate::platform::ios_sim::owner::booted_for_another(
+            ctx,
+            &xcode,
+            project,
+            &device.name,
+            &device.udid,
+        ) {
+            continue;
+        }
         let cmd = xcode
             .xcrun()
             .args(["simctl", "shutdown", &device.udid])

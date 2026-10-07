@@ -31,6 +31,7 @@ pub mod image;
 pub mod input;
 pub mod logs;
 pub mod macho;
+pub mod owner;
 pub mod plist;
 pub mod session;
 pub mod simctl;
@@ -485,7 +486,12 @@ fn choose_target(
                     .timeout(Duration::from_secs(120)),
             )?;
             if !outcome.success() {
-                return Err(ctx.step_failure("simctl.create", CheckId::IosSimBootFailed, &outcome));
+                return Err(ctx
+                    .step_failure("simctl.create", CheckId::IosSimBootFailed, &outcome)
+                    .fix(
+                        "Read the step log (a runtime or device type simctl does not offer, or a full disk), then rerun.",
+                        &["xcrun simctl list runtimes", "icm run ios-sim --json -q"],
+                    ));
             }
             let udid = outcome.stdout_text().trim().to_string();
             all = devices(ctx, xcode)?;
@@ -505,11 +511,12 @@ fn choose_target(
     })
 }
 
-/// `simctl boot`, unless it is already booted. Returns at once; the
-/// simulator finishes booting while cargo builds.
-fn start_boot(ctx: &Ctx, xcode: &Xcode, device: &Device) -> Result<()> {
+/// `simctl boot`, unless it is already booted. Returns at once (the
+/// simulator finishes booting while cargo builds), and whether this call
+/// booted it.
+fn start_boot(ctx: &Ctx, xcode: &Xcode, device: &Device) -> Result<bool> {
     if device.is_booted() {
-        return Ok(());
+        return Ok(false);
     }
     let outcome = ctx.step(
         "simctl.boot",
@@ -519,9 +526,27 @@ fn start_boot(ctx: &Ctx, xcode: &Xcode, device: &Device) -> Result<()> {
             .timeout(Duration::from_secs(180)),
     )?;
     if !outcome.success() && !outcome.stderr_text().contains("current state: Booted") {
-        return Err(ctx.step_failure("simctl.boot", CheckId::IosSimBootFailed, &outcome));
+        return Err(boot_fix(
+            ctx.step_failure("simctl.boot", CheckId::IosSimBootFailed, &outcome),
+            device,
+        ));
     }
-    Ok(())
+    Ok(outcome.success())
+}
+
+/// A boot failure's fix: that simulator alone, never `simctl shutdown all`,
+/// which would stop other projects' simulators and the owner's.
+fn boot_fix(error: IcmError, device: &Device) -> IcmError {
+    error.fix(
+        format!(
+            "Shut down {} alone, then rerun; `icm run ios-sim --fresh` uses a new simulator.",
+            device.name
+        ),
+        &[
+            &format!("xcrun simctl shutdown {}", device.udid),
+            "icm run ios-sim --json -q",
+        ],
+    )
 }
 
 /// `simctl bootstatus -b`: waits until the simulator has booted.
@@ -535,7 +560,10 @@ fn finish_boot(ctx: &Ctx, xcode: &Xcode, device: &Device) -> Result<()> {
             .timeout(Duration::from_secs(300)),
     )?;
     if !outcome.success() {
-        return Err(ctx.step_failure("simctl.bootstatus", CheckId::IosSimBootFailed, &outcome));
+        return Err(boot_fix(
+            ctx.step_failure("simctl.bootstatus", CheckId::IosSimBootFailed, &outcome),
+            device,
+        ));
     }
     Ok(())
 }
@@ -1270,7 +1298,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     let target = choose_target(ctx, &project, &xcode, args)?;
     ctx.rep.set("device", target.json());
     // Boot while cargo builds.
-    start_boot(ctx, &xcode, &target.device)?;
+    let booted = start_boot(ctx, &xcode, &target.device)?;
     if args.show {
         let _ = ctx.probe(
             &Cmd::tool("open")
@@ -1297,6 +1325,11 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         CheckId::IosSimBootFailed,
         format!("{} (iOS {}) is booted", target.device.name, target.os),
     ));
+    // A managed simulator this run booted is this project's to shut down,
+    // and no other project's (`owner`).
+    if booted && target.device.is_managed() {
+        owner::claim(ctx, &xcode, &project, &target.device.udid);
+    }
 
     if args.reinstall {
         let _ = ctx.step(
@@ -2009,7 +2042,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         if args.shutdown {
             steps.push((
                 "ios-sim.shutdown",
-                "xcrun simctl shutdown the icm-managed simulator (icm-* names only, never icm-test-*)"
+                "xcrun simctl shutdown the session's icm-managed simulator (icm-* names only, never icm-test-*, never one booted for another project)"
                     .to_string(),
             ));
         }
@@ -2071,7 +2104,24 @@ pub fn stop_session(ctx: &mut Ctx, shutdown: bool) -> Result<Option<Value>> {
     } else {
         format!("{} was not running", session.app_id)
     }];
-    if managed && (shutdown || session.device.fresh) {
+    // A `--fresh` simulator is this run's alone; a shared managed one stays
+    // up while another project's run booted it.
+    let shared = managed
+        && shutdown
+        && !session.device.fresh
+        && owner::booted_for_another(
+            ctx,
+            &xcode,
+            &project,
+            &session.device.name,
+            &session.device.udid,
+        );
+    if shared {
+        did.push(format!(
+            "left {} running for another project",
+            session.device.name
+        ));
+    } else if managed && (shutdown || session.device.fresh) {
         let outcome = ctx.step(
             "simctl.shutdown",
             &simctl(&xcode)

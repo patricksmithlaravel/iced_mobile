@@ -65,8 +65,8 @@ lists every command.
   one. icm boots its emulator only when nothing else is online. Check `icm devices android` first,
   or pass `--device <serial>` or `--avd icm-api36`.
 - **Stopping:** `icm stop --all` stops the apps and leaves the simulator and emulator booted for
-  the next run. `--shutdown` also turns off the ones icm manages (but not an emulator it booted for
-  another app).
+  the next run. `--shutdown` also turns off the ones icm manages, but not a simulator or emulator
+  it booted for another app, nor one host.toml pins that icm did not create.
 - **One target directory per app:** icm keeps its runs and sessions in the Cargo target directory
   (`target/icm`). Do not share one `CARGO_TARGET_DIR` between apps, or `icm logs`, `ps` and `stop`
   see the other app's sessions.

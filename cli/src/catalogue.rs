@@ -414,7 +414,10 @@ catalogue! {
         "Read the step log; usually the icon is not a valid PNG.";
     IosSimBootFailed = "ios.sim.boot_failed", Device, Fail, Agent,
         "The simulator did not boot",
-        "Run `xcrun simctl shutdown all`, then rerun; `icm run ios-sim --fresh` uses a new simulator.";
+        "Shut down that simulator alone (`xcrun simctl shutdown <udid>`, the UDID the error names; never `shutdown all`, which stops other projects' and the owner's simulators), then rerun; `icm run ios-sim --fresh` uses a new simulator.";
+    IosSimShared = "ios.sim.shared", Device, Info, Agent,
+        "The simulator was booted for another project",
+        "`icm stop --shutdown` in the project that booted it shuts it down; to shut it down anyway, run `xcrun simctl shutdown <udid>` for that simulator alone.";
     IosSimInstallFailed = "ios.sim.install_failed", Device, Fail, Agent,
         "simctl install failed",
         "Read the step log; rerun with `--fresh` if the simulator is in a bad state.";
