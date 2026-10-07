@@ -9,8 +9,8 @@ use iced_test::agent;
 use iced_test::core::window;
 use iced_test::core::{Element, Font, Settings, Theme};
 use iced_test::program::Program;
-use iced_test::runtime::Task;
-use iced_widget::{button, column, container, text, text_input};
+use iced_test::runtime::{Task, clipboard};
+use iced_widget::{button, column, container, row, text, text_input};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,12 +22,16 @@ struct Counter;
 struct State {
     count: i64,
     name: String,
+    pasted: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     Increment,
     NameChanged(String),
+    Copy,
+    Paste,
+    Pasted(Option<String>),
 }
 
 impl Program for Counter {
@@ -60,6 +64,9 @@ impl Program for Counter {
         match message {
             Message::Increment => state.count += 1,
             Message::NameChanged(name) => state.name = name,
+            Message::Copy => return clipboard::write(state.name.clone()),
+            Message::Paste => return clipboard::read().map(Message::Pasted),
+            Message::Pasted(text) => state.pasted = text,
         }
 
         Task::none()
@@ -77,7 +84,18 @@ impl Program for Counter {
                 text_input("Your name", &state.name)
                     .id("name")
                     .on_input(Message::NameChanged),
+                row![
+                    button("Copy").on_press(Message::Copy),
+                    button("Paste").on_press(Message::Paste),
+                ]
+                .spacing(8),
             ]
+            .push(
+                state
+                    .pasted
+                    .as_ref()
+                    .map(|pasted| text(format!("Pasted: {pasted}"))),
+            )
             .spacing(16),
         )
         .padding(48)
@@ -219,7 +237,9 @@ fn commands_write_what_they_report(scratch: &Path) {
     assert!(
         report.contains(r#""reason":"no widget shows the text \"Count: 2\"""#)
     );
-    assert!(report.contains(r#""texts":["Count: 1","Increment","Your name"]"#));
+    assert!(report.contains(
+        r#""texts":["Count: 1","Increment","Your name","Copy","Paste"]"#
+    ));
     assert!(report.contains(
         r#"{"line":6,"instruction":"click \"Increment\"","status":"skipped","#
     ));

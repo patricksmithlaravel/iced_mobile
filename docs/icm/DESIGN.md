@@ -1570,6 +1570,7 @@ As built (`test/src/agent.rs`, whose module docs are the reference):
 - Exit codes: 0 everything passed, 1 a flow failed, 2 usage error or a file that cannot be read or written.
 - With no command, libtest's `--list`, `--ignored`, `--skip` and name filters apply to the flow names `flows::<stem>`, so nextest can list them.
 - It draws with tiny-skia unless `ICED_TEST_BACKEND` names another backend (`Emulator::with_backend`, `iced_test::run_with_backend` and `screenshot_with_backend`, Appendix C 7), and `Font::DEFAULT` is Fira Sans.
+- `iced::clipboard::read` and `write` tasks use the `Emulator`'s clipboard, the one its text fields copy to and paste from, so a flow can copy and paste (in `mode: Zen`, which waits for the read's message). It starts empty for each flow.
 
 icm runs it as `ICED_TEST_BACKEND=tiny-skia cargo test -p <pkg> --test icm -- <subcommand> …`. That powers `icm shot --headless`, `icm ui --headless tree|find|ice` and `icm test --host`. It needs no device, no OS permission and no GPU, and it runs in CI.
 

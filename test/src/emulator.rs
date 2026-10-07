@@ -254,10 +254,22 @@ impl<P: Program + 'static> Emulator<P> {
 
                     self.cache = Some(user_interface.into_cache());
                 }
-                runtime::Action::Clipboard(action) => {
-                    // TODO
-                    dbg!(action);
-                }
+                // The clipboard the text fields copy to and paste from.
+                runtime::Action::Clipboard(action) => match action {
+                    runtime::clipboard::Action::Read { target, channel } => {
+                        let _ = channel.send(core::Clipboard::read(
+                            &self.clipboard,
+                            target,
+                        ));
+                    }
+                    runtime::clipboard::Action::Write { target, contents } => {
+                        core::Clipboard::write(
+                            &mut self.clipboard,
+                            target,
+                            contents,
+                        );
+                    }
+                },
                 runtime::Action::Window(action) => {
                     use crate::runtime::window;
 
@@ -296,11 +308,10 @@ impl<P: Program + 'static> Emulator<P> {
                                 let _ = sender.send(1.0);
                             }
                         }
-                        window::Action::GetMode(id, sender) => {
-                            if id == self.window {
-                                let _ =
-                                    sender.send(core::window::Mode::Windowed);
-                            }
+                        window::Action::GetMode(id, sender)
+                            if id == self.window =>
+                        {
+                            let _ = sender.send(core::window::Mode::Windowed);
                         }
                         _ => {
                             // Ignored
