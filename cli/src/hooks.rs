@@ -29,7 +29,7 @@
 //! Hook failures are non-blocking FAILs: the command finishes and exits 1.
 
 use crate::catalogue::CheckId;
-use crate::context::Ctx;
+use crate::context::{Ctx, Project};
 use crate::error::{Check, Evidence, IcmError, Result, Status};
 use crate::process::Cmd;
 use serde_json::{Value, json};
@@ -107,7 +107,24 @@ impl HookReport {
 /// non-blocking FAILs; the error returned is only for an interrupt or the
 /// overall `--timeout`.
 pub fn run(ctx: &mut Ctx, context: &HookContext) -> Result<Vec<HookReport>> {
-    let project = ctx.project()?;
+    let project = ctx.project()?.clone();
+    run_for(ctx, &project, context)
+}
+
+/// Whether the project has `[checks]` scripts for a platform (so a
+/// platform can skip gathering what only hooks need).
+pub fn configured(project: &Project, platform: &str) -> bool {
+    project
+        .config
+        .config
+        .checks
+        .get(platform)
+        .is_some_and(|scripts| !scripts.is_empty())
+}
+
+/// [`run`] for a known project, from a shared context (the platforms'
+/// `run` call it after a successful launch).
+pub fn run_for(ctx: &Ctx, project: &Project, context: &HookContext) -> Result<Vec<HookReport>> {
     let scripts = project
         .config
         .config

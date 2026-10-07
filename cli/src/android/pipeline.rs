@@ -311,6 +311,28 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     }
     result?;
 
+    // The project's `[checks] android` scripts (design §13.6), with the
+    // JDK and SDK environment (Appendix C item 2).
+    crate::hooks::run_for(
+        ctx,
+        &project,
+        &crate::hooks::HookContext {
+            platform: "android".to_string(),
+            pid: session.pid,
+            device: Some(adb.serial.clone()),
+            adb: Some(format!(
+                "{} -s {}",
+                crate::process::shell_quote(&tools.sdk.adb(&ctx.env).display().to_string()),
+                adb.serial
+            )),
+            bin: Some(apk_path.clone()),
+            logs: Some(dir.join("logs.ndjson")),
+            log_mark: Some(mark.clone()),
+            env: tools.child_env().to_vec(),
+            ..crate::hooks::HookContext::default()
+        },
+    )?;
+
     ctx.rep.next(
         "icm logs android --level warn",
         "read the app's warnings and errors",

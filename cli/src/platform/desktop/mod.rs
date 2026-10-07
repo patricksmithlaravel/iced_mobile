@@ -1691,8 +1691,27 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     signals::unregister_group(launched.pid);
 
     match outcome {
-        Ok(_) if args.attach => attach(ctx, &project, &session, &launched),
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // The project's `[checks] desktop` scripts (design §13.6).
+            crate::hooks::run_for(
+                ctx,
+                &project,
+                &crate::hooks::HookContext {
+                    platform: PLATFORM.to_string(),
+                    pid: u32::try_from(launched.pid).ok(),
+                    bin: Some(exe.clone()),
+                    app_stderr: Some(launched.stderr.clone()),
+                    logs: Some(session.run_dir.join("logs.ndjson")),
+                    log_mark: Some(launched.launched.clone()),
+                    ..crate::hooks::HookContext::default()
+                },
+            )?;
+            if args.attach {
+                attach(ctx, &project, &session, &launched)
+            } else {
+                Ok(())
+            }
+        }
         Err((error, ready)) => {
             // A failed run leaves nothing running.
             let exit = match watch.ended {

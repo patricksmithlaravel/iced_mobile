@@ -386,3 +386,53 @@ fn dry_runs_print_the_plan() {
             .exists()
     );
 }
+
+#[test]
+fn run_runs_the_projects_desktop_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    let mut apps = Apps(Vec::new());
+    let toml = sandbox.project.path().join("icm.toml");
+    let mut text = std::fs::read_to_string(&toml).unwrap();
+    text.push_str("\n[checks]\ndesktop = [\"checks.sh\"]\n");
+    std::fs::write(&toml, text).unwrap();
+    let script = sandbox.project.path().join("checks.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nif kill -0 \"$ICM_PID\"; then echo \"CHECK PASS app_alive: pid $ICM_PID on $ICM_PLATFORM\"; else echo 'CHECK FAIL app_alive: gone'; fi\n[ -f \"$ICM_APP_STDERR\" ] || echo 'CHECK FAIL stderr: no ICM_APP_STDERR'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let run = sandbox.result(&["run", "desktop", "--settle", "100ms", "--no-shot"]);
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(pid);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(run["hooks"][0]["script"], "checks.sh", "{run}");
+    assert_eq!(run["hooks"][0]["ok"], true, "{run}");
+    assert_eq!(
+        run["hooks"][0]["checks"][0]["id"], "hook.app_alive",
+        "{run}"
+    );
+
+    // A failing hook is a non-blocking FAIL: the app keeps running, exit 1.
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho 'CHECK FAIL smoke: the login screen is missing'\n",
+    )
+    .unwrap();
+    let failed = sandbox.result(&["run", "desktop", "--settle", "100ms", "--no-shot"]);
+    let second = failed["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(second);
+    assert_eq!(failed["exit"], 1, "{failed}");
+    assert!(
+        failed["checks"]["failed"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from("hook.smoke")),
+        "{failed}"
+    );
+    assert!(alive(second));
+    assert_eq!(sandbox.result(&["stop", "desktop"])["exit"], 0);
+    wait_dead(second);
+}

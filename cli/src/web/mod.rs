@@ -952,6 +952,20 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         show(ctx, session);
     }
 
+    // The project's `[checks] web` scripts (design §13.6); the page's URL
+    // is `ICM_URL`.
+    crate::hooks::run_for(
+        ctx,
+        &project,
+        &crate::hooks::HookContext {
+            platform: PLATFORM.to_string(),
+            pid: u32::try_from(session.pid()).ok(),
+            logs: session.console(),
+            env: vec![("ICM_URL".to_string(), url.clone())],
+            ..crate::hooks::HookContext::default()
+        },
+    )?;
+
     let errors = status["errors"].as_u64().unwrap_or(0);
     ctx.rep.summary(format!(
         "the web app is ready at {} (session pid {}){}",

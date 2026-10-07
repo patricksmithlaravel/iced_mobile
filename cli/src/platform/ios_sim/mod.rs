@@ -1584,6 +1584,39 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         format!("pid {pid} is running"),
     ));
 
+    // The project's `[checks] ios-sim` scripts (design §13.6).
+    if crate::hooks::configured(&project, PLATFORM) {
+        let sim_data = ctx
+            .probe(
+                &simctl(&xcode)
+                    .args([
+                        "get_app_container",
+                        &session.device.udid,
+                        &session.app_id,
+                        "data",
+                    ])
+                    .timeout(Duration::from_secs(30)),
+            )
+            .ok()
+            .filter(|outcome| outcome.success())
+            .map(|outcome| PathBuf::from(outcome.stdout_text().trim()));
+        crate::hooks::run_for(
+            ctx,
+            &project,
+            &crate::hooks::HookContext {
+                platform: PLATFORM.to_string(),
+                pid: u32::try_from(pid).ok(),
+                device: Some(session.device.udid.clone()),
+                bin: Some(session.bundle.clone()),
+                app_stderr: Some(session.logs.stderr.clone()),
+                logs: Some(run_dir.join("logs.ndjson")),
+                log_mark: Some(session.launch_unix_ms.to_string()),
+                sim_data,
+                ..crate::hooks::HookContext::default()
+            },
+        )?;
+    }
+
     ctx.rep.summary(format!(
         "{} ({}) is running on {} (iOS {}); first frame after {} (source: {source})",
         config.app.name,
