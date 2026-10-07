@@ -1688,7 +1688,7 @@ Hooks run with stdin closed and a 300 s timeout. Output lines of the form `CHECK
 | F3 | `ICM_EVENT` protocol v1 (§13.3); Android reads sysprops `debug.icm.events` and `debug.iced.backend` | to do | 0 |
 | F4 | `iced_test::agent::main` harness (§13.2) | to do (~200 lines on the public iced_test API) | 0 |
 | F5 | `iced_test` touch helpers (`Simulator::tap` as touch, `.ice tap`); template adds `tests/touch.rs` | to do | 6 |
-| F6 | `iced::mobile::safe_area` (fixed fallback insets first, then real ones); new types in `iced::mobile`, not new enum variants (review §6.8) | **done**: `iced::mobile::safe_area() -> Subscription<SafeArea>` (insets and keyboard on Android and iOS, zero elsewhere; headless, a device preset's insets at its viewport size, §13.2) and the `safe_area` event. The template keeps its fixed padding | 6 |
+| F6 | `iced::mobile::safe_area` (fixed fallback insets first, then real ones); new types in `iced::mobile`, not new enum variants (review §6.8) | **done**: `iced::mobile::safe_area() -> Subscription<SafeArea>` (insets and keyboard on Android and iOS, zero elsewhere; headless, a device preset's insets at its viewport size, §13.2) and the `safe_area` event. The template pads its root with `SafeArea::padding(16)` from `iced::mobile::safe_area()`, and keeps its fixed padding (64 top, 48 bottom on phones) only as the fallback until the safe area arrives | 6 |
 | F7 | `agent` feature: bridge client, synthetic-event queue, tree operation, marker string. Phase 0 adds an **empty** `agent = []` feature to iced so the template's `icm-agent` feature resolves from the first tag | to do | 0 (stub), 6 |
 | F8 | Loud failure messages (RecreationAttempt text, iOS exit warning); partly done in `c6b2ebe16` | ongoing | — |
 
