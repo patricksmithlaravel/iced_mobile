@@ -111,15 +111,19 @@ pub fn render(event: &Value, quiet: bool, verbose: bool) -> Vec<(Stream, String)
             }
         }
         "log" if !quiet => {
+            // A multi-line message (a panic and its backtrace) continues on
+            // indented lines.
+            let mut lines = str_field(event, "msg").lines();
             out.push((
                 Stream::Stdout,
                 format!(
                     "LOG {} {}: {}",
                     str_field(event, "level"),
                     str_field(event, "source"),
-                    str_field(event, "msg")
+                    lines.next().unwrap_or("")
                 ),
             ));
+            out.extend(lines.map(|line| (Stream::Stdout, format!("  {line}"))));
         }
         "result" => {
             if !quiet && let Some(next) = event.get("next").and_then(Value::as_array) {

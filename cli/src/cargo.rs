@@ -473,6 +473,9 @@ pub struct Invocation {
     pub target_dir: Option<PathBuf>,
     /// Arguments after `--`.
     pub trailing: Vec<String>,
+    /// `--config <KEY=VALUE>` settings, e.g. icm's profiles
+    /// ([`profile_config`]).
+    pub config: Vec<String>,
 }
 
 impl Invocation {
@@ -490,18 +493,22 @@ impl Invocation {
             locked: false,
             target_dir: None,
             trailing: Vec::new(),
+            config: Vec::new(),
         }
     }
 
     /// The argv after `cargo`.
     pub fn args(&self) -> Vec<String> {
-        let mut args = vec![
-            self.subcommand.clone(),
+        let mut args = vec![self.subcommand.clone()];
+        for setting in &self.config {
+            args.extend(["--config".to_string(), setting.clone()]);
+        }
+        args.extend([
             "--manifest-path".to_string(),
             self.manifest.display().to_string(),
             "-p".to_string(),
             self.package.clone(),
-        ];
+        ]);
         match &self.select {
             Select::Bin(name) => args.extend(["--bin".to_string(), name.clone()]),
             Select::Lib => args.push("--lib".to_string()),
@@ -544,6 +551,18 @@ impl Invocation {
             .unwrap_or(Path::new("."))
             .to_path_buf();
         Cmd::tool("cargo").args(self.args()).cwd(dir)
+    }
+}
+
+/// icm's settings for a profile, passed with `--config` because Cargo
+/// ignores `[profile.*]` in a workspace member (Appendix C item 4):
+/// dependencies at `opt-level = 2` in dev builds, so debug builds stay
+/// usable, and thin LTO in release builds.
+pub fn profile_config(profile: &str) -> Vec<String> {
+    match profile {
+        "dev" | "debug" | "test" => vec![r#"profile.dev.package."*".opt-level=2"#.to_string()],
+        "release" => vec![r#"profile.release.lto="thin""#.to_string()],
+        _ => Vec::new(),
     }
 }
 
@@ -897,6 +916,18 @@ checksum = "abc"
             build.args().join(" "),
             "rustc --manifest-path /p/Cargo.toml -p app --lib --target aarch64-linux-android --release \
              --message-format=json -- --crate-type cdylib"
+        );
+
+        let mut desktop = Invocation::new("build", Path::new("/p/Cargo.toml"), "app");
+        desktop.config = profile_config("dev");
+        assert_eq!(
+            desktop.args().join(" "),
+            "build --config profile.dev.package.\"*\".opt-level=2 --manifest-path /p/Cargo.toml \
+             -p app --message-format=json"
+        );
+        assert_eq!(
+            profile_config("release"),
+            vec!["profile.release.lto=\"thin\"".to_string()]
         );
 
         let mut web = Invocation::new("build", Path::new("/p/Cargo.toml"), "app");

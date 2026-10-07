@@ -48,6 +48,8 @@ cargo test
 | `doctor/` | what each platform needs (`gather`) and the fixes `doctor --fix [--yes]` runs (`fix.rs`) |
 | `managed.rs`, `simctl.rs` | the `icm-` simulator and AVD names, Android's per-user dirs; `simctl list -j` parsing |
 | `session.rs` | `target/icm/sessions/<platform>.json`, which `run` writes and `stop`/`ps` read |
+| `image.rs` | PNG decode/encode, previews, cropping, blank detection |
+| `platform/desktop/` | `build`/`run`/`shot`/`logs`/`stop desktop`: launch, readiness, window capture (`macos.rs` FFI, `linux.rs` X11), headless fallback (`headless.rs`), log records (`logs.rs`) |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
 
 ## Writing a command
@@ -85,6 +87,9 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 - Unit tests live next to the code.
 - `tests/cli.rs` runs the binary. Each test sets `ICM_CACHE_DIR` and
   `ICM_HOST_CONFIG` to a temp dir and copies fixtures from `tests/fixtures/`.
+- `tests/desktop.rs` runs, logs, captures and stops `fixtures/desktop`, a
+  windowless stand-in app (`--env ICM_FIXTURE=ready|panic|exit|hang`), and
+  kills whatever it started.
 - `icm __test <scenario>` (hidden) exercises the core end to end: `sleep`
   (timeouts, signals, `--detach`), `panic`, `fail <id>`, `checks`, `plan`,
   `project`, `lock`, `deployment`, `busy` (the signal watchdog).

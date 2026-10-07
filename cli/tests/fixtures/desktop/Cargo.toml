@@ -1,0 +1,14 @@
+# A stand-in desktop app for icm's tests: no dependencies and no window.
+# `icm run desktop --env ICM_FIXTURE=<ready|panic|exit|hang>` picks what it
+# does; with ICM_EVENTS=1 it writes ICM_EVENT lines like the framework.
+[package]
+name = "fixture-desktop"
+version = "0.2.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "fixture-desktop"
+path = "src/main.rs"
+
+[workspace]

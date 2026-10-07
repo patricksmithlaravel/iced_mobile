@@ -12,9 +12,10 @@ pub mod stop;
 pub mod wait;
 
 use crate::catalogue::CheckId;
-use crate::cli::{Command, LATER_COMMANDS};
+use crate::cli::{Command, LATER_COMMANDS, Platform};
 use crate::context::Ctx;
 use crate::error::{IcmError, Result};
+use crate::platform::desktop;
 
 /// Runs a command.
 pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
@@ -27,6 +28,19 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
         Command::New(args) => new::run(ctx, &args),
         Command::Doctor(args) => doctor::run(ctx, &args),
         Command::Check(args) => check::run(ctx, &args),
+        // desktop (design §10.1)
+        Command::Build(args) if !args.all && args.platform == Some(Platform::Desktop) => {
+            desktop::build(ctx, &args)
+        }
+        Command::Run(args) if args.platform == Platform::Desktop => desktop::run(ctx, &args),
+        Command::Stop(args) if !args.all && args.platform == Some(Platform::Desktop) => {
+            desktop::stop(ctx, &args)
+        }
+        Command::Shot(args) if !args.headless && args.platform == Some(Platform::Desktop) => {
+            desktop::shot(ctx, &args)
+        }
+        Command::Logs(args) if args.platform == Platform::Desktop => desktop::logs(ctx, &args),
+        Command::Input(args) if args.platform == Platform::Desktop => desktop::input(ctx, &args),
         Command::Build(_) => not_implemented("build"),
         Command::Run(_) => not_implemented("run"),
         Command::Stop(args) => stop::stop(ctx, &args),
