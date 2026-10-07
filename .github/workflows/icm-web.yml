@@ -1,0 +1,102 @@
+# icm's web jobs (docs/icm/DESIGN.md §17 item 11, phase 4): the dev loop on
+# the web and the web release of the template, on a Linux runner with the
+# Chrome it ships. Nothing is deployed: `icm release web` builds the site,
+# runs its gates and loads it once in headless Chrome; deploying is the
+# owner's.
+name: icm web
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cli/**"
+      - "examples/app/**"
+      - "src/**"
+      - "winit/**"
+      - "graphics/**"
+      - ".github/workflows/icm-web.yml"
+  pull_request:
+    paths:
+      - "cli/**"
+      - "examples/app/**"
+      - "src/**"
+      - "winit/**"
+      - "graphics/**"
+      - ".github/workflows/icm-web.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: icm-web-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  ICM_CACHE_DIR: ${{ github.workspace }}/.icm-cache
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ubuntu 24.04 restricts unprivileged user namespaces, which Chrome's
+      # sandbox needs; the runner is a throwaway VM.
+      - name: Let Chrome's sandbox run
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Install icm from the checkout
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo install --locked --path cli --root "$RUNNER_TEMP/icm"
+          echo "$RUNNER_TEMP/icm/bin" >> "$GITHUB_PATH"
+
+      - name: Make the template app
+        run: icm new "$RUNNER_TEMP/app" --framework "path:$GITHUB_WORKSPACE" --json -q | tee "$RUNNER_TEMP/new.json"
+
+      - name: Doctor (toolchain, lock, wasm-bindgen, pinned wasm-opt)
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          icm doctor web --fix --yes --json -q > "$RUNNER_TEMP/doctor.json" || true
+          jq -e '.exit == 0' "$RUNNER_TEMP/doctor.json" || { jq . "$RUNNER_TEMP/doctor.json"; exit 1; }
+
+      - name: Run and screenshot the app
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          icm run web --port 0 --json -q > "$RUNNER_TEMP/run.json" || true
+          jq -e '.ok' "$RUNNER_TEMP/run.json" || { jq . "$RUNNER_TEMP/run.json"; exit 1; }
+          icm shot web --json -q > "$RUNNER_TEMP/shot.json"
+          icm stop web --json -q
+
+      - name: Release the site (gates and serve check)
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          icm release web --allow-dirty --json -q > "$RUNNER_TEMP/w.json" || true
+          jq -e '.ok' "$RUNNER_TEMP/w.json" || { jq . "$RUNNER_TEMP/w.json"; exit 1; }
+          SITE=$(jq -r .artifacts.site "$RUNNER_TEMP/w.json")
+          grep -q 'module_or_path: "./pkg/app_bg-' "$SITE/index.html"
+          grep -q 'application/wasm' "$SITE/_headers"
+          jq -e '[.checks.failed[]] | length == 0' "$RUNNER_TEMP/w.json"
+          jq -e '.smoke.status == "ready" and .smoke.blank == false' "$RUNNER_TEMP/w.json"
+          jq '{summary, size, smoke}' "$RUNNER_TEMP/w.json"
+
+      - name: Verify the site
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          icm verify web --json -q > "$RUNNER_TEMP/verify.json" || true
+          jq -e '.ok' "$RUNNER_TEMP/verify.json" || { jq . "$RUNNER_TEMP/verify.json"; exit 1; }
+
+      - name: Keep the outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icm-web
+          path: |
+            ${{ runner.temp }}/*.json
+            ${{ runner.temp }}/app/target/icm/latest/
+            ${{ runner.temp }}/app/target/icm/dist/latest/web/
+            ${{ runner.temp }}/app/target/icm/runs/*/smoke/
+          if-no-files-found: ignore
