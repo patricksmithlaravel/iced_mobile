@@ -2,7 +2,7 @@
 
 # icm: the iced_mobile app tool and template (final design)
 
-Since then, phases 0 and 1 (the framework prerequisites and the dev loop) have been built and released as `v0.14.1-mobile.1`. Phases 2 to 5 (releases) are still plans.
+Since then, phases 0 and 1 (the framework prerequisites and the dev loop) have been built and released as `v0.14.1-mobile.1`, and phases 2 to 5 (releases) as `v0.14.1-mobile.2`. README.md's Roadmap lists what is still to come.
 
 **Evidence tags.** **[V]** means verified on this Mac, by the research brief, by a judge or during this synthesis. **[S]** means it comes from a source cited in the research brief. **[I]** means inference that has not been tested yet. Every [I] has a spike or CI check in §18.
 

@@ -130,9 +130,17 @@ headless_shot() {
     evidence "$ACCEPT/h.png: $(png_size "$ACCEPT/h.png" | tr ' ' x), $(wc -c <"$ACCEPT/h.png" | tr -d ' ') bytes"
 }
 
+# The release tag is "v" plus icm's version (.github/ci/tag.sh): the first
+# `version = "…"` line of cli/Cargo.toml is [package]'s.
+release_tag() {
+    printf 'v%s\n' "$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' cli/Cargo.toml | head -n1)"
+}
+
 owner_tag() {
-    git ls-remote --tags origin 'v0.14.1-mobile.1' | grep -q mobile.1
-    evidence "origin has v0.14.1-mobile.1"
+    local tag
+    tag=$(release_tag)
+    git ls-remote --tags origin "refs/tags/$tag" | grep -q "refs/tags/$tag$"
+    evidence "origin has $tag"
 }
 
 # In a function, so bash has read all of it before the first step: an edit
@@ -153,7 +161,7 @@ main() {
     if [ "${ICM_ACCEPT_OWNER_PUSHED:-}" = 1 ]; then
         step owner-tag owner_tag
     else
-        skip owner-tag "owner step: set ICM_ACCEPT_OWNER_PUSHED=1 once v0.14.1-mobile.1 is pushed"
+        skip owner-tag "owner step: set ICM_ACCEPT_OWNER_PUSHED=1 once $(release_tag) is pushed"
     fi
     finish
 }

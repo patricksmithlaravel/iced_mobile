@@ -209,6 +209,9 @@ fn tool_log(sandbox: &Sandbox) -> String {
 #[test]
 fn new_creates_an_app_pinned_to_the_framework() {
     let sandbox = Sandbox::new();
+    // This release's tag, as a user of it would pin it.
+    let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let framework = format!("tag:{tag}");
 
     let created = sandbox.json(&[
         "new",
@@ -216,11 +219,11 @@ fn new_creates_an_app_pinned_to_the_framework() {
         "--id",
         "com.acme.notes",
         "--framework",
-        "tag:v0.14.1-mobile.1",
+        &framework,
     ]);
     assert_eq!(created["exit"], 0, "{created}");
     assert_eq!(created["project"]["package"], "notes");
-    assert_eq!(created["project"]["framework"], "tag:v0.14.1-mobile.1");
+    assert_eq!(created["project"]["framework"], framework.as_str());
     assert_eq!(created["app"]["id"], "com.acme.notes");
     assert_eq!(created["app"]["name"], "Notes");
     assert!(created["warnings"].as_array().unwrap().is_empty());
@@ -254,7 +257,9 @@ fn new_creates_an_app_pinned_to_the_framework() {
     assert_eq!(iced_lines.len(), 3, "{cargo}");
     for line in iced_lines {
         assert!(
-            line.contains("git = \"https://github.com/patricksmithlaravel/iced_mobile\", tag = \"v0.14.1-mobile.1\""),
+            line.contains(&format!(
+                "git = \"https://github.com/patricksmithlaravel/iced_mobile\", tag = \"{tag}\""
+            )),
             "{line}"
         );
     }
@@ -274,9 +279,10 @@ fn new_creates_an_app_pinned_to_the_framework() {
     assert!(icm.contains("package = \"notes\""), "{icm}");
     let agents = std::fs::read_to_string(app.join("AGENTS.md")).unwrap();
     assert!(
-        agents.starts_with(
-            "# AGENTS.md — Notes (com.acme.notes) · iced_mobile v0.14.1-mobile.1 · icm "
-        ),
+        agents.starts_with(&format!(
+            "# AGENTS.md — Notes (com.acme.notes) · iced_mobile {tag} · icm {}",
+            env!("CARGO_PKG_VERSION")
+        )),
         "{agents}"
     );
     assert!(!agents.contains("{{"));

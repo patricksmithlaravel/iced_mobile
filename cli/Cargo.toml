@@ -2,7 +2,7 @@
 name = "icm"
 # One tag, v0.14.1-mobile.N, releases the framework and icm together; this
 # version must equal that tag without its leading "v".
-version = "0.14.1-mobile.1"
+version = "0.14.1-mobile.2"
 description = "The iced_mobile app tool: check, build, run, see and test iced apps on desktop, web, iOS and Android"
 edition = "2024"
 rust-version = "1.89"

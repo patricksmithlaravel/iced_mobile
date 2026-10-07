@@ -1,8 +1,9 @@
 //! Checks of the fork's CI in `.github/` (design §17 and Appendix D "CI"):
-//! the release tag rule `.github/ci/tag.sh` enforces, the workflows running
-//! the checks AGENTS.md lists, the scripts they name, and nothing in them
-//! that formats path dependencies, reads a secret or uploads, publishes or
-//! notarizes. They read the fork's files around `cli/` and run no workflow.
+//! the release tag rule `.github/ci/tag.sh` enforces and the docs that name
+//! the release, the workflows running the checks AGENTS.md lists, the
+//! scripts they name, and nothing in them that formats path dependencies,
+//! reads a secret or uploads, publishes or notarizes. They read the fork's
+//! files around `cli/` and run no workflow.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -82,6 +83,72 @@ fn a_release_tag_is_v_and_the_cli_version() {
         tag_sh(&[]).status.code(),
         Some(2),
         "no tag is a usage error"
+    );
+}
+
+/// A release commit (AGENTS.md "Rules") names one release everywhere a
+/// new user starts: README.md's install command, framework pins and status
+/// line, AGENTS.md and the newest section of CHANGES-mobile.md all name
+/// `v` plus icm's version. The template asks for no icm newer than this
+/// one, or `icm new` would create apps it refuses, and phase0.sh's tag
+/// step reads the version instead of naming a tag.
+#[test]
+fn the_docs_name_this_release() {
+    let tag = format!("v{VERSION}");
+
+    let readme = read("README.md");
+    let pins: Vec<&str> = readme
+        .lines()
+        .filter(|line| line.contains("--tag v") || line.contains("tag = \"v"))
+        .collect();
+    assert!(
+        pins.len() >= 3,
+        "README.md has no install command or framework pins: {pins:?}"
+    );
+    for line in pins {
+        assert!(
+            line.contains(&format!("--tag {tag} ")) || line.contains(&format!("tag = \"{tag}\"")),
+            "README.md pins another release than {tag}: {line}"
+        );
+    }
+    let current = format!("The current release is `{tag}`");
+    assert!(readme.contains(&current), "README.md: {current:?}");
+    assert!(
+        read("AGENTS.md").contains(&current),
+        "AGENTS.md: {current:?}"
+    );
+
+    let changes = read("CHANGES-mobile.md");
+    let newest = changes
+        .lines()
+        .find(|line| line.starts_with("## "))
+        .expect("CHANGES-mobile.md has a section per release");
+    assert_eq!(newest, format!("## Changes in {tag}"));
+    assert!(
+        changes.contains(&format!("--tag {tag} icm")),
+        "CHANGES-mobile.md's install command"
+    );
+
+    let template = read("examples/app/icm.toml");
+    let min_icm = template
+        .lines()
+        .find_map(|line| line.strip_prefix("min_icm = \""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("the template's icm.toml has min_icm");
+    let min_icm = semver::Version::parse(min_icm).expect("min_icm is a version");
+    let version = semver::Version::parse(VERSION).unwrap();
+    assert!(
+        min_icm <= version,
+        "the template asks for icm {min_icm}, newer than this icm {version}"
+    );
+
+    let phase0 = read("cli/tests/accept/phase0.sh");
+    let literal = phase0
+        .match_indices("-mobile.")
+        .find(|(at, _)| phase0[at + "-mobile.".len()..].starts_with(|c: char| c.is_ascii_digit()));
+    assert!(
+        literal.is_none(),
+        "phase0.sh names a release tag; derive it from cli/Cargo.toml"
     );
 }
 

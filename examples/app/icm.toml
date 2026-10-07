@@ -3,7 +3,7 @@
 # every build; never write those files by hand. `icm explain config.<key>`
 # describes a key. The marketing version is Cargo.toml's `version`.
 schema = 1                             # format of this file; icm refuses formats it does not know
-min_icm = "0.14.1-mobile.1"            # oldest icm that can build this app; older ones exit 4 (config.too_new)
+min_icm = "0.14.1-mobile.2"            # oldest icm that can build this app; older ones exit 4 (config.too_new)
 
 [app]
 name = "App"                           # CFBundleDisplayName/Name, android:label, <title>, desktop product name

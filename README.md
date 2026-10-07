@@ -16,11 +16,12 @@ template, then checks, builds, runs, screenshots, logs and tests it on the deskt
 Simulator and Android. `icm release` builds and checks what the App Store, Google Play, a web host
 and desktop installers take; the owner signs, uploads and publishes it.
 
-**Status: experimental.** The first release is `v0.14.1-mobile.1`. This is an independent fork of
-[iced-rs/iced](https://github.com/iced-rs/iced), not endorsed by the iced project. Upstream has
-declined mobile support ([iced-rs/iced#302](https://github.com/iced-rs/iced/issues/302)), so the
-mobile work lives here. Report problems with this fork here (see [Contributing](#contributing)),
-not upstream.
+**Status: experimental.** The current release is `v0.14.1-mobile.2`, and
+[CHANGES-mobile.md](CHANGES-mobile.md) lists what changed since `v0.14.1-mobile.1`. This is an
+independent fork of [iced-rs/iced](https://github.com/iced-rs/iced), not endorsed by the iced
+project. Upstream has declined mobile support
+([iced-rs/iced#302](https://github.com/iced-rs/iced/issues/302)), so the mobile work lives here.
+Report problems with this fork here (see [Contributing](#contributing)), not upstream.
 
 ## Platforms
 
@@ -39,7 +40,7 @@ The full list, with workarounds, is in [docs/agents/limitations.md](docs/agents/
 
 ```sh
 # needs Rust 1.89 or newer
-cargo install --locked --git https://github.com/patricksmithlaravel/iced_mobile --tag v0.14.1-mobile.1 icm
+cargo install --locked --git https://github.com/patricksmithlaravel/iced_mobile --tag v0.14.1-mobile.2 icm
 
 icm new hello && cd hello       # the template app, pinned to this release
 icm doctor --fix --yes          # check the machine and install what is missing (downloads)
@@ -110,10 +111,10 @@ Different spellings of the source make Cargo build two copies of iced:
 
 ```toml
 [dependencies]
-iced = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.1" }
+iced = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.2" }
 
 [dev-dependencies]
-iced_test = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.1" }
+iced_test = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.2" }
 ```
 
 `src/lib.rs` runs the app, and defines Android's entry point:
@@ -197,6 +198,7 @@ crates keep upstream's version numbers.
 | [`examples/app/`](examples/app/) | the template that `icm new` copies |
 | [`examples/`](examples/) | upstream's examples |
 | [`docs/agents/limitations.md`](docs/agents/limitations.md) | known limitations of the current release |
+| [`CHANGES-mobile.md`](CHANGES-mobile.md) | what changed in each release of the fork |
 | [`docs/icm/DESIGN.md`](docs/icm/DESIGN.md) | icm's design and phased plan, written before implementation (where it and the code differ, the code wins) |
 | [`docs/mobile/review-2026-10-06.md`](docs/mobile/review-2026-10-06.md) | a dated review of the mobile work (a snapshot; much of it is fixed since) |
 | [`graphics/fonts/`](graphics/fonts/) | Fira Sans and its licence, iced's icon font |
@@ -256,7 +258,7 @@ and the commit style.
 [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md) are
 upstream's files for iced itself: the changelog stops at upstream's 0.14.0, and the roadmap is
 upstream's. This README's [Platforms](#platforms) and [Roadmap](#roadmap) sections describe the
-fork. `v0.14.1-mobile.1` has no separate release notes.
+fork, and [CHANGES-mobile.md](CHANGES-mobile.md) has its release notes.
 
 ## Upstream iced
 

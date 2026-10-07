@@ -15,6 +15,7 @@ every app instead. Its source is [examples/app/AGENTS.md](examples/app/AGENTS.md
 - `main` is the only development branch. `tawara/0.14-mobile` is kept as it is for the Tawara
   wallet's pin. Do not commit to it.
 - Releases are tags `v0.14.x-mobile.N`, and one tag releases the framework and `icm` together.
+  The current release is `v0.14.1-mobile.2`. `CHANGES-mobile.md` says what changed in each one.
 
 ## Layout
 
@@ -31,6 +32,7 @@ every app instead. Its source is [examples/app/AGENTS.md](examples/app/AGENTS.md
 | `docs/agents/limitations.md` | known limitations; generated app `AGENTS.md` files embed everything below its marker line |
 | `docs/icm/DESIGN.md` | icm's design. Appendix C overrides earlier sections, and Appendix D records what the code decided. Where code and design disagree, the code and its tests win. |
 | `docs/mobile/review-2026-10-06.md` | a dated snapshot review; many items are fixed since, so check the code |
+| `CHANGES-mobile.md` | the fork's release notes, one section per release |
 
 ## Checks
 
@@ -189,6 +191,16 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
   and, for device work, what was seen). Add no co-author, "generated with" or other tool
   attribution lines, in commits or anywhere else.
 - **Pushing and tagging are the owner's actions.** Never move a tag.
+- **A release is one commit, `icm: release <version>`, and the owner tags it.** It changes:
+  - the version in `cli/Cargo.toml` and icm's entry in `cli/Cargo.lock`;
+  - the tag in README.md (the status line, the install command and the framework pins) and the
+    current release this file names under "What this repository is";
+  - a new `## Changes in v<version>` section at the top of `CHANGES-mobile.md`;
+  - the template's `min_icm` (`examples/app/icm.toml`) when an older icm cannot read the template,
+    for example after a new `icm.toml` key.
+
+  `cli/tests/ci.rs` fails when one of these disagrees with `cli/Cargo.toml`. The CI tag check, the
+  install check, `icm new`'s pin and phase0.sh's tag step take the version from `cli/Cargo.toml`.
 
 ## Devices
 
