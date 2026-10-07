@@ -222,13 +222,13 @@ output_contract() {
     fi
     grep -q '^STEP ' "$ACCEPT/contract-human.txt"
     grep -q '^CHECK PASS ' "$ACCEPT/contract-human.txt"
-    tail -n1 "$ACCEPT/contract-human.txt" | grep -q '^RESULT ok '
+    tail -n1 "$ACCEPT/contract-human.txt" | matches '^RESULT ok '
     icm check desktop -q >"$ACCEPT/contract-quiet.txt" 2>/dev/null
     if grep -vE '^CHECK (FAIL|WARN) |^RESULT |^  ' "$ACCEPT/contract-quiet.txt"; then
         echo "-q printed lines other than CHECK FAIL/WARN and RESULT (above)"
         return 1
     fi
-    tail -n1 "$ACCEPT/contract-quiet.txt" | grep -q '^RESULT ok '
+    tail -n1 "$ACCEPT/contract-quiet.txt" | matches '^RESULT ok '
 
     icm check desktop --json >"$ACCEPT/contract.ndjson"
     /usr/bin/jq -e -s 'all(.[]; .v == 1 and (.type | type) == "string" and (.run | type) == "string" and (.t | type) == "number")' "$ACCEPT/contract.ndjson" >/dev/null
@@ -247,7 +247,7 @@ output_contract() {
     test "$(tail -n1 "$dir/events.ndjson" | /usr/bin/jq -S -c 'del(.t)')" = "$want"
     test "$(/usr/bin/jq -S -c 'del(.t)' "$dir/result.json")" = "$want"
     test "$(/usr/bin/jq -S -c 'del(.t)' target/icm/last.json)" = "$want"
-    ls "$dir/steps/" | grep -q '\.log$'
+    ls "$dir/steps/" | matches '\.log$'
     evidence "human: $(wc -l <"$ACCEPT/contract-human.txt" | tr -d ' ') protocol lines, last: $(tail -n1 "$ACCEPT/contract-human.txt" | cut -c1-120)"
     evidence "-q: $(wc -l <"$ACCEPT/contract-quiet.txt" | tr -d ' ') lines; --json: $(wc -l <"$ACCEPT/contract.ndjson" | tr -d ' ') v1 events, start first, result last"
     evidence "$dir: events.ndjson ends with result.json; target/icm/last.json is the same; steps: $(ls "$dir/steps" | tr '\n' ' ')"
@@ -482,7 +482,7 @@ EOF
     cat >accept-hooks/android.sh <<'EOF'
 # acceptance: Android children get JDK 17+ through JAVA_HOME and PATH
 java_bin=$(command -v java)
-version=$(java -version 2>&1 | head -n1)
+version=$(java -version 2>&1 | sed -n 1p)
 major=$(printf '%s\n' "$version" | sed -E 's/.*version "([0-9]+).*/\1/')
 if [ "$java_bin" = "$JAVA_HOME/bin/java" ] && [ "$major" -ge 17 ] 2>/dev/null; then
     echo "CHECK PASS accept_java: $version from JAVA_HOME=$JAVA_HOME"
@@ -577,7 +577,7 @@ nothing_left() {
     adb=$(sdk_adb) || left=1
     if [ -x "$adb" ]; then
         for serial in $("$adb" devices | awk '/^emulator-/ {print $1}'); do
-            name=$("$adb" -s "$serial" emu avd name 2>/dev/null | head -n1 | tr -d '\r')
+            name=$("$adb" -s "$serial" emu avd name 2>/dev/null | sed -n 1p | tr -d '\r')
             case "$name" in
             icm-test-*) ;;
             icm-*)

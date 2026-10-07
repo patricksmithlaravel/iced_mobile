@@ -91,6 +91,18 @@ jqe() {
     fi
 }
 
+# matches GREP_ARGS...: `grep -q GREP_ARGS...` at the end of a pipe. A step
+# runs with pipefail, and in `PRODUCER | grep -q` grep leaves at the first
+# match: a producer still writing then dies of SIGPIPE, and the step fails
+# (exit 141) although the line was there. matches reads its input to the
+# end. Use `sed -n 1p` for `head -n1`, for the same reason.
+matches() {
+    local rc=0
+    grep -q "$@" || rc=$?
+    cat >/dev/null
+    return "$rc"
+}
+
 # icmd ARGS...: `icm ARGS... --detach --json -q`, then `icm wait` (at most
 # nine minutes per call, under an agent's command timeout) until the run
 # ends. Prints the run's result line and returns its exit code.
@@ -164,7 +176,7 @@ no_foreign_android() {
     for serial in $(awk 'NR > 1 && $2 == "device" {print $1}' <<<"$devices"); do
         name=
         case "$serial" in
-        emulator-*) name=$("$adb" -s "$serial" emu avd name 2>/dev/null | head -n1 | tr -d '\r') ;;
+        emulator-*) name=$("$adb" -s "$serial" emu avd name 2>/dev/null | sed -n 1p | tr -d '\r') ;;
         esac
         case "$name" in
         icm-test-*) ;;

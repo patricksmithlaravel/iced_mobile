@@ -161,7 +161,7 @@ ipa_layout() {
     if zipinfo -1 "$ipa" | grep -E '(^|/)\._|__MACOSX'; then
         return 1
     fi
-    zipinfo -1 "$ipa" | grep -q '^Payload/[^/]*\.app/THIRD_PARTY_NOTICES\.txt$'
+    zipinfo -1 "$ipa" | matches '^Payload/[^/]*\.app/THIRD_PARTY_NOTICES\.txt$'
     evidence "$(zipinfo -1 "$ipa" | wc -l | tr -d ' ') entries, all under Payload/"
 }
 
@@ -179,9 +179,9 @@ ipa_contents() {
     rm -rf "$ACCEPT/ipa"
     unzip -q -o "$ipa" -d "$ACCEPT/ipa"
     build=$(xcodebuild -version | awk '/Build version/{print $3}')
-    plutil -extract DTXcodeBuild raw "$ACCEPT/ipa/Payload/"*.app/Info.plist | grep -qx "$build"
-    plutil -extract UIDeviceFamily.0 raw "$ACCEPT/ipa/Payload/"*.app/Info.plist | grep -qx 1
-    xcrun assetutil --info "$ACCEPT/ipa/Payload/"*.app/Assets.car | grep -q '"Opaque" : true'
+    plutil -extract DTXcodeBuild raw "$ACCEPT/ipa/Payload/"*.app/Info.plist | matches -x "$build"
+    plutil -extract UIDeviceFamily.0 raw "$ACCEPT/ipa/Payload/"*.app/Info.plist | matches -x 1
+    xcrun assetutil --info "$ACCEPT/ipa/Payload/"*.app/Assets.car | matches '"Opaque" : true'
     grep -q C617.1 "$ACCEPT/ipa/Payload/"*.app/PrivacyInfo.xcprivacy
     evidence "DTXcodeBuild $build, UIDeviceFamily [1], AppIcon opaque, C617.1 declared"
 }

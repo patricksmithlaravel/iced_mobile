@@ -135,12 +135,12 @@ check_event() {
 
 # app_bin: the template's binary, as icm.toml names it ([app] bin).
 app_bin() {
-    sed -n 's/^bin *= *"\([^"]*\)".*/\1/p' "$DEMO/icm.toml" | head -n1
+    sed -n 's/^bin *= *"\([^"]*\)".*/\1/p' "$DEMO/icm.toml" | sed -n 1p
 }
 
 # app_name: [app] name, the product name installers use.
 app_name() {
-    sed -n 's/^name *= *"\([^"]*\)".*/\1/p' "$DEMO/icm.toml" | head -n1
+    sed -n 's/^name *= *"\([^"]*\)".*/\1/p' "$DEMO/icm.toml" | sed -n 1p
 }
 
 # executable APP: the path of a macOS bundle's executable.

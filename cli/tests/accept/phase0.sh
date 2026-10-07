@@ -36,11 +36,11 @@ check_matrix() {
 # toolchain is installed (`rustup toolchain install <version>`), in its own
 # target directory.
 msrv_version() {
-    sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml | head -n1
+    sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml | sed -n 1p
 }
 
 msrv_toolchain() {
-    rustup toolchain list | awk '{print $1}' | grep -E "^$(msrv_version)(\.0)?-" | head -n1 || true
+    rustup toolchain list | awk '{print $1}' | grep -E "^$(msrv_version)(\.0)?-" | sed -n 1p || true
 }
 
 msrv() {
@@ -109,7 +109,7 @@ events_off() {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     if grep -q 'ICM_EVENT' "$ACCEPT/noev.log"; then
-        grep 'ICM_EVENT' "$ACCEPT/noev.log" | head -n 5
+        grep 'ICM_EVENT' "$ACCEPT/noev.log" | sed -n 1,5p
         return 1
     fi
     evidence "no ICM_EVENT line in ${wait_for}s without ICM_EVENTS ($(wc -l <"$ACCEPT/noev.log" | tr -d ' ') stderr lines)"
@@ -133,13 +133,13 @@ headless_shot() {
 # The release tag is "v" plus icm's version (.github/ci/tag.sh): the first
 # `version = "…"` line of cli/Cargo.toml is [package]'s.
 release_tag() {
-    printf 'v%s\n' "$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' cli/Cargo.toml | head -n1)"
+    printf 'v%s\n' "$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' cli/Cargo.toml | sed -n 1p)"
 }
 
 owner_tag() {
     local tag
     tag=$(release_tag)
-    git ls-remote --tags origin "refs/tags/$tag" | grep -q "refs/tags/$tag$"
+    git ls-remote --tags origin "refs/tags/$tag" | matches "refs/tags/$tag$"
     evidence "origin has $tag"
 }
 

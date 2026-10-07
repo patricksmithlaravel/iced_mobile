@@ -309,3 +309,72 @@ fn only_phase1_shuts_down_every_platform() {
         }
     }
 }
+
+/// `matches`, lib.sh's `grep -q` for the end of a pipe, reads its input to
+/// the end. A step runs with pipefail, and in `PRODUCER | grep -q` grep
+/// leaves at the first match: a producer still writing dies of SIGPIPE, and
+/// the step fails (exit 141) although the line was there. phase2.sh's
+/// ipa-layout step (`zipinfo -1 | grep -q`) failed so in about one run in
+/// ten.
+#[test]
+fn matches_reads_its_input_to_the_end() {
+    let host = Host::new("");
+    // Line 1 of about 1.3 MB: grep -q leaves with the rest unwritten.
+    let output = host.bash("seq 1 200000 | grep -q -x 1");
+    assert!(!output.status.success(), "{}", text(&output));
+
+    let output = host.bash("seq 1 200000 | matches -x 1");
+    assert!(output.status.success(), "{}", text(&output));
+    let output = host.bash("seq 1 200000 | matches -x 0");
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output));
+    let output =
+        host.bash("if seq 1 200000 | matches -E '^2$'; then echo found; else echo missing; fi");
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "found\n");
+}
+
+/// No line of the scripts pipes into a reader that can leave before the end
+/// of its input, `grep -q` or `head`: under pipefail the producer's SIGPIPE
+/// fails the step. `matches` and `sed -n` read to the end.
+#[test]
+fn no_pipe_ends_in_a_reader_that_leaves_early() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/accept");
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "sh") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
+            // What follows each `|` (a `||` leaves an empty piece).
+            for piece in line.split('|').skip(1) {
+                let words: Vec<&str> = piece.split_whitespace().collect();
+                let leaves_early = match words.first() {
+                    Some(&"head") => true,
+                    Some(&"grep") => words[1..]
+                        .iter()
+                        .take_while(|word| word.starts_with('-'))
+                        .any(|flag| {
+                            matches!(*flag, "--quiet" | "--silent")
+                                || (!flag.starts_with("--") && flag.contains('q'))
+                        }),
+                    _ => false,
+                };
+                if leaves_early {
+                    found.push(format!("{name}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+    }
+    found.sort();
+    assert!(
+        found.is_empty(),
+        "pipe into `matches` or `sed -n` instead:\n{}",
+        found.join("\n")
+    );
+}

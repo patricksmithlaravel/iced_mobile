@@ -130,13 +130,13 @@ release_signed() {
     check_smoke "$ACCEPT/a.json"
     local aab
     aab=$(/usr/bin/jq -r .artifacts.aab "$ACCEPT/a.json")
-    bundletool dump config --bundle="$aab" | grep -q PAGE_ALIGNMENT_16K
-    bundletool dump manifest --bundle="$aab" | grep -q 'targetSdkVersion="36"'
-    if bundletool dump manifest --bundle="$aab" | grep -q debuggable; then
+    bundletool dump config --bundle="$aab" | matches PAGE_ALIGNMENT_16K
+    bundletool dump manifest --bundle="$aab" | matches 'targetSdkVersion="36"'
+    if bundletool dump manifest --bundle="$aab" | matches debuggable; then
         echo "the release manifest is debuggable"
         return 1
     fi
-    "$(java_home)/bin/jarsigner" -verify "$aab" | grep -q 'jar verified.'
+    "$(java_home)/bin/jarsigner" -verify "$aab" | matches 'jar verified.'
     evidence "$(/usr/bin/jq -r '.summary' "$ACCEPT/a.json" | sed "s|$ACCEPT|\$ACCEPT|g")"
     evidence "$aab: $(stat -f %z "$aab") bytes, PAGE_ALIGNMENT_16K, targetSdk 36, jar verified"
 }
@@ -152,7 +152,7 @@ check_smoke() {
 password_never_written() {
     cd "$DEMO"
     if grep -rqF "$ICM_TEST_STOREPASS" target/icm "$ACCEPT"/*.json 2>/dev/null; then
-        grep -rlF "$ICM_TEST_STOREPASS" target/icm "$ACCEPT"/*.json | head
+        grep -rlF "$ICM_TEST_STOREPASS" target/icm "$ACCEPT"/*.json | sed -n 1,10p
         return 1
     fi
     evidence "the store password appears in no file under target/icm or in the results"
@@ -184,12 +184,12 @@ universal_apk() {
     adb=$(sdk_adb)
     serial=$(/usr/bin/jq -r .device.serial "$ACCEPT/run.json")
     "$adb" -s "$serial" uninstall dev.accept.demo || true
-    "$adb" -s "$serial" install "$apk" | grep -q Success
+    "$adb" -s "$serial" install "$apk" | matches Success
     "$adb" -s "$serial" shell setprop debug.icm.events 1
     mark=$("$adb" -s "$serial" shell date +%s.%N | tr -d '\r')
     "$adb" -s "$serial" shell am start -W -S -n dev.accept.demo/android.app.NativeActivity
     sleep 5
-    "$adb" -s "$serial" logcat -d -v threadtime,epoch -T "$mark" -s ICM_EVENT:I | grep -q '"kind":"ready"'
+    "$adb" -s "$serial" logcat -d -v threadtime,epoch -T "$mark" -s ICM_EVENT:I | matches '"kind":"ready"'
     "$adb" -s "$serial" exec-out screencap -p >"$ACCEPT/previews/universal.png"
     "$adb" -s "$serial" uninstall dev.accept.demo >/dev/null
     evidence "$(basename "$apk") installed with adb on $serial and sent ICM_EVENT ready"
