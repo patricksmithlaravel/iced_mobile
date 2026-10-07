@@ -779,6 +779,18 @@ fn releases_carry_third_party_notices() {
     ] {
         assert!(notices.contains(line), "{line:?} missing from:\n{notices}");
     }
+    // The standard library every artifact links, with the crates it
+    // vendors, and the Rust project's licence texts.
+    for line in [
+        "The Rust standard library (rustc ",
+        "\nstd ",
+        "\ncompiler_builtins ",
+        "\nhashbrown ",
+        "Copyright (c) The Rust Project Developers",
+        "LLVM Exceptions to the Apache 2.0 License",
+    ] {
+        assert!(notices.contains(line), "{line:?} missing from:\n{notices}");
+    }
     // Build and dev dependencies, and the app itself, never ship.
     for absent in ["build_only", "dev_only", "release-app"] {
         assert!(!notices.contains(absent), "{absent} in:\n{notices}");

@@ -13,6 +13,15 @@
 //! Android and iOS) its SIL Open Font License comes first: the copy next to
 //! the font in the framework, else the one icm embeds.
 //!
+//! Every artifact also links the Rust standard library, which `cargo
+//! metadata` does not list: [`std_packages`] adds `core`, `alloc`, `std` and
+//! the rest of it with the crates it vendors for the triple (`hashbrown`,
+//! `libc`, the backtrace crates, `dlmalloc` on the web), in a section of
+//! their own. With the toolchain's `rust-src` component their versions come
+//! from `library/Cargo.lock` and the vendored crates' texts from
+//! `library/vendor/`; otherwise the MIT and Apache-2.0 texts icm embeds
+//! stand for them.
+//!
 //! A pipeline calls [`Release::notices`] once it has built (the sources
 //! are then on disk), puts the file inside its artifacts and records where
 //! with [`Release::embed_notices`]. The release core then gates it
@@ -39,6 +48,234 @@ pub const FILE: &str = "THIRD_PARTY_NOTICES.txt";
 /// is not on disk.
 const OFL_FALLBACK: &str = include_str!(concat!(env!("OUT_DIR"), "/ofl.txt"));
 
+/// The Rust project's MIT licence, under which (or Apache-2.0) the
+/// standard library is published.
+const RUST_MIT: &str = include_str!("licences/rust-MIT.txt");
+
+/// The Apache License 2.0.
+const APACHE_2_0: &str = include_str!("licences/Apache-2.0.txt");
+
+/// The LLVM exception to the Apache License 2.0 (`compiler_builtins`).
+const LLVM_EXCEPTION: &str = include_str!("licences/LLVM-exception.txt");
+
+/// Where a crate of the standard library comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// rust-lang/rust's `library/` (its version is rustc's).
+    InTree,
+    /// crates.io, vendored into `library/vendor/` (versions from
+    /// `library/Cargo.lock`).
+    Vendored,
+}
+
+/// One crate of the standard library: its name, licence expression,
+/// origin, and the triples it is linked for.
+type StdCrate = (&'static str, &'static str, Origin, fn(&str) -> bool);
+
+/// The crates of the standard library a binary for `triple` links:
+/// std's runtime dependencies (`library/std/Cargo.toml`), with their
+/// licences.
+const STD_CRATES: &[StdCrate] = &[
+    ("core", "MIT OR Apache-2.0", Origin::InTree, any_triple),
+    ("alloc", "MIT OR Apache-2.0", Origin::InTree, any_triple),
+    ("std", "MIT OR Apache-2.0", Origin::InTree, any_triple),
+    (
+        "std_detect",
+        "MIT OR Apache-2.0",
+        Origin::InTree,
+        any_triple,
+    ),
+    (
+        "panic_abort",
+        "MIT OR Apache-2.0",
+        Origin::InTree,
+        any_triple,
+    ),
+    (
+        "panic_unwind",
+        "MIT OR Apache-2.0",
+        Origin::InTree,
+        any_triple,
+    ),
+    ("unwind", "MIT OR Apache-2.0", Origin::InTree, any_triple),
+    (
+        "compiler_builtins",
+        "MIT AND Apache-2.0 WITH LLVM-exception AND (MIT OR Apache-2.0)",
+        Origin::InTree,
+        any_triple,
+    ),
+    ("windows-link", "MIT OR Apache-2.0", Origin::InTree, windows),
+    ("cfg-if", "MIT OR Apache-2.0", Origin::Vendored, any_triple),
+    (
+        "hashbrown",
+        "MIT OR Apache-2.0",
+        Origin::Vendored,
+        any_triple,
+    ),
+    (
+        "rustc-demangle",
+        "MIT/Apache-2.0",
+        Origin::Vendored,
+        any_triple,
+    ),
+    ("libc", "MIT OR Apache-2.0", Origin::Vendored, not_msvc),
+    ("addr2line", "Apache-2.0 OR MIT", Origin::Vendored, not_msvc),
+    ("gimli", "MIT OR Apache-2.0", Origin::Vendored, not_msvc),
+    ("object", "Apache-2.0 OR MIT", Origin::Vendored, not_msvc),
+    ("memchr", "Unlicense OR MIT", Origin::Vendored, not_msvc),
+    (
+        "miniz_oxide",
+        "MIT OR Zlib OR Apache-2.0",
+        Origin::Vendored,
+        not_msvc,
+    ),
+    (
+        "adler2",
+        "0BSD OR MIT OR Apache-2.0",
+        Origin::Vendored,
+        not_msvc,
+    ),
+    ("dlmalloc", "MIT/Apache-2.0", Origin::Vendored, bare_wasm),
+];
+
+fn any_triple(_: &str) -> bool {
+    true
+}
+
+fn windows(triple: &str) -> bool {
+    triple.contains("-windows")
+}
+
+fn not_msvc(triple: &str) -> bool {
+    !triple.contains("-windows-msvc")
+}
+
+fn bare_wasm(triple: &str) -> bool {
+    triple.starts_with("wasm") && triple.ends_with("-unknown-unknown")
+}
+
+/// The toolchain a release builds with, for the standard library's
+/// notices.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RustToolchain {
+    /// rustc's version, e.g. `1.98.0`.
+    pub version: Option<String>,
+    /// `rustc --print sysroot`.
+    pub sysroot: Option<PathBuf>,
+}
+
+/// The `[[package]]` versions of a `Cargo.lock`, by name (several when
+/// a name has more than one version).
+fn lock_versions(text: &str) -> HashMap<String, Vec<String>> {
+    #[derive(Deserialize)]
+    struct Lock {
+        #[serde(default)]
+        package: Vec<LockPackage>,
+    }
+    #[derive(Deserialize)]
+    struct LockPackage {
+        name: String,
+        version: String,
+    }
+    let mut versions: HashMap<String, Vec<String>> = HashMap::new();
+    if let Ok(lock) = toml::from_str::<Lock>(text) {
+        for package in lock.package {
+            versions
+                .entry(package.name)
+                .or_default()
+                .push(package.version);
+        }
+    }
+    versions
+}
+
+/// The standard library's crates for `triple` (see [`STD_CRATES`]).
+pub fn std_packages(triple: &str, toolchain: &RustToolchain) -> Vec<Package> {
+    let library = toolchain
+        .sysroot
+        .as_ref()
+        .map(|sysroot| sysroot.join("lib/rustlib/src/rust/library"))
+        .filter(|dir| dir.join("Cargo.lock").is_file());
+    let versions = library
+        .as_ref()
+        .and_then(|dir| std::fs::read_to_string(dir.join("Cargo.lock")).ok())
+        .map(|text| lock_versions(&text))
+        .unwrap_or_default();
+    let rustc = toolchain.version.as_deref();
+    let read = |path: &Path| std::fs::read_to_string(path).ok();
+    let project = vec![RUST_MIT.to_string(), APACHE_2_0.to_string()];
+
+    STD_CRATES
+        .iter()
+        .filter(|(_, _, _, applies)| applies(triple))
+        .map(|(name, license, origin, _)| {
+            let vendored = match origin {
+                Origin::InTree => None,
+                Origin::Vendored => versions
+                    .get(*name)
+                    .and_then(|found| found.iter().max_by(|a, b| version_order(a, b)))
+                    .cloned(),
+            };
+            let version = match (origin, &vendored, rustc) {
+                (Origin::InTree, _, Some(rustc)) => rustc.to_string(),
+                (Origin::Vendored, Some(version), _) => version.clone(),
+                (_, _, Some(rustc)) => format!("(as rustc {rustc} vendors it)"),
+                (_, _, None) => "(as the toolchain vendors it)".to_string(),
+            };
+            let texts = match (origin, &library, &vendored) {
+                (Origin::Vendored, Some(library), Some(version)) => {
+                    let texts: Vec<String> =
+                        licence_files(&library.join("vendor").join(format!("{name}-{version}")))
+                            .iter()
+                            .filter_map(|path| read(path))
+                            .collect();
+                    if texts.is_empty() {
+                        project.clone()
+                    } else {
+                        texts
+                    }
+                }
+                (Origin::InTree, Some(library), _) if *name == "compiler_builtins" => {
+                    match read(&library.join("compiler-builtins/LICENSE.txt")) {
+                        Some(text) => vec![text],
+                        None => compiler_builtins_texts(),
+                    }
+                }
+                (Origin::InTree, _, _) if *name == "compiler_builtins" => compiler_builtins_texts(),
+                _ => project.clone(),
+            };
+            Package {
+                name: name.to_string(),
+                version,
+                license: Some(license.to_string()),
+                repository: Some(match origin {
+                    Origin::InTree => "https://github.com/rust-lang/rust".to_string(),
+                    Origin::Vendored => format!("https://crates.io/crates/{name}"),
+                }),
+                texts,
+            }
+        })
+        .collect()
+}
+
+fn compiler_builtins_texts() -> Vec<String> {
+    vec![
+        RUST_MIT.to_string(),
+        format!("{}\n\n{}", APACHE_2_0.trim_end(), LLVM_EXCEPTION.trim()),
+    ]
+}
+
+/// Orders `X.Y.Z` versions numerically (the newest wins when a name has
+/// several).
+fn version_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split(['.', '+', '-'])
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    };
+    parts(a).cmp(&parts(b))
+}
+
 /// One package in the notices.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Package {
@@ -63,6 +300,8 @@ pub struct Notices {
     pub packages: Vec<Package>,
     /// Embedded fonts and their licences.
     pub fonts: Vec<String>,
+    /// The standard library's crates ([`std_packages`]).
+    pub toolchain: Vec<Package>,
 }
 
 impl Notices {
@@ -225,6 +464,7 @@ pub fn collect(
     package: &str,
     triple: &str,
     title: &str,
+    toolchain: &RustToolchain,
 ) -> Result<Notices> {
     let mut cmd = Cmd::tool("cargo")
         .args(["metadata", "--format-version", "1", "--locked"])
@@ -250,10 +490,16 @@ pub fn collect(
             format!("cannot read cargo metadata: {error}"),
         )
     })?;
-    Ok(from_metadata(&metadata, package, triple, title))
+    Ok(from_metadata(&metadata, package, triple, title, toolchain))
 }
 
-fn from_metadata(metadata: &Metadata, package: &str, triple: &str, title: &str) -> Notices {
+fn from_metadata(
+    metadata: &Metadata,
+    package: &str,
+    triple: &str,
+    title: &str,
+    toolchain: &RustToolchain,
+) -> Notices {
     let by_id: HashMap<&str, &MetaPackage> = metadata
         .packages
         .iter()
@@ -340,11 +586,21 @@ fn from_metadata(metadata: &Metadata, package: &str, triple: &str, title: &str) 
         fonts.push("Fira Sans: SIL Open Font License 1.1".to_string());
     }
 
-    let text = render(title, triple, &packages, &fonts, ofl.as_deref());
+    let std = std_packages(triple, toolchain);
+    let text = render(
+        title,
+        triple,
+        &packages,
+        &std,
+        toolchain.version.as_deref(),
+        &fonts,
+        ofl.as_deref(),
+    );
     Notices {
         text,
         packages,
         fonts,
+        toolchain: std,
     }
 }
 
@@ -358,6 +614,8 @@ fn render(
     title: &str,
     triple: &str,
     packages: &[Package],
+    std: &[Package],
+    rustc: Option<&str>,
     fonts: &[String],
     ofl: Option<&str>,
 ) -> String {
@@ -398,9 +656,32 @@ fn render(
         ));
     }
 
+    rule(
+        &mut text,
+        &format!(
+            "The Rust standard library ({})",
+            rustc
+                .map(|version| format!("rustc {version}"))
+                .unwrap_or_else(|| "the build's toolchain".to_string())
+        ),
+    );
+    text.push_str(
+        "Every Rust program links the standard library, which the Rust project\n\
+         publishes under the MIT or Apache-2.0 licence (copyright: The Rust Project\n\
+         Developers, https://thanks.rust-lang.org), with the crates it is built from:\n\n",
+    );
+    for package in std {
+        text.push_str(&format!(
+            "{} {}: {}\n",
+            package.name,
+            package.version,
+            package.license.as_deref().unwrap_or("no licence declared"),
+        ));
+    }
+
     // Each distinct text once, with who uses it.
     let mut texts: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
-    for package in packages {
+    for package in packages.iter().chain(std) {
         for body in &package.texts {
             let key = crate::hash::sha256_hex(body.trim().as_bytes());
             let entry = texts
@@ -597,12 +878,19 @@ impl Release {
             self.version,
             self.target.as_str()
         );
+        let toolchain = crate::toolchain::active(self.project.dir())
+            .map(|toolchain| RustToolchain {
+                version: Some(toolchain.rustc_version().to_string()).filter(|v| !v.is_empty()),
+                sysroot: Some(toolchain.sysroot),
+            })
+            .unwrap_or_default();
         let notices = collect(
             ctx,
             &self.package.manifest_path,
             &self.package.name,
             triple,
             &title,
+            &toolchain,
         )?;
         let io = |what: &str, at: &Path, error: std::io::Error| {
             IcmError::new(
@@ -632,8 +920,9 @@ impl Release {
             );
         }
         ctx.rep.progress(format!(
-            "{FILE}: {} package(s){}{}",
+            "{FILE}: {} package(s) and {} of the standard library{}{}",
             notices.packages.len(),
+            notices.toolchain.len(),
             if notices.fonts.is_empty() {
                 String::new()
             } else {
@@ -730,6 +1019,7 @@ mod tests {
             "app",
             "x86_64-unknown-linux-gnu",
             "App 1.0.0",
+            &RustToolchain::default(),
         );
         let names: Vec<&str> = notices.packages.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["bare", "lib"]);
@@ -747,6 +1037,102 @@ mod tests {
         );
         assert!(!notices.text.contains("build licence"), "{}", notices.text);
         assert!(notices.fonts.is_empty());
+    }
+
+    #[test]
+    fn the_standard_library_is_listed_for_the_triple() {
+        // Without rust-src: versions from rustc, the texts icm embeds.
+        let bare = RustToolchain {
+            version: Some("1.98.0".into()),
+            sysroot: None,
+        };
+        let linux = std_packages("x86_64-unknown-linux-gnu", &bare);
+        let names: Vec<&str> = linux.iter().map(|p| p.name.as_str()).collect();
+        for name in [
+            "core",
+            "alloc",
+            "std",
+            "compiler_builtins",
+            "hashbrown",
+            "libc",
+            "gimli",
+            "miniz_oxide",
+        ] {
+            assert!(names.contains(&name), "{name} in {names:?}");
+        }
+        assert!(!names.contains(&"dlmalloc") && !names.contains(&"windows-link"));
+        let std = linux.iter().find(|p| p.name == "std").unwrap();
+        assert_eq!(std.version, "1.98.0");
+        assert!(std.texts[0].contains("The Rust Project Developers"));
+        assert!(std.texts[1].starts_with("Apache License"));
+        let hashbrown = linux.iter().find(|p| p.name == "hashbrown").unwrap();
+        assert_eq!(hashbrown.version, "(as rustc 1.98.0 vendors it)");
+        let builtins = linux
+            .iter()
+            .find(|p| p.name == "compiler_builtins")
+            .unwrap();
+        assert!(builtins.texts[1].contains("LLVM Exceptions"));
+
+        let wasm: Vec<String> = std_packages("wasm32-unknown-unknown", &bare)
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert!(wasm.contains(&"dlmalloc".to_string()), "{wasm:?}");
+        let msvc: Vec<String> = std_packages("x86_64-pc-windows-msvc", &bare)
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert!(msvc.contains(&"windows-link".to_string()));
+        assert!(!msvc.contains(&"libc".to_string()) && !msvc.contains(&"gimli".to_string()));
+
+        // With rust-src: the lock's versions and the vendored crates' files.
+        let sysroot = tempfile::tempdir().unwrap();
+        let library = sysroot.path().join("lib/rustlib/src/rust/library");
+        let vendor = library.join("vendor/hashbrown-0.17.1");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(
+            library.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"hashbrown\"\nversion = \"0.12.3\"\n\n[[package]]\nname = \"hashbrown\"\nversion = \"0.17.1\"\n\n[[package]]\nname = \"libc\"\nversion = \"0.2.189\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            vendor.join("LICENSE-MIT"),
+            "Copyright (c) 2016 Amanieu d'Antras",
+        )
+        .unwrap();
+        let toolchain = RustToolchain {
+            version: Some("1.98.0".into()),
+            sysroot: Some(sysroot.path().to_path_buf()),
+        };
+        let found = std_packages("aarch64-linux-android", &toolchain);
+        let hashbrown = found.iter().find(|p| p.name == "hashbrown").unwrap();
+        assert_eq!(hashbrown.version, "0.17.1");
+        assert_eq!(hashbrown.texts, ["Copyright (c) 2016 Amanieu d'Antras"]);
+        // A vendored crate without its directory keeps the embedded texts.
+        let libc = found.iter().find(|p| p.name == "libc").unwrap();
+        assert_eq!(libc.version, "0.2.189");
+        assert_eq!(libc.texts.len(), 2);
+
+        // The rendered file has its own section, and the texts once.
+        let text = render(
+            "App 1.0.0",
+            "x86_64-unknown-linux-gnu",
+            &[],
+            &linux,
+            Some("1.98.0"),
+            &[],
+            None,
+        );
+        assert!(
+            text.contains("The Rust standard library (rustc 1.98.0)"),
+            "{text}"
+        );
+        assert!(text.contains("std 1.98.0: MIT OR Apache-2.0\n"), "{text}");
+        assert_eq!(
+            text.matches("TERMS AND CONDITIONS FOR USE").count(),
+            2,
+            "{text}"
+        );
     }
 
     #[test]
