@@ -21,6 +21,12 @@ name = "icm"
 path = "tests/icm.rs"
 harness = false
 
+[features]
+# Never in `default`: `icm run` adds it to dev builds when icm.toml's
+# `[app] agent = true`. iced's `agent` feature is empty until the bridge
+# lands.
+icm-agent = ["iced/agent"]
+
 [dependencies]
 # Same source on every iced line, character for character. `icm new` turns
 # these paths into the fork's git URL and tag (or rev).

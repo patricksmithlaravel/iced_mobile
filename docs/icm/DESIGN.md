@@ -916,9 +916,9 @@ The fork's own root `AGENTS.md` gets a `cli/` section:
 
 ### 8.5 As built (phase 1)
 `examples/app` is the template. Where it differs from §7.2 and §8.1–8.4, it wins:
-- `icm.toml` has `min_icm = "0.14.1-mobile.1"`, a plain version compared by semver ordering (Appendix C 5), instead of `icm = ">=…"`. It has no `#:schema` line while schema printing waits (Appendix C 30), and `[app] agent = false` until iced has its `agent` feature.
-- `Cargo.toml` has no `[profile.*]` (Appendix C 4) and no `icm-agent` feature yet: it needs iced's `agent` feature (F7).
-- `tests/icm.rs` calls a stand-in `agent::main` defined in the same file. It runs the flows through `iced_test::run`, behaves like libtest for `--list`, `--ignored`, `--skip` and name filters, and answers the `icm-*` subcommands with exit 2. Once F4 lands, `main` calls `iced_test::agent::main` with the same arguments and the stand-in goes.
+- `icm.toml` has `min_icm = "0.14.1-mobile.1"`, a plain version compared by semver ordering (Appendix C 5), instead of `icm = ">=…"`. It has no `#:schema` line while schema printing waits (Appendix C 30).
+- `Cargo.toml` has no `[profile.*]` (Appendix C 4). Its `icm-agent = ["iced/agent"]` feature resolves against iced's empty `agent` feature (the F7 stub).
+- `tests/icm.rs` is the one line of §13.2: `iced_test::agent::main(app::application(), env!("CARGO_MANIFEST_DIR"))`. Besides protocol 1 (`ICM_HARNESS {"protocol":1}` first), every command ends with an `ICM_HARNESS_RESULT <json>` line, and the harness exits 0 (all passed), 1 (a flow failed) or 2 (usage, or a file it cannot read or write); `iced_test::agent` documents the fields.
 - `src/lib.rs` is a counter, a text field that submits on Return, and a scrollable list whose rows keep their buttons small (review A2). `safe_area()` pads 64 top, 48 bottom and 16 at the sides on Android and iOS, 16 elsewhere. Its unit tests send touch events, not mouse events.
 - `icm new` substitutes:
   - the package, library and binary name `app`: Cargo.toml, `app::` in `src/main.rs` and `tests/icm.rs`, and icm.toml `package`, `lib` and `bin`;

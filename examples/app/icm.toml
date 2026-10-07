@@ -21,7 +21,7 @@ copyright = "© 2026 Example Ltd"       # macOS NSHumanReadableCopyright and pac
 description = "A starter app."         # one line for package metadata (.deb Description, installers)
 category = "utilities"                 # LSApplicationCategoryType, .desktop Categories, deb Section
 resources = []                         # globs copied into the .app root, Android assets/, the web site and desktop packages
-agent = false                          # later: build the debug-only agent bridge into `icm run` builds (needs iced's `agent` feature)
+agent = true                           # later: build the debug-only agent bridge into `icm run` dev builds (Cargo feature icm-agent)
 
 [app.permissions]                      # one vocabulary for every platform (`icm explain config.app.permissions`)
 internet = true                        # Android INTERNET; iOS, macOS and the web need no permission for it
