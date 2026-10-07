@@ -119,9 +119,25 @@ use std::path::Path;
 /// Remember that an [`Emulator`] executes the real thing! Side effects _will_
 /// take place. It is up to you to ensure your tests have reproducible environments
 /// by leveraging [`Preset`][program::Preset].
+///
+/// The [`Emulator`] draws with the backend `ICED_TEST_BACKEND` names, if any;
+/// see [`run_with_backend`] to choose it.
 pub fn run(
     program: impl program::Program + 'static,
     tests_dir: impl AsRef<Path>,
+) -> Result<(), Error> {
+    let backend = std::env::var("ICED_TEST_BACKEND").ok();
+
+    run_with_backend(program, tests_dir, backend.as_deref())
+}
+
+/// Runs an [`Ice`] test suite for the given [`Program`](program::Program),
+/// like [`run`], in an [`Emulator`] that draws with the given backend
+/// (`"tiny-skia"` or `"wgpu"`; see [`Emulator::with_backend`]).
+pub fn run_with_backend(
+    program: impl program::Program + 'static,
+    tests_dir: impl AsRef<Path>,
+    backend: Option<&str>,
 ) -> Result<(), Error> {
     use crate::futures::futures::StreamExt;
     use crate::futures::futures::channel::mpsc;
@@ -144,27 +160,7 @@ pub fn run(
 
         match Ice::parse(&content) {
             Ok(ice) => {
-                let preset = if let Some(preset) = &ice.preset {
-                    let Some(preset) = program
-                        .presets()
-                        .iter()
-                        .find(|candidate| candidate.name() == preset)
-                    else {
-                        return Err(Error::PresetNotFound {
-                            name: preset.to_owned(),
-                            available: program
-                                .presets()
-                                .iter()
-                                .map(program::Preset::name)
-                                .map(str::to_owned)
-                                .collect(),
-                        });
-                    };
-
-                    Some(preset)
-                } else {
-                    None
-                };
+                let preset = preset(&program, ice.preset.as_deref())?;
 
                 tests.push((file, ice, preset));
             }
@@ -181,12 +177,13 @@ pub fn run(
     for (file, ice, preset) in tests {
         let (sender, mut receiver) = mpsc::channel(1);
 
-        let mut emulator = Emulator::with_preset(
+        let mut emulator = Emulator::with_backend(
             sender,
             &program,
             ice.mode,
             ice.viewport,
             preset,
+            backend,
         );
 
         let mut instructions = ice.instructions.into_iter();
@@ -221,6 +218,9 @@ pub fn run(
 
 /// Takes a screenshot of the given [`Program`](program::Program) with the given theme, viewport,
 /// and scale factor after running it for the given [`Duration`].
+///
+/// The [`Emulator`] draws with the backend `ICED_TEST_BACKEND` names, if any;
+/// see [`screenshot_with_backend`] to choose it.
 pub fn screenshot<P: program::Program + 'static>(
     program: &P,
     theme: &P::Theme,
@@ -228,15 +228,42 @@ pub fn screenshot<P: program::Program + 'static>(
     scale_factor: f32,
     duration: Duration,
 ) -> window::Screenshot {
+    let backend = std::env::var("ICED_TEST_BACKEND").ok();
+
+    screenshot_with_backend(
+        program,
+        theme,
+        viewport,
+        scale_factor,
+        duration,
+        backend.as_deref(),
+    )
+}
+
+/// Takes a screenshot of the given [`Program`](program::Program), like
+/// [`screenshot`], in an [`Emulator`] that draws with the given backend
+/// (`"tiny-skia"` or `"wgpu"`; see [`Emulator::with_backend`]).
+///
+/// With `Some("tiny-skia")`, the pixels are the same on every machine.
+pub fn screenshot_with_backend<P: program::Program + 'static>(
+    program: &P,
+    theme: &P::Theme,
+    viewport: impl Into<Size>,
+    scale_factor: f32,
+    duration: Duration,
+    backend: Option<&str>,
+) -> window::Screenshot {
     use crate::runtime::futures::futures::channel::mpsc;
 
     let (sender, mut receiver) = mpsc::channel(100);
 
-    let mut emulator = Emulator::new(
+    let mut emulator = Emulator::with_backend(
         sender,
         program,
         emulator::Mode::Immediate,
         viewport.into(),
+        None,
+        backend,
     );
 
     let start = Instant::now();
@@ -264,4 +291,29 @@ pub fn screenshot<P: program::Program + 'static>(
     }
 
     emulator.screenshot(program, theme, scale_factor)
+}
+
+/// The [`Preset`](program::Preset) of the `program` with the given name.
+fn preset<'a, P: program::Program>(
+    program: &'a P,
+    name: Option<&str>,
+) -> Result<Option<&'a program::Preset<P::State, P::Message>>, Error> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+
+    program
+        .presets()
+        .iter()
+        .find(|candidate| candidate.name() == name)
+        .map(Some)
+        .ok_or_else(|| Error::PresetNotFound {
+            name: name.to_owned(),
+            available: program
+                .presets()
+                .iter()
+                .map(program::Preset::name)
+                .map(str::to_owned)
+                .collect(),
+        })
 }

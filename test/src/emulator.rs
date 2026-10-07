@@ -18,8 +18,9 @@ use crate::runtime::futures::{Executor, Runtime};
 use crate::runtime::task;
 use crate::runtime::user_interface;
 use crate::runtime::{Task, UserInterface};
-use crate::{Instruction, Selector};
+use crate::{Error, Instruction, Selector};
 
+use std::env;
 use std::fmt;
 
 /// A headless runtime that can run iced applications and execute
@@ -67,6 +68,11 @@ impl<P: Program + 'static> Emulator<P> {
     ///
     /// The [`Emulator`] will send [`Event`] notifications through the provided [`mpsc::Sender`].
     ///
+    /// It draws with the backend the `ICED_TEST_BACKEND` environment variable
+    /// names (`tiny-skia` or `wgpu`), as a [`Simulator`](crate::Simulator)
+    /// does; without it, with the first one that works. Use
+    /// [`with_backend`](Self::with_backend) to choose it.
+    ///
     /// When the [`Emulator`] has finished booting, an [`Event::Ready`] will be produced.
     pub fn new(
         sender: mpsc::Sender<Event<P>>,
@@ -88,9 +94,43 @@ impl<P: Program + 'static> Emulator<P> {
         size: Size,
         preset: Option<&program::Preset<P::State, P::Message>>,
     ) -> Emulator<P> {
+        let backend = env::var("ICED_TEST_BACKEND").ok();
+
+        Self::with_backend(
+            sender,
+            program,
+            mode,
+            size,
+            preset,
+            backend.as_deref(),
+        )
+    }
+
+    /// Creates a new [`Emulator`] analogously to [`with_preset`](Self::with_preset),
+    /// drawing with the given renderer backend (`"tiny-skia"` or `"wgpu"`).
+    ///
+    /// With `None`, the first backend that works is used, which depends on the
+    /// machine: `wgpu` where there is a GPU, `tiny-skia` elsewhere. Name a
+    /// backend for screenshots that must be the same on every machine;
+    /// `tiny-skia` draws on the CPU, everywhere.
+    ///
+    /// # Panics
+    /// If the backend is not compiled in, or cannot run on this machine.
+    pub fn with_backend(
+        sender: mpsc::Sender<Event<P>>,
+        program: &P,
+        mode: Mode,
+        size: Size,
+        preset: Option<&program::Preset<P::State, P::Message>>,
+        backend: Option<&str>,
+    ) -> Emulator<P> {
         use renderer::Headless;
 
         let settings = program.settings();
+
+        for font in settings.fonts {
+            load_font(font);
+        }
 
         // TODO: Error handling
         let executor = P::Executor::new().expect("Create emulator executor");
@@ -99,9 +139,15 @@ impl<P: Program + 'static> Emulator<P> {
             .block_on(P::Renderer::new(
                 settings.default_font,
                 settings.default_text_size,
-                None,
+                backend,
             ))
-            .expect("Create emulator renderer");
+            .unwrap_or_else(|| match backend {
+                Some(backend) => panic!(
+                    "Create emulator renderer: the {backend:?} backend is not \
+                    compiled in or cannot run here"
+                ),
+                None => panic!("Create emulator renderer"),
+            });
 
         let runtime = Runtime::new(executor, sender);
 
@@ -179,8 +225,10 @@ impl<P: Program + 'static> Emulator<P> {
                 runtime::Action::Output(message) => {
                     self.update(program, message);
                 }
-                runtime::Action::LoadFont { .. } => {
-                    // TODO
+                runtime::Action::LoadFont { bytes, channel } => {
+                    load_font(bytes);
+
+                    let _ = channel.send(Ok(()));
                 }
                 runtime::Action::Widget(operation) => {
                     let mut user_interface = UserInterface::build(
@@ -428,6 +476,62 @@ impl<P: Program + 'static> Emulator<P> {
             })));
     }
 
+    /// Finds the first widget the [`Selector`] matches in the current view
+    /// of the [`Emulator`], in depth-first order.
+    pub fn find<S>(
+        &mut self,
+        program: &P,
+        selector: S,
+    ) -> Result<S::Output, Error>
+    where
+        S: Selector + Send,
+        S::Output: Clone + Send,
+    {
+        let description = selector.description();
+
+        match self.operate(program, selector.find()) {
+            widget::operation::Outcome::Some(Some(output)) => Ok(output),
+            _ => Err(Error::SelectorNotFound {
+                selector: description,
+            }),
+        }
+    }
+
+    /// Finds every widget the [`Selector`] matches in the current view of
+    /// the [`Emulator`], in depth-first order.
+    pub fn find_all<S>(&mut self, program: &P, selector: S) -> Vec<S::Output>
+    where
+        S: Selector + Send,
+        S::Output: Clone + Send,
+    {
+        match self.operate(program, selector.find_all()) {
+            widget::operation::Outcome::Some(outputs) => outputs,
+            _ => Vec::new(),
+        }
+    }
+
+    fn operate<T>(
+        &mut self,
+        program: &P,
+        mut operation: impl widget::Operation<T>,
+    ) -> widget::operation::Outcome<T> {
+        let mut user_interface = UserInterface::build(
+            program.view(&self.state, self.window),
+            self.size,
+            self.cache.take().unwrap(),
+            &mut self.renderer,
+        );
+
+        user_interface.operate(
+            &self.renderer,
+            &mut widget::operation::black_box(&mut operation),
+        );
+
+        self.cache = Some(user_interface.into_cache());
+
+        operation.finish()
+    }
+
     /// Returns the current view of the [`Emulator`].
     pub fn view(
         &self,
@@ -534,6 +638,14 @@ impl fmt::Display for Mode {
             Self::Immediate => "Immediate",
         })
     }
+}
+
+/// Loads a font into the font system every renderer draws text with.
+fn load_font(font: impl Into<std::borrow::Cow<'static, [u8]>>) {
+    crate::renderer::graphics::text::font_system()
+        .write()
+        .expect("Write to font system")
+        .load_font(font.into());
 }
 
 struct Clipboard {
