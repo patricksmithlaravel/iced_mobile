@@ -6,7 +6,9 @@ window, a resumed activity) did not confirm one either.
 
 Common causes: the app blocks the main thread at start-up; the GPU adapter
 could not be created (try `--env ICED_BACKEND=tiny-skia`); on Android the
-activity was recreated; on iOS the scene manifest is missing.
+activity was recreated (`run.activity_recreated`: the run then fails ten
+seconds after the relaunch, and `likely_causes` and the fix name its cause);
+on iOS the scene manifest is missing.
 
 ## Fix
 

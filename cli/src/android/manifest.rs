@@ -14,39 +14,64 @@ pub const ACTIVITY: &str = "android.app.NativeActivity";
 /// The theme the generated `values/themes.xml` defines.
 pub const THEME: &str = "IcmTheme";
 
-/// `android:configChanges` values and the API level that introduced each.
-/// The activity handles all of them itself, so Android never destroys and
-/// recreates it (which freezes an iced app); policy data keyed by the API
-/// level the manifest is linked against.
-pub const CONFIG_CHANGES: &[(&str, u32)] = &[
-    ("mcc", 1),
-    ("mnc", 1),
-    ("locale", 1),
-    ("touchscreen", 1),
-    ("keyboard", 1),
-    ("keyboardHidden", 1),
-    ("navigation", 1),
-    ("screenLayout", 3),
-    ("fontScale", 1),
-    ("uiMode", 8),
-    ("orientation", 1),
-    ("density", 17),
-    ("screenSize", 13),
-    ("smallestScreenSize", 13),
-    ("layoutDirection", 17),
-    ("colorMode", 26),
-    ("fontWeightAdjustment", 31),
-    ("grammaticalGender", 34),
+/// `android:configChanges` values, the API level that introduced each, and
+/// its bit (`ActivityInfo.CONFIG_*`, the mask Android logs when it
+/// relaunches an activity). The activity handles all of them itself, so
+/// Android never destroys and recreates it (which freezes an iced app);
+/// policy data keyed by the API level the manifest is linked against.
+///
+/// `assetsPaths` is a change of the app's resource overlays: on an
+/// emulator's first boots SystemUI applies its theme overlays (the
+/// `com.android.systemui-*.frro` palette), and Android relaunches every
+/// running activity that does not list it (`wm_relaunch_resume_activity
+/// … 80000000`), the app's included when that happens mid-launch. aapt2
+/// knows the name from API 36's android.jar (`ActivityInfo.
+/// CONFIG_ASSETS_PATHS` became public API there).
+pub const CONFIG_CHANGES: &[(&str, u32, u32)] = &[
+    ("mcc", 1, 0x0001),
+    ("mnc", 1, 0x0002),
+    ("locale", 1, 0x0004),
+    ("touchscreen", 1, 0x0008),
+    ("keyboard", 1, 0x0010),
+    ("keyboardHidden", 1, 0x0020),
+    ("navigation", 1, 0x0040),
+    ("screenLayout", 3, 0x0100),
+    ("fontScale", 1, 0x4000_0000),
+    ("uiMode", 8, 0x0200),
+    ("orientation", 1, 0x0080),
+    ("density", 17, 0x1000),
+    ("screenSize", 13, 0x0400),
+    ("smallestScreenSize", 13, 0x0800),
+    ("layoutDirection", 17, 0x2000),
+    ("colorMode", 26, 0x4000),
+    ("fontWeightAdjustment", 31, 0x1000_0000),
+    ("grammaticalGender", 34, 0x8000),
+    ("assetsPaths", 36, 0x8000_0000),
 ];
 
 /// The `android:configChanges` value for a manifest linked against `api`.
 pub fn config_changes(api: u32) -> String {
     CONFIG_CHANGES
         .iter()
-        .filter(|(_, since)| *since <= api)
-        .map(|(name, _)| *name)
+        .filter(|(_, since, _)| *since <= api)
+        .map(|(name, _, _)| *name)
         .collect::<Vec<_>>()
         .join("|")
+}
+
+/// The `configChanges` names in a configuration change mask, in the order
+/// of [`CONFIG_CHANGES`]; bits without a name come last, in hex.
+pub fn config_names(mask: u32) -> Vec<String> {
+    let mut names: Vec<String> = CONFIG_CHANGES
+        .iter()
+        .filter(|(_, _, bit)| mask & bit != 0)
+        .map(|(name, _, _)| (*name).to_string())
+        .collect();
+    let known = CONFIG_CHANGES.iter().fold(0, |all, (_, _, bit)| all | bit);
+    if mask & !known != 0 {
+        names.push(format!("0x{:x}", mask & !known));
+    }
+    names
 }
 
 /// What the manifest is generated from, besides icm.toml.
@@ -361,7 +386,7 @@ mod tests {
             "android:roundIcon=\"@mipmap/ic_launcher_round\"",
             "android:name=\"android.app.NativeActivity\"",
             "android:screenOrientation=\"portrait\"",
-            "android:configChanges=\"mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|screenSize|smallestScreenSize|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender\"",
+            "android:configChanges=\"mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|screenSize|smallestScreenSize|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender|assetsPaths\"",
             "<meta-data android:name=\"android.app.lib_name\" android:value=\"app\"/>",
             "<action android:name=\"android.intent.action.MAIN\"/>",
             "<category android:name=\"android.intent.category.LAUNCHER\"/>",
@@ -372,8 +397,22 @@ mod tests {
     }
 
     #[test]
+    fn config_masks_name_their_changes() {
+        // wm_relaunch_resume_activity's mask when an overlay changes.
+        assert_eq!(config_names(0x8000_0000), vec!["assetsPaths"]);
+        assert_eq!(config_names(0x0280), vec!["uiMode", "orientation"]);
+        assert_eq!(config_names(0x2000_0004), vec!["locale", "0x20000000"]);
+        assert!(config_names(0).is_empty());
+        let mut bits: Vec<u32> = CONFIG_CHANGES.iter().map(|(_, _, bit)| *bit).collect();
+        bits.sort_unstable();
+        bits.dedup();
+        assert_eq!(bits.len(), CONFIG_CHANGES.len(), "one bit per name");
+    }
+
+    #[test]
     fn config_changes_follow_the_api_level() {
-        assert!(config_changes(36).ends_with("fontWeightAdjustment|grammaticalGender"));
+        assert!(config_changes(36).ends_with("fontWeightAdjustment|grammaticalGender|assetsPaths"));
+        assert!(config_changes(35).ends_with("fontWeightAdjustment|grammaticalGender"));
         assert!(!config_changes(33).contains("grammaticalGender"));
         assert!(config_changes(33).contains("fontWeightAdjustment"));
         assert!(!config_changes(30).contains("fontWeightAdjustment"));

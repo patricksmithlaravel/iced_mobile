@@ -293,8 +293,20 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     });
 
     let logs = collect_logs(ctx, &adb, &dir, &app_id, &mark, &pids);
+    let recreated = recreation(ctx, &adb, &dir, &project, &mark);
     if let Err(error) = &mut result {
         attach_evidence(error, &logs, &project);
+        if let Some(recreated) = &recreated {
+            // The relaunch is why the app never drew, or stopped answering.
+            error.likely_causes.insert(0, recreated.cause.clone());
+            if [CheckId::RunNotReady.id(), CheckId::RunAnr.id()].contains(&&*error.id) {
+                error.fix.summary = recreated.fix.clone();
+                error.fix.commands = recreated.commands.clone();
+                if let Some(evidence) = &recreated.evidence {
+                    error.evidence.insert(0, evidence.clone());
+                }
+            }
+        }
         ctx.rep.set(
             "process",
             json!({
@@ -463,10 +475,18 @@ struct Ready {
     pids: BTreeSet<u32>,
 }
 
+/// How long a relaunched activity gets to draw before the run gives up on
+/// it: iced freezes when Android recreates its activity (android-activity
+/// holds `onDestroy` until `android_main` returns, and winit 0.30 does not
+/// end its loop then), so the frame that never came will not come.
+const RELAUNCH_GRACE: Duration = Duration::from_secs(10);
+
 /// Waits for `ICM_EVENT ready` in logcat (the framework emits it after
 /// the first presented frame). An app that never speaks the protocol (no
 /// `start` event) is ready by probe: alive and the top resumed activity on
-/// three polls in a row. A death or panic fails at once.
+/// three polls in a row. A death or panic fails at once; so does an
+/// activity Android relaunched ([`RELAUNCH_GRACE`] later), which the probe
+/// cannot tell from a live one.
 fn wait_ready(
     ctx: &Ctx,
     adb: &Adb,
@@ -483,6 +503,7 @@ fn wait_ready(
     let mut start_seen = false;
     let mut probes = 0;
     let mut gone_polls = 0;
+    let mut relaunched: Option<Instant> = None;
 
     loop {
         if let Some(signal) = crate::signals::pending() {
@@ -542,7 +563,26 @@ fn wait_ready(
             pids.extend(alive);
         }
 
-        if !start_seen && !pids.is_empty() && launched.elapsed() >= Duration::from_secs(6) {
+        if relaunched.is_none() && !relaunches_since(adb, mark, app_id).is_empty() {
+            relaunched = Some(Instant::now());
+        }
+        if let Some(seen) = relaunched
+            && seen.elapsed() >= RELAUNCH_GRACE
+        {
+            return Err(IcmError::new(
+                CheckId::RunNotReady,
+                format!(
+                    "{app_id} is alive but sent no ICM_EVENT ready in the {} after Android relaunched its activity",
+                    crate::time::format_duration(seen.elapsed())
+                ),
+            ));
+        }
+
+        if !start_seen
+            && relaunched.is_none()
+            && !pids.is_empty()
+            && launched.elapsed() >= Duration::from_secs(6)
+        {
             if top_resumed(adb, app_id) {
                 probes += 1;
                 if probes >= 3 {
@@ -590,6 +630,37 @@ fn events_since(adb: &Adb, mark: &str) -> Vec<Record> {
     ]);
     adb::quick(cmd, Duration::from_secs(15))
         .map(|outcome| logcat::parse(&outcome.stdout_text()))
+        .unwrap_or_default()
+}
+
+/// The events buffer since `mark`, as logcat prints it (`tags` empty:
+/// every tag).
+fn events_buffer(adb: &Adb, mark: &str, tags: &[&str]) -> Option<String> {
+    let mut args: Vec<String> = [
+        "logcat",
+        "-d",
+        "-b",
+        "events",
+        "-v",
+        "threadtime,epoch",
+        "-T",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    args.push(mark.to_string());
+    if !tags.is_empty() {
+        args.push("-s".to_string());
+        args.extend(tags.iter().map(|tag| format!("{tag}:I")));
+    }
+    let outcome = adb::quick(adb.cmd(&args), Duration::from_secs(15))?;
+    outcome.success().then(|| outcome.stdout_text())
+}
+
+/// The relaunches of the app's activity since `mark`.
+fn relaunches_since(adb: &Adb, mark: &str, app_id: &str) -> Vec<logcat::Relaunch> {
+    events_buffer(adb, mark, logcat::RELAUNCH_TAGS)
+        .map(|text| logcat::relaunches(&logcat::parse(&text), app_id))
         .unwrap_or_default()
 }
 
@@ -816,8 +887,20 @@ fn query(adb: &Adb, mark: &str, buffers: &[&str]) -> Option<String> {
         "-T".into(),
         mark.to_string(),
     ]);
-    let outcome = adb::quick(adb.cmd(&args), Duration::from_secs(60))?;
-    outcome.success().then(|| outcome.stdout_text())
+    // Once in a while a dump fails while the next one, a moment later,
+    // does not (seen right after a launch); the logs are a failed run's
+    // evidence, so try twice.
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if let Some(outcome) = adb::quick(adb.cmd(&args), Duration::from_secs(60))
+            && outcome.success()
+        {
+            return Some(outcome.stdout_text());
+        }
+    }
+    None
 }
 
 /// Writes `logcat.txt` (raw), `logs.ndjson` and `app.log` (the app's
@@ -877,6 +960,138 @@ fn write_records(dir: &Path, selected: &[(String, Record)]) -> (Option<PathBuf>,
         std::fs::write(&logs, ndjson).ok().map(|()| logs),
         std::fs::write(&app_log, readable).ok().map(|()| app_log),
     )
+}
+
+/// What a relaunch of the app's activity means for the run.
+#[derive(Clone, Debug)]
+struct Recreated {
+    /// The likely cause, for a failed run.
+    cause: String,
+    /// What to do about it.
+    fix: String,
+    /// The commands that do it.
+    commands: Vec<String>,
+    /// The relaunch in `events.txt`.
+    evidence: Option<Evidence>,
+}
+
+/// `run.activity_recreated` (FAIL): Android relaunched the app's activity
+/// since the launch mark. Writes the events buffer since the mark to
+/// `events.txt` (design §10.4 step 12) and reports the first relaunch with
+/// the configuration changes that caused it ([`describe_recreation`]).
+fn recreation(
+    ctx: &Ctx,
+    adb: &Adb,
+    dir: &Path,
+    project: &Project,
+    mark: &str,
+) -> Option<Recreated> {
+    let text = events_buffer(adb, mark, &[])?;
+    let path = dir.join("events.txt");
+    if std::fs::write(&path, &text).is_ok() {
+        ctx.rep.artifact("events", &path);
+    }
+    let config = &project.config.config;
+    let found = logcat::relaunches(&logcat::parse(&text), &config.app.id);
+    let first = found.first()?;
+    let (detail, recreated) = describe_recreation(
+        &found,
+        mark.parse().unwrap_or(0.0),
+        config.android.target_sdk,
+    )?;
+    let line = text
+        .lines()
+        .position(|line| line.contains(&first.record.ts) && line.contains(&first.record.tag))
+        .map_or(1, |index| index as u32 + 1);
+    let evidence = Evidence::line(&path, line, first.record.line());
+    let commands: Vec<&str> = recreated.commands.iter().map(String::as_str).collect();
+    ctx.rep.check(
+        Check::fail(CheckId::RunActivityRecreated, detail)
+            .evidence(evidence.clone())
+            .fix(recreated.fix.clone(), &commands),
+    );
+    Some(Recreated {
+        evidence: Some(evidence),
+        ..recreated
+    })
+}
+
+/// The `run.activity_recreated` detail and what it means, for the
+/// relaunches found since `mark` (epoch seconds), naming the changes as
+/// `android:configChanges` does and comparing them with the manifest this
+/// icm generates for `target_sdk`.
+fn describe_recreation(
+    found: &[logcat::Relaunch],
+    mark: f64,
+    target_sdk: u32,
+) -> Option<(String, Recreated)> {
+    let first = found.first()?;
+    let after = crate::time::format_duration(Duration::from_secs_f64(
+        (first.record.seconds() - mark).max(0.0),
+    ));
+    let generated = super::manifest::config_changes(target_sdk);
+    let generated: Vec<&str> = generated.split('|').collect();
+    let names = first
+        .mask
+        .map(super::manifest::config_names)
+        .unwrap_or_default();
+    let unlisted: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !generated.contains(name))
+        .collect();
+
+    let (why, fix) = match unlisted.as_slice() {
+        [] if names.is_empty() => (
+            "the event log does not name the change".to_string(),
+            "Rerun; if the relaunch repeats, report it with events.txt.",
+        ),
+        [] => (
+            format!(
+                "the installed APK's android:configChanges lacks {}, which the manifest this icm generates lists, so an earlier icm built it (or `--no-build` reused it)",
+                names.join("|")
+            ),
+            "Rebuild and reinstall the APK: run without --no-build.",
+        ),
+        ["assetsPaths"] => (
+            format!(
+                "a runtime resource overlay changed (assetsPaths; SystemUI applies its theme palette during an emulator's first boots), and android:configChanges can name assetsPaths only from [android] target_sdk = 36 (this app has {target_sdk})"
+            ),
+            "Raise [android] target_sdk to 36 in icm.toml, or rerun once the emulator has settled (its overlays change only on its first boots).",
+        ),
+        unlisted => (
+            format!(
+                "a configuration change android:configChanges does not list for target_sdk {target_sdk} ({})",
+                unlisted.join("|")
+            ),
+            "Rerun; if the relaunch repeats, report it with events.txt (icm's manifest should list the change).",
+        ),
+    };
+
+    let mut detail = format!(
+        "Android relaunched {} {after} after launch ({})",
+        first.component,
+        if names.is_empty() {
+            "no change named".to_string()
+        } else {
+            names.join("|")
+        }
+    );
+    if found.len() > 1 {
+        detail.push_str(&format!(", {} relaunches", found.len()));
+    }
+    detail.push_str(&format!(
+        ": {why}. An iced app freezes when its activity is recreated"
+    ));
+    let recreated = Recreated {
+        cause: format!(
+            "Android relaunched the activity {after} after launch, and an iced app freezes when its activity is recreated (it stops drawing and answering input): {why} (run.activity_recreated)"
+        ),
+        fix: fix.to_string(),
+        commands: vec!["icm run android".to_string()],
+        evidence: None,
+    };
+    Some((detail, recreated))
 }
 
 /// Adds the logs, a panic's location and the failure signatures to a run
@@ -1510,4 +1725,66 @@ pub fn devices(ctx: &mut Ctx) -> Result<()> {
     ctx.rep.set("default_avd", json!(default));
     ctx.rep.content(lines);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn relaunch(at: &str, mask: Option<u32>) -> logcat::Relaunch {
+        logcat::Relaunch {
+            record: logcat::parse_line(&format!(
+                "{at}   660   683 I wm_relaunch_resume_activity: [0,1,8,com.example.app/android.app.NativeActivity,{}]",
+                mask.map(|m| format!("{m:x}")).unwrap_or_default()
+            ))
+            .unwrap(),
+            component: "com.example.app/android.app.NativeActivity".to_string(),
+            mask,
+        }
+    }
+
+    #[test]
+    fn recreations_name_their_cause() {
+        assert!(describe_recreation(&[], 0.0, 36).is_none());
+
+        // The fresh-emulator case: SystemUI's overlays, with a manifest
+        // linked below API 36, which cannot list assetsPaths.
+        let overlays = [relaunch("100.400", Some(0x8000_0000))];
+        let (detail, recreated) = describe_recreation(&overlays, 100.0, 35).unwrap();
+        assert!(
+            detail.starts_with(
+                "Android relaunched com.example.app/android.app.NativeActivity 400ms after launch (assetsPaths)"
+            ),
+            "{detail}"
+        );
+        assert!(recreated.cause.contains("runtime resource overlay"));
+        assert!(recreated.cause.ends_with("(run.activity_recreated)"));
+        assert!(recreated.fix.contains("target_sdk to 36"));
+
+        // From API 36 icm's manifest lists it: the installed APK is older.
+        let (_, stale) = describe_recreation(&overlays, 100.0, 36).unwrap();
+        assert!(
+            stale.cause.contains("an earlier icm built it"),
+            "{}",
+            stale.cause
+        );
+        assert!(stale.fix.contains("without --no-build"));
+
+        // A change no configChanges name covers, twice.
+        let unknown = [
+            relaunch("101.5", Some(0x0100_0000)),
+            relaunch("102", Some(0x0100_0000)),
+        ];
+        let (detail, recreated) = describe_recreation(&unknown, 100.0, 36).unwrap();
+        assert!(detail.contains("(0x1000000), 2 relaunches"), "{detail}");
+        assert!(
+            recreated
+                .cause
+                .contains("does not list for target_sdk 36 (0x1000000)")
+        );
+
+        // Older releases log no mask.
+        let (detail, _) = describe_recreation(&[relaunch("100", None)], 100.0, 36).unwrap();
+        assert!(detail.contains("(no change named)"), "{detail}");
+    }
 }

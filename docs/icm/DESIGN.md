@@ -988,7 +988,7 @@ Each key must be allowed by the profile's `Entitlements`, with wildcards resolve
       android:enableOnBackInvokedCallback="false" android:theme="@style/IcmTheme">
     <activity android:name="android.app.NativeActivity" android:exported="true" android:launchMode="singleTask"
         android:windowSoftInputMode="adjustResize|stateHidden"
-        android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|screenSize|smallestScreenSize|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender">
+        android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|screenSize|smallestScreenSize|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender|assetsPaths">
       <meta-data android:name="android.app.lib_name" android:value="app"/>
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>
@@ -998,7 +998,7 @@ Each key must be allowed by the profile's `Entitlements`, with wildcards resolve
   </application>
 </manifest>
 ```
-- The configChanges list is the review §6.6 list: Tawara's values plus `mcc|mnc|grammaticalGender`. It is policy data keyed by API level.
+- The configChanges list is the review §6.6 list: Tawara's values plus `mcc|mnc|grammaticalGender`, and `assetsPaths` from API 36 (Appendix D, Android). It is policy data keyed by API level.
 - Generated resources:
   - `values/themes.xml`: `IcmTheme`, parent `@android:style/Theme.Material.NoActionBar`, with `windowBackground` set from `background`
   - legacy `mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher.png` and `ic_launcher_round.png`, 48 to 192 px
@@ -1615,7 +1615,7 @@ If no event arrives, icm uses platform probes and reports `ready.source = "probe
 | `No Unix display server backend` | framework floor not met |
 | `dlopen failed: library "lib…so" not found` | `android.manifest.lib_name` |
 | `INSTALL_FAILED_UPDATE_INCOMPATIBLE` / `INSTALL_FAILED_NO_MATCHING_ABIS` | signature changed (`--reinstall --yes`); ABI not built |
-| `ANR in <id>` / `am_destroy_activity` | blocked main thread or recreation |
+| `ANR in <id>` / `am_destroy_activity` / `wm_relaunch_resume_activity` | blocked main thread or recreation (`run.activity_recreated`) |
 | `panicked at <file>:<line>` | panic at that location (`run.app_panicked`) |
 | `Failed to find an appropriate adapter` / surface creation errors | GPU: retry with `--env ICED_BACKEND=tiny-skia` (Android: sysprop `debug.iced.backend`, framework F3) |
 | `CODESIGNING` termination / missing provisioning profile | exit 9 signing |
@@ -2387,6 +2387,7 @@ These record where the code (`cli/`, with its tests) settles something the secti
 - The debug keystore is `<host.toml dir>/android/debug.keystore` (`~/.config/icm/android/debug.keystore`; PKCS12, alias `androiddebugkey`, password `android`), created once with keytool. `~/.android/debug.keystore` is never touched.
 - Install is `adb install -r -d`; `--reinstall` uninstalls keeping data (`pm uninstall -k`), `--reinstall --wipe-data` wipes it. Every run sets `debug.icm.events 1` and sets `debug.iced.backend` from `--env ICED_BACKEND=…` or clears it; other `--env` keys are a WARN (apps get no environment). `--from-aab` is `usage.not_implemented` until releases.
 - Ready: `logcat -d -v threadtime,epoch -T <mark> -s ICM_EVENT:I` every 0.5 s; a `panic` event is `run.app_panicked`; without a `start` event after 6 s, three polls with the app alive and the top resumed activity are `ready.source = "probe"`. A failed run still writes `logcat.txt`, `logs.ndjson` and `app.log` and attaches the panic line, an `ANR in` (`run.anr`) and the §13.4 signatures.
+- Recreation (A3): every run writes the events buffer since the mark to `events.txt`. A `wm_relaunch_resume_activity`/`wm_relaunch_activity` (`am_*` before API 29) of the app's activity is FAIL `run.activity_recreated` (exit 1 when nothing else fails), with the change mask named as `configChanges` names it and compared with the manifest icm generates (`assetsPaths` below target_sdk 36, a stale APK, or an unlisted change). The wait polls for it too: the probe stops counting, and 10 s after a relaunch without `ICM_EVENT ready` the run fails `run.not_ready` at once, its likely cause, fix and first evidence the relaunch's, since iced freezes once Android recreates its activity. Measured on a fresh android-36 emulator: SystemUI applies its theme overlays (`com.android.systemui-*.frro`) during the first boots, and Android relaunches every activity whose `configChanges` lacks `assetsPaths` (`wm_relaunch_resume_activity … 80000000`); a launch that met it froze. The manifest lists `assetsPaths` from API 36 (aapt2 knows the name from that android.jar); with it the same overlay change mid-launch leaves the app running (`settings put secure theme_customization_overlay_packages …` reproduces it).
 - `logs` re-queries `logcat -d` (main, system, crash) from the session's mark or `--since <dur>`; `--grep` is a substring match. `input` uses the last screenshot's geometry from `sessions/android.json` (schema `icm.session.android/1`; the app's device pid is `app_pid`), else `dumpsys window displays` (`cur=`) and `wm density`; `text` is printable ASCII.
 - New ids: `android.emulator.failed` and `android.launch_failed` (both exit 7). `doctor android` is the generic doctor (item 18): it reports and fixes the SDK pieces (`--fix --yes` runs `sdkmanager --install` only when the licences are already accepted) and creates the managed AVD from the installed image `run` would pick (google_apis first).
 - The CLI depends on `png` for previews, blank detection and launcher icons.

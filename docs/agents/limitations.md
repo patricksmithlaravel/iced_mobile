@@ -64,7 +64,9 @@ this file in the commit that fixes or finds a limitation.
   while the process lives on (predictive Back, a configuration change
   missing from `configChanges`, the "Don't keep activities" developer
   option) freezes the app, and the next launch hangs until the process is
-  killed. icm's generated manifest lists every `configChanges` value and,
+  killed. icm's generated manifest lists every `configChanges` value
+  (with `assetsPaths` from target_sdk 36: an emulator's theme overlays
+  change during its first boots) and,
   with `[android] back = "key"`, turns predictive Back off: Back then
   reaches the app as `Key::Named(Named::BrowserBack)` and never closes it.
   Handle that key for in-app navigation, never remove a `configChanges`

@@ -217,6 +217,54 @@ pub fn panic_of(records: &[Record], pids: &BTreeSet<u32>) -> Option<(String, Opt
         })
 }
 
+/// The events-buffer tags Android writes when it relaunches an activity
+/// (destroys it and creates it again): `wm_*` from API 29, `am_*` before.
+pub const RELAUNCH_TAGS: &[&str] = &[
+    "wm_relaunch_resume_activity",
+    "wm_relaunch_activity",
+    "am_relaunch_resume_activity",
+    "am_relaunch_activity",
+];
+
+/// One relaunch of the app's activity, from the events buffer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Relaunch {
+    /// The record (`wm_relaunch_resume_activity: [0,175822296,8,<component>,80000000]`).
+    pub record: Record,
+    /// The activity (`com.example.app/android.app.NativeActivity`).
+    pub component: String,
+    /// The configuration changes that caused it (`ActivityInfo.CONFIG_*`
+    /// bits); the `am_*` events of older releases carry none.
+    pub mask: Option<u32>,
+}
+
+/// The relaunches of `app_id`'s activities in events-buffer records.
+pub fn relaunches(records: &[Record], app_id: &str) -> Vec<Relaunch> {
+    let prefix = format!("{app_id}/");
+    records
+        .iter()
+        .filter(|record| RELAUNCH_TAGS.contains(&record.tag.as_str()))
+        .filter_map(|record| {
+            let fields: Vec<&str> = record
+                .msg
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .map(str::trim)
+                .collect();
+            let at = fields.iter().position(|f| f.starts_with(&prefix))?;
+            Some(Relaunch {
+                record: record.clone(),
+                component: fields[at].to_string(),
+                mask: fields
+                    .get(at + 1)
+                    .and_then(|mask| u32::from_str_radix(mask, 16).ok()),
+            })
+        })
+        .collect()
+}
+
 /// Known failure signatures in the app's logs (design §13.4), as
 /// `likely_causes`.
 pub fn likely_causes(records: &[Record], lib: &str) -> Vec<String> {
@@ -341,6 +389,30 @@ mod tests {
             "1.0 9 9 E AndroidRuntime: java.lang.IllegalArgumentException: Unable to load native library: dlopen failed: library \"libapp.so\" not found",
         );
         assert!(likely_causes(&dlopen, "app")[0].contains("lib_name"));
+    }
+
+    #[test]
+    fn finds_relaunches_of_the_app() {
+        // `logcat -b events -v threadtime,epoch` on a fresh android-36
+        // emulator while SystemUI applied its theme overlays.
+        let events = parse(
+            "1791342497.682   660   683 I wm_relaunch_resume_activity: [0,175822296,8,com.example.demo/android.app.NativeActivity,80000000]
+1791342497.688   660  1033 I wm_relaunch_activity: [0,161146439,6,com.google.android.apps.nexuslauncher/.NexusLauncherActivity,80000000]
+1791342497.766  2634  2634 I wm_on_stop_called: [175822296,android.app.NativeActivity,handleRelaunchActivity,0]
+1791342400.000   500   510 I am_relaunch_activity: [0,123,9,com.example.demo/android.app.NativeActivity]
+",
+        );
+        let found = relaunches(&events, "com.example.demo");
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            found[0].component,
+            "com.example.demo/android.app.NativeActivity"
+        );
+        assert_eq!(found[0].mask, Some(0x8000_0000));
+        assert_eq!(found[0].record.tag, "wm_relaunch_resume_activity");
+        assert_eq!(found[1].mask, None);
+        assert!(relaunches(&events, "com.example.demo2").is_empty());
+        assert!(relaunches(&events, "com.example").is_empty());
     }
 
     #[test]

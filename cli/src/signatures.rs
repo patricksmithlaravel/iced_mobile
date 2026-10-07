@@ -142,8 +142,14 @@ pub const SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "android.activity_destroyed",
-        patterns: &[&["am_destroy_activity"], &["am_relaunch_activity"]],
-        cause: "Android destroyed or relaunched the Activity: a configuration change it does not handle, or Back finishing it. Keep the full android:configChanges list and [android] back = \"key\" (run.activity_recreated).",
+        patterns: &[
+            &["am_destroy_activity"],
+            &["am_relaunch_activity"],
+            &["am_relaunch_resume_activity"],
+            &["wm_relaunch_activity"],
+            &["wm_relaunch_resume_activity"],
+        ],
+        cause: "Android destroyed or relaunched the Activity: a configuration change it does not handle (a resource overlay change is assetsPaths), or Back finishing it. Keep the full android:configChanges list and [android] back = \"key\" (run.activity_recreated).",
         per_platform: &[],
         related: Some(CheckId::RunActivityRecreated),
     },
