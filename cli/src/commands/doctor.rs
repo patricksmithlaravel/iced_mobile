@@ -200,6 +200,10 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
         .iter()
         .filter(|e| matches!(e.fix.by, By::Doctor | By::DoctorYes))
         .count();
+    let needs_yes_count = remaining
+        .iter()
+        .filter(|e| e.fix.by == By::DoctorYes)
+        .count();
     let owner = remaining.iter().filter(|e| e.fix.by == By::Owner).count();
 
     if fixable > 0 {
@@ -226,10 +230,24 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
                 format!(" ({} fix(es) applied)", fixed.len())
             }
         ),
-        (n, f, o) => format!(
-            "{names}: {n} problem(s): {f} for `icm doctor --fix`, {o} for the owner, {} for the agent",
-            n - f - o
-        ),
+        (n, f, o) => {
+            // `--fix` alone repairs the doctor items; the doctor-yes ones
+            // (downloads, installs) need `--fix --yes`.
+            let mut parts = Vec::new();
+            if f > needs_yes_count {
+                parts.push(format!("{} for `icm doctor --fix`", f - needs_yes_count));
+            }
+            if needs_yes_count > 0 {
+                parts.push(format!("{needs_yes_count} for `icm doctor --fix --yes`"));
+            }
+            if o > 0 {
+                parts.push(format!("{o} for the owner"));
+            }
+            if n - f - o > 0 {
+                parts.push(format!("{} for the agent", n - f - o));
+            }
+            format!("{names}: {n} problem(s): {}", parts.join(", "))
+        }
     });
 
     // Config problems keep their own exit (3) unless a machine problem
