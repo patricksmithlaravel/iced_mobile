@@ -49,9 +49,19 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     };
 
     let mut stopped: Vec<Value> = Vec::new();
+    let mut shut_down: Vec<String> = Vec::new();
     for platform in &platforms {
         match stop_platform(ctx, &project, &host, *platform, args.shutdown) {
-            Ok(entries) => stopped.extend(entries),
+            Ok(entries) => {
+                for entry in entries {
+                    // Android reports the emulators it shut down alongside
+                    // the app it stopped.
+                    match entry.get("emulator").and_then(Value::as_str) {
+                        Some(serial) => shut_down.push(serial.to_string()),
+                        None => stopped.push(entry),
+                    }
+                }
+            }
             // Cleanup goes on: one platform's failure is a WARN.
             Err(error) => ctx.rep.check(Check::from_error(error, Status::Warn)),
         }
@@ -83,7 +93,6 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         }
     }
 
-    let mut shut_down: Vec<String> = Vec::new();
     if args.shutdown {
         for platform in &platforms {
             shut_down.extend(shutdown_managed(ctx, &project, &host, *platform));
