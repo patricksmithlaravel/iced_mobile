@@ -132,20 +132,32 @@
 //!
 //! - The manifest's `android.app.lib_name` meta-data must be the library's
 //!   name (`myapp` for `libmyapp.so`), or Android finds no `android_main`.
-//! - Give the activity the full `android:configChanges` list:
+//! - Give the activity `android:launchMode="singleTask"`. iced runs one
+//!   Activity at a time, and the process ends if Android starts a second
+//!   one beside it (into another task, from another app or a
+//!   notification); with `singleTask`, Android hands such a launch to the
+//!   running Activity instead.
+//! - Give the activity the full `android:configChanges` list, so that the
+//!   application keeps its state:
 //!   `mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density|layoutDirection|colorMode|grammaticalGender|fontScale|fontWeightAdjustment`,
 //!   and `assetsPaths` when the manifest is linked against API 36 or later
-//!   (older android.jar files do not know the name). Without it Android
-//!   destroys and recreates the activity on rotation, a dark-mode switch, a
-//!   change of resource overlays (SystemUI applies its theme overlays during
-//!   an emulator's first boots) and the like, which freezes the app (see the
-//!   known limitations below).
-//! - Keep Back from finishing the activity, for the same reason: set
-//!   `android:enableOnBackInvokedCallback="false"` on the `<application>`.
+//!   (older android.jar files do not know the name). With it, rotation, a
+//!   dark-mode switch, a new font scale, a change of resource overlays
+//!   (SystemUI applies its theme overlays during an emulator's first boots)
+//!   and the like leave the Activity in place (a rotation arrives as a
+//!   resize). Without it, Android destroys the Activity for each of them and
+//!   starts a new one, and the application starts over ([Activity
+//!   destruction](#android-activity-destruction)).
+//! - Back: with targetSdk 36, Android handles Back itself (predictive back)
+//!   and finishes the Activity, and the application ends with it; the next
+//!   launch starts it over. To handle Back in the application instead
+//!   (going back a screen, say), set
+//!   `android:enableOnBackInvokedCallback="false"` on the `<application>`:
 //!   Back then reaches the app as a key press,
-//!   `Key::Named(Named::BrowserBack)`, and nothing else happens. To leave on
-//!   Back at the app's root, as Android does for a launcher's activity, call
-//!   `Activity.moveTaskToBack(true)` through JNI.
+//!   `Key::Named(Named::BrowserBack)`, and nothing else happens, as with a
+//!   lower targetSdk. To leave the screen on Back at the app's root and keep
+//!   the application's state, call `Activity.moveTaskToBack(true)` through
+//!   JNI.
 //! - `cargo check --target aarch64-linux-android` needs no NDK with
 //!   `NativeActivity`; `cargo build` and `cargo rustc` need the NDK's linker.
 //! - For a GameActivity, turn on `android-game-activity`, set
@@ -194,7 +206,10 @@
 //!
 //! - Android: `adb logcat -s iced` (stdout and stderr are under
 //!   `RustStdoutStderr`). For `debug!` records, run `adb shell setprop
-//!   log.tag.iced DEBUG` and start the app again (`VERBOSE` for `trace!`).
+//!   log.tag.iced DEBUG` (`VERBOSE` for `trace!`), then end the process
+//!   (`adb shell am force-stop <package>`) and start the app again: the
+//!   level is read once per process, and a new Activity may run in the old
+//!   one.
 //! - iOS: `xcrun simctl spawn booted log stream --level info --predicate
 //!   'subsystem == "iced"'`. Records up to `info!` pass; launch with
 //!   `SIMCTL_CHILD_RUST_LOG=debug` for `debug!`, which the unified log shows
@@ -226,23 +241,57 @@
 //! away. On the web it fires when the page goes into the back-forward cache.
 //! The desktop never sends it. [`Lifecycle`] has the full table.
 //!
+//! # Android: Activity destruction
+//!
+//! Android destroys the Activity on Back (see [Android](#android)), for a
+//! configuration change the manifest does not list, with the developer
+//! option "Don't keep activities", or to reclaim memory while the app is
+//! in the background. The process often lives on, and the next Activity
+//! runs in it. iced follows the Activity:
+//!
+//! 1. [`Lifecycle::Suspended`] has come first, when the window went away
+//!    (just before, or when the app left the screen).
+//! 2. The event loop ends, and the application is dropped: its state, its
+//!    windows, its renderer and its executor, with the futures and
+//!    subscriptions still running on it. The function that runs it returns
+//!    `Ok(())`, and `mobile::activity_destroyed` says why.
+//! 3. `android_main` returns, as the Activity's `onDestroy` waits for it.
+//! 4. The next Activity calls `android_main` again, on a thread of its own,
+//!    and a new application starts, from its boot function.
+//!
+//! Whatever the application keeps in memory is lost: save what must outlive
+//! the Activity on [`Lifecycle::Suspended`], which always comes before.
+//! What belongs to the process stays: the logger, the panic hook, the
+//! [`on_lifecycle`] hook (setting the same one again does nothing), the
+//! fonts loaded so far, and the application's own statics. A static that
+//! keeps an `AndroidApp` (for JNI, say) must take each Activity's new one:
+//! a `OnceLock` would keep the first, whose Activity is gone.
+//!
+//! [`android_main!`](crate::android_main) does steps 3 and 4 for you. The
+//! process ends instead after a panic, and when the application stops on
+//! its own while its Activity is still on screen.
+//!
+//! Launching the app again a moment after Back, before Android has destroyed
+//! the Activity it finished, starts a second Activity while the first one
+//! still runs. android-activity 0.6.0 aborts the process then; with 0.6.1,
+//! iced cannot build the second event loop and the process ends. Android
+//! then starts the new Activity in a new process, or the next launch does.
+//!
 //! # Known limitations
 //!
 //! - **Exiting.** `iced::exit` and closing the last window are ignored on
 //!   Android and iOS, with a warning in the log: the system ends a mobile
-//!   app. On iOS a window being opened can replace the last one: open the
-//!   new window before closing the old one.
+//!   app. On Android, finish the Activity through JNI (`Activity.finish`)
+//!   to leave: the application ends as when Android destroys it. On iOS a
+//!   window being opened can replace the last one: open the new window
+//!   before closing the old one.
 //! - **One window on Android.** Android gives an app one native window, so
 //!   a second `window::open` is refused with an error in the log, and its
 //!   task ends without an id.
-//! - **Android activity destruction.** android-activity holds the
-//!   activity's `onDestroy` until `android_main` returns, and winit 0.30 does
-//!   not end its event loop then (rust-windowing/winit#4739). So whatever
-//!   destroys the activity while the process lives on (Back with predictive
-//!   back, which targetSdk 36 turns on; a configuration change missing from
-//!   `configChanges`; "Don't keep activities") freezes the app, and the next
-//!   launch hangs until the process is killed. The manifest settings above
-//!   avoid the common causes.
+//! - **Android activity destruction** ends the application, which starts
+//!   over in the next Activity ([Activity
+//!   destruction](#android-activity-destruction)). The manifest settings
+//!   above avoid the common causes but Back.
 //! - **Android emulator without a GPU.** Its default headless GPU mode offers
 //!   llvmpipe (lavapipe), which cannot run iced's wgpu shaders, so iced
 //!   draws with tiny-skia on the CPU there. Boot the emulator with
@@ -265,11 +314,18 @@ pub use crate::shell::{Lifecycle, on_lifecycle};
 pub use crate::shell::winit::platform::android::activity::AndroidApp;
 
 /// Hands the `AndroidApp` that `android_main` receives to the shell; it must
-/// be called before the application runs. [`android_main!`](crate::android_main)
-/// does it for you.
+/// be called before the application runs, each time `android_main` runs.
+/// [`android_main!`](crate::android_main) does it for you.
 #[cfg(target_os = "android")]
 #[cfg_attr(docsrs, doc(cfg(target_os = "android")))]
 pub use crate::shell::set_android_app;
+
+/// Whether the application that last ran on this thread ended because
+/// Android destroyed its Activity: `android_main` must then return.
+/// [`android_main!`](crate::android_main) acts on it for you.
+#[cfg(target_os = "android")]
+#[cfg_attr(docsrs, doc(cfg(target_os = "android")))]
+pub use crate::shell::activity_destroyed;
 
 /// The Android activity handle that android-activity gives `android_main`:
 /// winit's `platform::android::activity::AndroidApp`, re-exported.
@@ -281,14 +337,26 @@ pub use crate::shell::set_android_app;
 pub struct AndroidApp(());
 
 /// Hands the `AndroidApp` that `android_main` receives to the shell; it must
-/// be called before the application runs. [`android_main!`](crate::android_main)
-/// does it for you.
+/// be called before the application runs, each time `android_main` runs.
+/// [`android_main!`](crate::android_main) does it for you.
 ///
 /// It exists only on Android; this stands in for it in documentation built
 /// for other targets.
 #[cfg(all(docsrs, not(target_os = "android")))]
 #[doc(cfg(target_os = "android"))]
 pub fn set_android_app(_app: AndroidApp) {}
+
+/// Whether the application that last ran on this thread ended because
+/// Android destroyed its Activity: `android_main` must then return.
+/// [`android_main!`](crate::android_main) acts on it for you.
+///
+/// It exists only on Android; this stands in for it in documentation built
+/// for other targets.
+#[cfg(all(docsrs, not(target_os = "android")))]
+#[doc(cfg(target_os = "android"))]
+pub fn activity_destroyed() -> bool {
+    false
+}
 
 /// Installs the platform's logger for the `log` crate, so that iced's
 /// messages and your own `log` calls can be read, and a panic hook that logs
@@ -328,10 +396,12 @@ pub fn set_android_app(_app: AndroidApp) {}
 /// - Web: the same directives in the page's `rust_log` query parameter
 ///   (`index.html?rust_log=debug`).
 ///
-/// The level is only the starting point: the application can raise or lower
-/// it later with `log::set_max_level`. On the desktop and the web, raising
-/// it above every level the directives give lets every record up to it
-/// through.
+/// The level is read once, when the logger is installed, and is only the
+/// starting point: the application can raise or lower it later with
+/// `log::set_max_level`. On the desktop and the web, raising it above every
+/// level the directives give lets every record up to it through. On
+/// Android, a new Activity may run in the process of the last one, whose
+/// logger and level it keeps.
 ///
 /// The panic hook logs each panic, with its thread and location, through
 /// `log::error!`, then runs the hook that was in place, which writes it to
@@ -575,16 +645,26 @@ fn log_panics() {
 ///    iced`), and panics to stderr (`RustStdoutStderr`) as well;
 /// 2. hands its `AndroidApp` to the shell with `mobile::set_android_app`;
 /// 3. calls your function, catching a panic, and logs how it ended;
-/// 4. ends the process with `std::process::exit`: status 0 when your
-///    function returned `Ok`, 1 when it returned an error or panicked.
+/// 4. returns if the Activity was destroyed, and otherwise ends the process
+///    with `std::process::exit`: status 0 when your function returned `Ok`,
+///    1 when it returned an error or panicked.
 ///
-/// Step 4 is needed because winit allows one event loop per process, and
-/// Android usually keeps the process alive once `android_main` returns: the
-/// next launch would run `android_main` again in it and fail to create the
-/// event loop, launch after launch, until the process is killed. On Android
-/// your function returns only when the application cannot go on (no usable
-/// graphics backend, for example), since `iced::exit` and closing the last
-/// window are ignored there.
+/// Android calls `android_main` once per Activity, on a thread of its own,
+/// and may call it again in the same process when it starts a new Activity
+/// (after Back, or for a configuration change the manifest does not list).
+/// When Android destroys the Activity, the event loop ends, the application
+/// is dropped, and your function returns `Ok`. `android_main` returns then,
+/// as the Activity's `onDestroy` waits for it, and the next Activity's
+/// `android_main` runs your function again: a new application, from its
+/// boot function, in the same process. See [the module
+/// documentation](crate::mobile#android-activity-destruction).
+///
+/// Otherwise your function returned while its Activity is still on screen:
+/// the application could not go on (no usable graphics backend, for
+/// example), since `iced::exit` and closing the last window are ignored on
+/// Android, or your function did not run it. The process ends then, as it
+/// does after a panic, which may have left process-wide state (locks, the
+/// font system) half-updated for the next Activity.
 ///
 /// To install a logger of your own (another tag, a filter, a `tracing`
 /// bridge), write `iced::android_main!(run, logger = false)`: step 1 then
@@ -655,7 +735,7 @@ pub fn __android_main(
     app: AndroidApp,
     run: fn() -> crate::Result,
     logger: bool,
-) -> ! {
+) {
     if logger {
         init_logger();
     } else {
@@ -664,26 +744,44 @@ pub fn __android_main(
 
     set_android_app(app);
 
-    // winit allows one event loop per process, and Android usually keeps the
-    // process alive after `android_main` returns: the next launch would run
-    // `android_main` again in it and fail to build an event loop
-    // (RecreationAttempt), launch after launch. Ending the process gives the
-    // next launch a fresh one. A panic is caught for the same reason; the
-    // hook has logged it.
-    let code = match std::panic::catch_unwind(run) {
-        Ok(Ok(())) => {
+    // The hook has logged the panic. It may have left process-wide state
+    // (a poisoned lock, a half-updated font system) to the next Activity,
+    // so the process ends.
+    let Ok(result) = std::panic::catch_unwind(run) else {
+        log::error!("the application panicked; ending the process");
+        std::process::exit(1);
+    };
+
+    // The Activity's `onDestroy` waits for `android_main` to return, and the
+    // next Activity runs `android_main` again, in this process.
+    if activity_destroyed() {
+        if let Err(error) = result {
+            log::error!(
+                "the application stopped with an error: {error} ({error:?})"
+            );
+        }
+
+        log::info!(
+            "the Activity was destroyed; android_main returns, and the next \
+            Activity starts the application again"
+        );
+
+        return;
+    }
+
+    // The Activity is still on screen. android-activity would finish it once
+    // `android_main` returns, but with android-activity 0.6.0 its `onPause`
+    // then waits for this thread forever, and the app stops responding.
+    let code = match result {
+        Ok(()) => {
             log::info!("the application stopped; ending the process");
             0
         }
-        Ok(Err(error)) => {
+        Err(error) => {
             log::error!(
                 "the application stopped with an error: {error} ({error:?}); \
                 ending the process"
             );
-            1
-        }
-        Err(_panic) => {
-            log::error!("the application panicked; ending the process");
             1
         }
     };
