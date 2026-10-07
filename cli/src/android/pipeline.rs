@@ -1876,6 +1876,25 @@ pub fn app_state(ctx: &mut Ctx, project: &Project) -> crate::session::AppState {
 
 /// `icm devices android`: online devices and the AVDs.
 pub fn devices(ctx: &mut Ctx) -> Result<()> {
+    let (lines, listing) = device_listing(ctx)?;
+    for key in ["devices", "avds", "default_avd"] {
+        ctx.rep.set(key, listing[key].clone());
+    }
+    ctx.rep.summary(format!(
+        "android: {} device(s) online, {} AVD(s)",
+        listing["devices"].as_array().map_or(0, |devices| devices
+            .iter()
+            .filter(|d| d["state"] == "device")
+            .count()),
+        listing["avds"].as_array().map_or(0, Vec::len)
+    ));
+    ctx.rep.content(lines);
+    Ok(())
+}
+
+/// The devices adb lists and the AVDs, as text lines and as
+/// `{devices, avds, default_avd}` (`icm devices [android]`).
+pub fn device_listing(ctx: &mut Ctx) -> Result<(String, Value)> {
     let host = ctx.host()?.clone();
     let tools = Toolset::discover(&host, &ctx.env)?;
     let target_sdk = ctx
@@ -1944,11 +1963,10 @@ pub fn devices(ctx: &mut Ctx) -> Result<()> {
         })
         .collect();
 
-    ctx.rep.set("devices", Value::Array(devices));
-    ctx.rep.set("avds", Value::Array(avds));
-    ctx.rep.set("default_avd", json!(default));
-    ctx.rep.content(lines);
-    Ok(())
+    Ok((
+        lines,
+        json!({"devices": devices, "avds": avds, "default_avd": default}),
+    ))
 }
 
 #[cfg(test)]

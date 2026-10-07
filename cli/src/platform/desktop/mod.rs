@@ -417,7 +417,8 @@ fn quick(program: &str, args: &[&str]) -> Option<String> {
 }
 
 /// The result's `device`.
-fn device_json() -> Value {
+/// This machine, as the desktop's `device` (`icm devices desktop` too).
+pub fn device_json() -> Value {
     let os = if cfg!(target_os = "macos") {
         format!(
             "macOS {}",

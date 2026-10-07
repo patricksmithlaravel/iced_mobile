@@ -4,6 +4,7 @@
 pub mod build;
 pub mod check;
 pub mod detach;
+pub mod devices;
 pub mod doctor;
 pub mod explain;
 pub mod headless;
@@ -142,7 +143,7 @@ fn route(ctx: &mut Ctx, command: Command) -> Result<()> {
         Command::Run(_) => not_implemented("run"),
         Command::Stop(args) => stop::stop(ctx, &args),
         Command::Ps => stop::ps(ctx),
-        Command::Devices(_) => not_implemented("devices"),
+        Command::Devices(args) => devices::run(ctx, &args),
         Command::Shot(args) if args.headless => headless::shot(ctx, &args),
         Command::Shot(_) => not_implemented("shot"),
         Command::Logs(_) => not_implemented("logs"),

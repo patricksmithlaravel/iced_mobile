@@ -218,6 +218,27 @@ fn unimplemented_commands_say_so() {
 }
 
 #[test]
+fn devices_lists_the_desktop_and_refuses_ios_devices() {
+    let sandbox = Sandbox::new();
+    let desktop = result(&sandbox.run(&["devices", "desktop", "--json", "-q"]));
+    assert_eq!(desktop["exit"], 0, "{desktop}");
+    assert_eq!(
+        desktop["platforms"]["desktop"]["devices"][0]["kind"],
+        "desktop"
+    );
+    let device = result(&sandbox.run(&["devices", "ios-device", "--json", "-q"]));
+    assert_eq!(device["exit"], 2);
+    assert_eq!(device["errors"][0]["id"], "usage.not_implemented");
+    assert!(
+        device["errors"][0]["fix"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "icm devices ios-sim --json -q")
+    );
+}
+
+#[test]
 fn explain() {
     let sandbox = Sandbox::new();
 

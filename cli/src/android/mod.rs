@@ -30,7 +30,7 @@ pub mod res;
 pub mod session;
 pub mod zip;
 
-pub use pipeline::{build, devices, input, logs, run, shot, stop, stop_session};
+pub use pipeline::{build, device_listing, devices, input, logs, run, shot, stop, stop_session};
 
 use crate::catalogue::CheckId;
 use crate::error::{Evidence, IcmError};
