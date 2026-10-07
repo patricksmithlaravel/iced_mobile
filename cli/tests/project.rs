@@ -93,6 +93,9 @@ impl Sandbox {
         for var in SCRUB {
             let _ = command.env_remove(var);
         }
+        // The store policy table is read for a fixed day, so doctor's
+        // checks do not change as the table ages.
+        let _ = command.env("ICM_TODAY", "2026-10-07");
         for (key, value) in &self.env {
             let _ = command.env(key, value);
         }
@@ -990,6 +993,26 @@ fn doctor_without_a_project_checks_the_named_platforms_only() {
     assert!(
         [0, 4, 9].contains(&desktop["exit"].as_i64().unwrap()),
         "{desktop}"
+    );
+    // The store policy table is fresh on the sandbox's day.
+    assert!(
+        requirements
+            .iter()
+            .any(|r| r["id"] == "env.policy_stale" && r["status"] == "pass"),
+        "{desktop}"
+    );
+
+    // Three months on, it is a WARN that leaves the exit code alone.
+    sandbox.set("ICM_TODAY", "2027-01-20");
+    let later = sandbox.json(&["doctor", "desktop"]);
+    assert_eq!(later["exit"], desktop["exit"], "{later}");
+    assert!(
+        later["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["id"] == "env.policy_stale"),
+        "{later}"
     );
 }
 
