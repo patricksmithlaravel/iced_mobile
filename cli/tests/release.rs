@@ -436,6 +436,56 @@ fn a_signed_release_runs_through_upload_sh_and_the_ledger() {
 }
 
 #[test]
+fn upload_sh_diagnoses_a_failed_upload() {
+    let app = App::new();
+    app.ready_for_ios();
+    let result = app.json(&["__test", "release", "ios"]);
+    assert_eq!(result["exit"], 0, "{result}");
+    let dist = app.abs(&result["artifacts"]["dist"]);
+
+    // altool rejects the API key (it prints its JSON and exits 1); the
+    // real icm diagnoses it.
+    let bin = app.path("fakebin");
+    write_exe(
+        &bin.join("xcrun"),
+        "#!/bin/sh\necho '{\"product-errors\":[{\"code\":-19209,\"message\":\"Failed to authenticate for session: (401) NOT_AUTHORIZED\"}]}'\nexit 1\n",
+    );
+    write_exe(
+        &bin.join("icm"),
+        &format!(
+            "#!/bin/sh\nexport ICM_CACHE_DIR='{cache}' ICM_HOST_CONFIG='{host}' CARGO_TARGET_DIR='{target}'\nexec '{bin}' \"$@\"\n",
+            cache = app.path("cache").display(),
+            host = app.path("host.toml").display(),
+            target = app.dir().join("target").display(),
+            bin = BIN,
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = Command::new("bash")
+        .arg(dist.join("upload.sh"))
+        .env("PATH", path)
+        .env("ASC_KEY_ID", "KEY123")
+        .env("ASC_ISSUER_ID", "issuer-uuid")
+        .output()
+        .unwrap();
+    let output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    // The owner's exit with the catalogue id, not altool's 1.
+    assert_eq!(run.status.code(), Some(9), "{output}");
+    assert!(output.contains("ios.asc.auth"), "{output}");
+    assert!(dist.join("validate.json").is_file());
+    // Nothing was recorded.
+    assert!(!app.dir().join(".icm/ledger.toml").exists());
+}
+
+#[test]
 fn android_signing_problems_still_build_the_unsigned_bundle() {
     let mut app = App::new();
     app.ready_for_ios();

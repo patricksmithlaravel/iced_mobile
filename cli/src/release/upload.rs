@@ -12,7 +12,8 @@
 //! `upload.sh` is `set -euo pipefail` bash. It exits 9 when a variable it
 //! needs is unset or when the release is not uploadable (unsigned, a gate
 //! failed, the owner still has steps), saves each tool's JSON next to the
-//! artifacts and runs `icm diagnose` on it, and ends with
+//! artifacts and runs `icm diagnose` on it even when the tool failed
+//! (diagnose's exit then wins, else the tool's), and ends with
 //! `icm ledger mark-uploaded`.
 
 use crate::process::shell_quote;
@@ -505,13 +506,21 @@ pub fn upload_sh(plan: &OwnerPlan, facts: &Facts<'_>) -> String {
         if line.starts_with("icm ") {
             line = format!("\"$ICM\"{}", &line[3..]);
         }
-        sh.push_str(&line);
-        sh.push('\n');
-        if let (Some(tool), Some(file)) = (command.diagnose, &command.tee) {
-            sh.push_str(&format!(
-                "\"$ICM\" diagnose {tool} {}\n",
-                Word::dist(file.as_str()).shell()
-            ));
+        match (command.diagnose, &command.tee) {
+            // The tool's exit is kept and diagnose runs on its output
+            // whatever it was, so a failure gets its catalogue id and exit
+            // (an authentication error is the owner's, exit 9) instead of
+            // ending the script with the tool's own code.
+            (Some(tool), Some(file)) => {
+                sh.push_str(&format!(
+                    "set +e\n{line}\nstatus=${{PIPESTATUS[0]}}\nset -e\n\"$ICM\" diagnose {tool} {}\nif [ \"$status\" -ne 0 ]; then exit \"$status\"; fi\n",
+                    Word::dist(file.as_str()).shell()
+                ));
+            }
+            _ => {
+                sh.push_str(&line);
+                sh.push('\n');
+            }
         }
         sh.push('\n');
     }
@@ -599,7 +608,7 @@ mod tests {
         assert!(sh.contains("set -euo pipefail"), "{sh}");
         assert!(sh.contains("need TOKEN 'the upload token'"), "{sh}");
         assert!(
-            sh.contains("uploader \"$D/App.zip\" --token \"${TOKEN}\" | tee \"$D/upload.json\"\n\"$ICM\" diagnose altool \"$D/upload.json\""),
+            sh.contains("set +e\nuploader \"$D/App.zip\" --token \"${TOKEN}\" | tee \"$D/upload.json\"\nstatus=${PIPESTATUS[0]}\nset -e\n\"$ICM\" diagnose altool \"$D/upload.json\"\nif [ \"$status\" -ne 0 ]; then exit \"$status\"; fi\n"),
             "{sh}"
         );
         assert!(sh.contains("\"$ICM\" ledger mark-uploaded"), "{sh}");
@@ -611,6 +620,77 @@ mod tests {
             "{refused}"
         );
         assert!(!refused.contains("uploader"), "{refused}");
+    }
+
+    /// Runs `upload.sh` with a fake uploader and a fake icm whose diagnose
+    /// exits with `diagnosed`; returns the exit code and the log.
+    fn run_upload_sh(uploader_exit: i32, diagnosed: i32) -> (Option<i32>, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.path().join("log");
+        for (name, script) in [
+            (
+                "uploader",
+                format!(
+                    "#!/bin/sh\necho '{{\"error\":true}}'\necho uploader >> '{}'\nexit {uploader_exit}\n",
+                    log.display()
+                ),
+            ),
+            (
+                "icm",
+                format!(
+                    "#!/bin/sh\necho \"icm $1 $2 $(cat \"$3\" 2>/dev/null)\" >> '{}'\n[ \"$1\" = diagnose ] && exit {diagnosed}\nexit 0\n",
+                    log.display()
+                ),
+            ),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let dist = dir.path().join("dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        let sh = dist.join("upload.sh");
+        std::fs::write(&sh, upload_sh(&plan(), &facts(&dist, None))).unwrap();
+        let output = std::process::Command::new("bash")
+            .arg(&sh)
+            .env("TOKEN", "t")
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            std::fs::read_to_string(&log).unwrap_or_default(),
+        )
+    }
+
+    #[test]
+    fn upload_sh_diagnoses_a_failed_tool() {
+        // The tool failed and diagnose knew why: diagnose's exit.
+        let (code, log) = run_upload_sh(1, 9);
+        assert_eq!(code, Some(9), "{log}");
+        assert!(
+            log.contains("icm diagnose altool {\"error\":true}"),
+            "{log}"
+        );
+        assert!(!log.contains("ledger"), "{log}");
+        // Diagnose found nothing: the tool's own exit.
+        let (code, log) = run_upload_sh(3, 0);
+        assert_eq!(code, Some(3), "{log}");
+        assert!(log.contains("icm diagnose altool"), "{log}");
+        // Success runs on to the ledger.
+        let (code, log) = run_upload_sh(0, 0);
+        assert_eq!(code, Some(0), "{log}");
+        assert!(log.contains("icm ledger mark-uploaded"), "{log}");
     }
 
     #[test]
