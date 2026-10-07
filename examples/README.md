@@ -84,7 +84,7 @@ A bunch of simpler examples exist:
 - [`color_palette`](color_palette), a color palette generator based on a user-defined root color.
 - [`counter`](counter), the classic counter example explained in the [`README`](../README.md).
 - [`custom_widget`](custom_widget), a demonstration of how to build a custom widget that draws a circle.
-- [`download_progress`](download_progress), a basic application that asynchronously downloads a dummy file of 100 MB and tracks the download progress.
+- [`download_progress`](download_progress), a basic application that asynchronously downloads a large file (a Rust release archive of about 167 MB) and tracks the download progress.
 - [`events`](events), a log of native events displayed using a conditional `Subscription`.
 - [`geometry`](geometry), a custom widget showcasing how to draw geometry with the `Mesh2D` primitive in [`iced_wgpu`](../wgpu).
 - [`integration`](integration), a demonstration of how to integrate Iced in an existing [`wgpu`] application.

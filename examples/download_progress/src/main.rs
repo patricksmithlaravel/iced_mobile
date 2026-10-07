@@ -113,11 +113,12 @@ impl Download {
     pub fn start(&mut self) -> Task<Update> {
         match self.state {
             State::Idle | State::Finished | State::Errored => {
+                // A large file that never changes, served with CORS headers,
+                // so that the web build can fetch it too.
                 let (task, handle) = Task::sip(
                     download(
-                        "https://huggingface.co/\
-                        mattshumer/Reflection-Llama-3.1-70B/\
-                        resolve/main/model-00001-of-00162.safetensors",
+                        "https://static.rust-lang.org/dist/\
+                        rust-1.80.0-x86_64-unknown-linux-gnu.tar.xz",
                     ),
                     Update::Downloading,
                     Update::Finished,

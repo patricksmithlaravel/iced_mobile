@@ -1,6 +1,6 @@
 ## Download progress
 
-A basic application that asynchronously downloads multiple dummy files of 100 MB and tracks the download progress.
+A basic application that asynchronously downloads multiple copies of a large file (a Rust release archive of about 167 MB) and tracks the download progress.
 
 The example implements a custom `Subscription` in the __[`download`](src/download.rs)__ module. This subscription downloads and produces messages that can be used to keep track of its progress.
 
