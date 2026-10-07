@@ -57,17 +57,14 @@ keep() {
     fi
 }
 
-sdk_adb() {
-    printf '%s/platform-tools/adb\n' "$(icm print env android | sed -n 's/^export ANDROID_HOME=//p')"
-}
-
-java_home() {
-    icm print env android | sed -n 's/^export JAVA_HOME=//p'
-}
+# sdk_adb, java_home and no_foreign_android are lib.sh's: they read icm's
+# Android environment from `icm print env android --json`.
 
 # bundletool, as icm runs it: the pinned jar in icm's cache.
 bundletool() {
-    "$(java_home)/bin/java" -jar "$ICM_CACHE_DIR/tools/bundletool/1.18.3/bundletool-all-1.18.3.jar" "$@"
+    local java
+    java="$(java_home)/bin/java"
+    "$java" -jar "$ICM_CACHE_DIR/tools/bundletool/1.18.3/bundletool-all-1.18.3.jar" "$@"
 }
 
 # --- setup -----------------------------------------------------------------------
@@ -85,24 +82,6 @@ doctor_android() {
     evidence "$(/usr/bin/jq -r '.summary' "$ACCEPT/doctor.json")"
 }
 
-no_foreign_android() {
-    local adb serial name foreign=0
-    adb=$(sdk_adb)
-    [ -x "$adb" ] || return 0
-    for serial in $("$adb" devices | awk 'NR > 1 && $2 == "device" {print $1}'); do
-        name=
-        case "$serial" in
-        emulator-*) name=$("$adb" -s "$serial" emu avd name 2>/dev/null | head -n1 | tr -d '\r') ;;
-        esac
-        case "$name" in
-        icm-test-*) ;;
-        icm-*) continue ;;
-        esac
-        echo "$serial (${name:-not an emulator}) is not icm's managed emulator: stop it, or run this script when it is off"
-        foreign=1
-    done
-    [ "$foreign" -eq 0 ]
-}
 
 # The app: a real id (not the placeholder) and an icon that is not the
 # template's (the template's, turned), with a throwaway upload key.

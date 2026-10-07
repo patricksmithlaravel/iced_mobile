@@ -119,6 +119,67 @@ icmd() {
     done
 }
 
+# icm_env NAME [PLATFORM]: one variable of `icm print env PLATFORM`
+# (default android), read from the JSON result. The shell form quotes a
+# value with a space, so cutting `export NAME=` off its lines kept the
+# quotes and broke on such paths; the JSON value is the path itself. Fails
+# when icm reports no such variable.
+icm_env() {
+    local out
+    if ! out=$(icm print env "${2:-android}" --json -q); then
+        printf 'icm print env %s failed: %s\n' "${2:-android}" "$out" >&2
+        return 1
+    fi
+    "$JQ" -er --arg name "$1" '.env[$name] // empty' <<<"$out" || {
+        printf 'icm print env %s has no %s\n' "${2:-android}" "$1" >&2
+        return 1
+    }
+}
+
+# sdk_adb: the SDK's adb (icm's own Android environment). Fails when there
+# is none, so a caller cannot read "no adb" as "no device online".
+sdk_adb() {
+    local home adb
+    home=$(icm_env ANDROID_HOME)
+    adb="$home/platform-tools/adb"
+    if [ ! -x "$adb" ]; then
+        printf 'no adb at %s: install platform-tools (icm doctor android --fix --yes)\n' "$adb" >&2
+        return 1
+    fi
+    printf '%s\n' "$adb"
+}
+
+# java_home: the JDK icm hands Android's tools.
+java_home() { icm_env JAVA_HOME; }
+
+# no_foreign_android: fails when an Android device other than an icm-
+# emulator is online. icm runs on the single online device when its own
+# emulator is not up, so the owner's phone or AVDs, or another test run's
+# icm-test- emulator, would get the demo installed; the script stops
+# instead. Without an adb to ask, it fails too (fail closed).
+no_foreign_android() {
+    local adb devices serial name foreign=0
+    adb=$(sdk_adb)
+    devices=$("$adb" devices)
+    for serial in $(awk 'NR > 1 && $2 == "device" {print $1}' <<<"$devices"); do
+        name=
+        case "$serial" in
+        emulator-*) name=$("$adb" -s "$serial" emu avd name 2>/dev/null | head -n1 | tr -d '\r') ;;
+        esac
+        case "$name" in
+        icm-test-*) ;;
+        icm-*)
+            echo "$serial runs $name"
+            continue
+            ;;
+        esac
+        echo "$serial (${name:-not an emulator}) is not icm's managed emulator: stop it, or run this script when it is off"
+        foreign=1
+    done
+    [ "$foreign" -eq 0 ]
+    evidence "online: $(awk 'NR > 1 && NF {printf "%s(%s) ", $1, $2}' <<<"$devices")"
+}
+
 # png_size FILE: "W H" of a PNG, from its IHDR.
 png_size() {
     local w h

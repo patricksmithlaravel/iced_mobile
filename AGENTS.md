@@ -109,7 +109,9 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
     `doctor --fix --yes` installs (SDK packages and the NDK in the user's Android SDK, the template's
     rustup toolchain and targets, Homebrew's openjdk@21, the iOS platform).
   - It stops early if any Android device other than icm's managed `icm-api<N>` emulator is online,
-    an `icm-test-*` emulator included.
+    an `icm-test-*` emulator included, and when it finds no adb to ask. It reads the SDK, adb and
+    JDK paths from `icm print env android --json` (`icm_env` in `lib.sh`), so paths with spaces
+    work; `cli/tests/accept_lib.rs` tests those helpers.
   - Its Tawara steps clone `$TAWARA` (default `~/Tawara-mobile`) read-only into `$ACCEPT`. Set
     `TAWARA` to a path that does not exist to skip them.
 - **`cli/tests/accept/phase2.sh`** covers the App Store release without the owner's signing assets:

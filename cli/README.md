@@ -124,6 +124,10 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   (`.github/ci/tag.sh`), that the workflows run AGENTS.md's check commands
   and only scripts that exist, and that nothing there formats with
   `--all`, reads a secret or uploads.
+- `tests/accept_lib.rs` runs the acceptance scripts' shared helpers
+  (`tests/accept/lib.sh`) with the real icm against a fake SDK and JDK
+  whose paths have a space: they read `icm print env android --json`, and
+  the foreign-device guard fails when it finds no adb.
 - `tests/project.rs` covers `new`, `check`, `doctor`, `stop`/`ps` and
   `explain config.<key>`. `check` compiles `tests/fixtures/checkapp`, whose
   `iced` is a local stand-in, offline in a second; `doctor` runs against a

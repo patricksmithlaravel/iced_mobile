@@ -130,59 +130,28 @@ doctor_machine() {
     fixed_evidence "$ACCEPT/doctor.json"
 }
 
-# The SDK's adb, from icm's own Android environment.
-sdk_adb() {
-    printf '%s/platform-tools/adb\n' "$(icm print env android | sed -n 's/^export ANDROID_HOME=//p')"
-}
-
-# icm runs on the single online Android device when its own emulator is not
-# up. Any device other than an icm- emulator (the owner's phone or AVDs, or
-# another test run's icm-test- emulator) would then get the demo installed
-# on it, so the run stops here instead.
-no_foreign_android() {
-    local adb serial name foreign=0
-    adb=$(sdk_adb)
-    if [ ! -x "$adb" ]; then
-        evidence "no adb yet: no device can be online"
-        return 0
-    fi
-    for serial in $("$adb" devices | awk 'NR > 1 && $2 == "device" {print $1}'); do
-        name=
-        case "$serial" in
-        emulator-*) name=$("$adb" -s "$serial" emu avd name 2>/dev/null | head -n1 | tr -d '\r') ;;
-        esac
-        case "$name" in
-        icm-test-*) ;;
-        icm-*)
-            echo "$serial runs $name"
-            continue
-            ;;
-        esac
-        echo "$serial (${name:-not an emulator}) is not icm's managed emulator: stop it, or run this script when it is off"
-        foreign=1
-    done
-    [ "$foreign" -eq 0 ]
-    evidence "online: $("$adb" devices | awk 'NR > 1 && NF {printf "%s(%s) ", $1, $2}')"
-}
-
 # Android's tools need JDK 17+, and the host's java is Java 8: icm finds a
 # JDK and hands it to children through JAVA_HOME and PATH (Appendix C
-# item 2), and `icm print env android` shows both.
+# item 2), and `icm print env android` shows both. The values come from its
+# JSON result (`icm_env` in lib.sh); the shell form, sourced, must give the
+# same ones, a path with a space included.
 android_env() {
+    icm print env android --json -q >"$ACCEPT/env-android.json"
     icm print env android >"$ACCEPT/env-android.sh"
-    local java_home first major
-    java_home=$(sed -n 's/^export JAVA_HOME=//p' "$ACCEPT/env-android.sh")
-    test -n "$java_home"
+    local java_home major
+    java_home=$(icm_env JAVA_HOME)
     major=$("$java_home/bin/java" -version 2>&1 | sed -nE '1s/.*version "([0-9]+).*/\1/p')
     test "$major" -ge 17
-    first=$(sed -n 's/^export PATH=//p' "$ACCEPT/env-android.sh" | cut -d: -f1)
-    test "$first" = "$java_home/bin"
-    grep -q '^export ANDROID_HOME=' "$ACCEPT/env-android.sh"
-    grep -q '^export ANDROID_NDK_HOME=' "$ACCEPT/env-android.sh"
-    icm print env android --json -q >"$ACCEPT/env-android.json"
     export ACCEPT_JAVA_HOME=$java_home
-    jqe '.ok and .env.JAVA_HOME == $ENV.ACCEPT_JAVA_HOME and (.env.PATH | startswith($ENV.ACCEPT_JAVA_HOME + "/bin:"))' "$ACCEPT/env-android.json"
-    evidence "JAVA_HOME=$java_home (java $major), first on PATH; $(grep -c '^export ' "$ACCEPT/env-android.sh") exports"
+    jqe '.ok and .env.JAVA_HOME == $ENV.ACCEPT_JAVA_HOME and (.env.PATH | startswith($ENV.ACCEPT_JAVA_HOME + "/bin:")) and (.env.ANDROID_HOME | length > 0) and (.env.ANDROID_NDK_HOME | length > 0)' "$ACCEPT/env-android.json"
+    (
+        # shellcheck disable=SC1091
+        . "$ACCEPT/env-android.sh"
+        test "$JAVA_HOME" = "$ACCEPT_JAVA_HOME"
+        test "$ANDROID_HOME" = "$("$JQ" -r .env.ANDROID_HOME "$ACCEPT/env-android.json")"
+        test "$ANDROID_NDK_HOME" = "$("$JQ" -r .env.ANDROID_NDK_HOME "$ACCEPT/env-android.json")"
+    )
+    evidence "JAVA_HOME=$java_home (java $major), first on PATH; $(grep -c '^export ' "$ACCEPT/env-android.sh") exports, the same values when sourced"
 }
 
 new_app() {
@@ -515,7 +484,8 @@ if [ "$java_bin" = "$JAVA_HOME/bin/java" ] && [ "$major" -ge 17 ] 2>/dev/null; t
 else
     echo "CHECK FAIL accept_java: java is $java_bin ($version), JAVA_HOME=$JAVA_HOME"
 fi
-sdk=$($ICM_ADB shell getprop ro.build.version.sdk | tr -d '\r')
+# ICM_ADB is a command line, its adb path shell-quoted: eval it.
+sdk=$(eval "$ICM_ADB shell getprop ro.build.version.sdk" | tr -d '\r')
 if [ -n "$sdk" ]; then
     echo "CHECK PASS accept_adb: ICM_ADB reaches the device (API $sdk)"
 else
