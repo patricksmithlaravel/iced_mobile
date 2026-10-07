@@ -2,8 +2,9 @@
 //! in the project, one `[[upload]]` per build the owner uploaded. Only
 //! `icm ledger mark-uploaded` writes it (the last line of `upload.sh`);
 //! `icm release` refuses an `[app] build` that is not above the highest
-//! one recorded for its target (`version.build_not_increased`). The file
-//! belongs in git.
+//! one recorded for its target (`version.build_not_increased`). An entry
+//! records the uploaded file's sha256 as it is when marked, so a DMG the
+//! owner stapled is recorded as it shipped. The file belongs in git.
 
 use super::dist;
 use super::manifest::Manifest;
@@ -240,7 +241,7 @@ fn mark_uploaded(ctx: &mut Ctx, target: ReleaseTarget, build: Option<u64>) -> Re
     };
 
     let entry = match (&found, build) {
-        (Some((_, manifest)), _) => {
+        (Some((dir, manifest)), _) => {
             let upload = manifest.uploads().next();
             Entry {
                 target: name.to_string(),
@@ -248,7 +249,7 @@ fn mark_uploaded(ctx: &mut Ctx, target: ReleaseTarget, build: Option<u64>) -> Re
                 build: manifest.app.build,
                 date: crate::time::Utc::now().rfc3339(),
                 artifact: upload.map(|file| file.path.clone()),
-                sha256: upload.map(|file| file.sha256.clone()),
+                sha256: upload.map(|file| uploaded_sha256(ctx, dir, file)),
                 git_rev: manifest.source.git_rev.clone(),
             }
         }
@@ -319,6 +320,32 @@ fn mark_uploaded(ctx: &mut Ctx, target: ReleaseTarget, build: Option<u64>) -> Re
         "commit the ledger, so every checkout knows the build was used",
     );
     Ok(())
+}
+
+/// The sha256 of the uploaded file as it is now, which is what the owner
+/// shipped: a DMG the owner stapled after the release differs from the
+/// hash `artifacts.json` recorded (INFO `release.artifact_changed`). A file
+/// that is gone keeps the recorded hash.
+fn uploaded_sha256(ctx: &Ctx, dir: &Path, file: &dist::FileEntry) -> String {
+    match dist::digest(&file.absolute(dir)) {
+        Ok((_, now)) if now != file.sha256 => {
+            ctx.rep.check(
+                Check::info(
+                    CheckId::ReleaseArtifactChanged,
+                    format!(
+                        "{} changed since the release (a stapled ticket changes a DMG): the ledger records its sha256 now, {now}, not the recorded {}",
+                        file.path, file.sha256
+                    ),
+                )
+                .fix(
+                    "Nothing to fix when the owner stapled it; `icm verify` checks the change.",
+                    &[],
+                ),
+            );
+            now
+        }
+        _ => file.sha256.clone(),
+    }
 }
 
 /// The config key whose package a target builds.

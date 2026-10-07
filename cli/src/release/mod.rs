@@ -119,6 +119,20 @@ pub trait Pipeline {
 
     /// The target's store gates on an existing artifact (`icm verify`).
     fn verify(&self, ctx: &mut Ctx, verify: &mut verify::Verify) -> Result<()>;
+
+    /// A file `artifacts.json` lists whose size or sha256 changed since
+    /// the release: the `release.artifact_changed` check to report when the
+    /// target can tell why (macOS: a stapled notarization ticket), else
+    /// `None` and verify reports the change as a FAIL.
+    fn changed_file(
+        &self,
+        _ctx: &Ctx,
+        _file: &FileEntry,
+        _path: &Path,
+        _now: (u64, &str),
+    ) -> Result<Option<Check>> {
+        Ok(None)
+    }
 }
 
 /// The pipeline of a target.
@@ -269,6 +283,19 @@ impl Release {
         self.files.retain(|file| file.path != entry.path);
         self.files.push(entry);
         Ok(())
+    }
+
+    /// Records the code directory hash of a registered file's signature
+    /// (macOS; see [`FileEntry::cdhash`]).
+    pub fn set_cdhash(&mut self, path: &Path, cdhash: Option<String>) {
+        let dist = self.dist.clone();
+        if let Some(entry) = self
+            .files
+            .iter_mut()
+            .find(|file| file.absolute(&dist) == path)
+        {
+            entry.cdhash = cdhash;
+        }
     }
 
     /// The registered files.

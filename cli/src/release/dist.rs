@@ -100,6 +100,13 @@ pub struct FileEntry {
     pub bytes: u64,
     /// Its sha256 (a directory: see the module docs).
     pub sha256: String,
+    /// macOS: the code directory hash of its signature (`codesign -d
+    /// -vvv`'s `CDHash`). Stapling a notarization ticket changes a signed
+    /// `.app` or `.dmg` but not its signature, so `icm verify` accepts a
+    /// changed file whose signature still verifies, still has this hash
+    /// and carries a stapled ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cdhash: Option<String>,
 }
 
 impl FileEntry {
@@ -126,6 +133,7 @@ impl FileEntry {
                 .join("/"),
             bytes,
             sha256,
+            cdhash: None,
         })
     }
 

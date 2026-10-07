@@ -425,6 +425,44 @@ fn an_unsigned_macos_release_builds_a_real_app_and_dmg() {
     );
     let zip_verify = app.json(&["verify", "macos", "--artifact", zip.to_str().unwrap()]);
     assert_eq!(zip_verify["exit"], 0, "{zip_verify}");
+
+    // The app's and the DMG's signatures are recorded by their cdhash, as
+    // codesign shows it.
+    let app_entry = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["kind"] == "app")
+        .unwrap()
+        .clone();
+    let cdhash = app_entry["cdhash"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{app_entry}"));
+    assert_eq!(cdhash.len(), 40, "{cdhash}");
+    let shown = Command::new("codesign")
+        .args(["-d", "-vvv"])
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&shown.stderr).contains(&format!("CDHash={cdhash}")),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    // A changed app without a stapled ticket is still a change.
+    std::fs::write(bundle.join("Contents/CodeResources"), b"not a ticket").unwrap();
+    let changed = app.json(&["verify", "macos"]);
+    assert_eq!(changed["exit"], 1, "{changed}");
+    assert_eq!(changed["errors"][0]["id"], "release.artifact_changed");
+    let detail = changed["errors"][0]["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("Fixture.app changed since the release"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("no notarization ticket is stapled"),
+        "{detail}"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -448,11 +486,13 @@ case " $* " in
         echo "Authority=Developer ID Certification Authority" >&2
         echo "Timestamp=Oct 7, 2026 at 12:00:00" >&2
         echo "TeamIdentifier=ABCDE12345" >&2
+        echo "CDHash=$(cat '{state}/cdhash' 2>/dev/null || echo {CDHASH})" >&2
         exit 0;;
 esac
 exit 0
 "#,
-            log = log.display()
+            log = log.display(),
+            state = state.display(),
         ),
     );
     let _ = app.fake(
@@ -483,6 +523,31 @@ exec /usr/bin/xcrun "$@"
             state = state.display()
         ),
     );
+}
+
+/// The cdhash the fake codesign reports, until `state/cdhash` says
+/// otherwise (a re-signed file).
+#[cfg(target_os = "macos")]
+const CDHASH: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// What the owner's `xcrun stapler staple` does, as the fake tools see it:
+/// a ticket in `Contents/CodeResources` of an app, or a bigger signature
+/// before a disk image's UDIF trailer (so hdiutil still reads it), and the
+/// `state/notarized` that the fake spctl and stapler read.
+#[cfg(target_os = "macos")]
+fn staple(app: &App, path: &Path) {
+    if path.is_dir() {
+        std::fs::write(path.join("Contents/CodeResources"), b"fake ticket").unwrap();
+    } else {
+        let bytes = std::fs::read(path).unwrap();
+        let (data, trailer) = bytes.split_at(bytes.len() - 512);
+        assert_eq!(&trailer[..4], b"koly", "a UDIF disk image");
+        let mut stapled = data.to_vec();
+        stapled.extend_from_slice(&[0u8; 4096]);
+        stapled.extend_from_slice(trailer);
+        std::fs::write(path, stapled).unwrap();
+    }
+    std::fs::write(app.path("state/notarized"), "").unwrap();
 }
 
 #[cfg(target_os = "macos")]
@@ -583,14 +648,65 @@ fn a_signed_macos_release_goes_through_both_stages() {
     assert_eq!(early["exit"], 9, "{early}");
     assert_eq!(early["errors"][0]["id"], "macos.not_stapled");
 
-    // The owner notarized and stapled: the DMG.
-    std::fs::write(app.path("state/notarized"), "").unwrap();
+    // artifacts.json names the signature of the app it recorded.
+    let bundle = app.abs(&stage1["artifacts"]["app"]);
+    let recorded = |manifest: &Value, kind: &str| -> Value {
+        manifest["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["kind"] == kind)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {kind} in {manifest}"))
+    };
+    assert_eq!(recorded(&manifest, "app")["cdhash"], CDHASH);
+
+    // The owner notarized and stapled the app, which changes its files but
+    // not its signature: verify accepts it.
+    staple(&app, &bundle);
+    let stapled_app = app.json(&["verify", "macos"]);
+    assert_eq!(stapled_app["exit"], 0, "{stapled_app}");
+    assert!(
+        app.checks(&stapled_app)
+            .iter()
+            .any(|(id, status, detail)| id == "release.artifact_changed"
+                && status == "pass"
+                && detail.starts_with("Fixture.app: stapled since the release")),
+        "{:?}",
+        app.checks(&stapled_app)
+    );
+
+    // The DMG of the stapled app.
     let stage2 = app.json(&["release", "macos", "--dmg", "--allow-dirty"]);
     assert_eq!(stage2["exit"], 0, "{stage2}");
     assert_eq!(app.status_of(&stage2, "macos.not_stapled"), ["pass"]);
-    assert!(app.abs(&stage2["artifacts"]["dmg"]).is_file());
+    let dmg = app.abs(&stage2["artifacts"]["dmg"]);
+    assert!(dmg.is_file());
     assert_eq!(stage2["release"]["uploadable"], true);
+    let manifest2: Value = serde_json::from_str(
+        &std::fs::read_to_string(app.abs(&stage2["artifacts"]["manifest"])).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recorded(&manifest2, "dmg")["cdhash"], CDHASH);
+    assert_eq!(recorded(&manifest2, "app")["cdhash"], CDHASH);
+    assert!(
+        stage2["owner_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["title"] == "Staple the ticket to the DMG"
+                && step["note"]
+                    .as_str()
+                    .is_some_and(|note| note.contains("records the stapled DMG's sha256"))),
+        "{stage2}"
+    );
 
+    // The owner notarized and stapled the DMG: its bytes changed, its
+    // signature did not, so stage 2's last steps go through.
+    staple(&app, &dmg);
+    let before = recorded(&manifest2, "dmg")["sha256"].clone();
+    let now = icm::hash::sha256_hex(&std::fs::read(&dmg).unwrap());
+    assert_ne!(before, now);
     let verify = app.json(&["verify", "macos", "--after-notarize"]);
     assert_eq!(verify["exit"], 0, "{verify}");
     let gatekeeper = app.status_of(&verify, "macos.gatekeeper");
@@ -598,6 +714,29 @@ fn a_signed_macos_release_goes_through_both_stages() {
         !gatekeeper.is_empty() && gatekeeper.iter().all(|s| s == "pass"),
         "{gatekeeper:?}"
     );
+    assert!(
+        app.checks(&verify)
+            .iter()
+            .any(|(id, status, detail)| id == "release.artifact_changed"
+                && status == "pass"
+                && detail.starts_with("Fixture-0.3.0.dmg: stapled since the release")),
+        "{:?}",
+        app.checks(&verify)
+    );
+    // The ledger records the DMG as it shipped, stapled.
+    let marked = app.json(&["ledger", "mark-uploaded", "macos"]);
+    assert_eq!(marked["exit"], 0, "{marked}");
+    assert_eq!(marked["upload"]["sha256"], now.as_str(), "{marked}");
+    assert_eq!(app.status_of(&marked, "release.artifact_changed"), ["info"]);
+
+    // A file signed again since the release is a change verify rejects.
+    std::fs::write(app.path("state/cdhash"), "f".repeat(40)).unwrap();
+    let resigned = app.json(&["verify", "macos", "--after-notarize"]);
+    assert_eq!(resigned["exit"], 1, "{resigned}");
+    assert_eq!(resigned["errors"][0]["id"], "release.artifact_changed");
+    let detail = resigned["errors"][0]["detail"].as_str().unwrap();
+    assert!(detail.contains("not the recorded"), "{detail}");
+    std::fs::remove_file(app.path("state/cdhash")).unwrap();
 
     // diagnose notarytool.
     let accepted = app.path("notary-app.json");

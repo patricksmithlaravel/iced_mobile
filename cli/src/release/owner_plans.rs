@@ -583,6 +583,9 @@ fn notarize(file: &str, profile: &str, saved: &str) -> Command {
     .diagnose("notarytool")
 }
 
+/// What stapling does to the files `artifacts.json` recorded.
+const STAPLED: &str = "Stapling changes the file's bytes, not its signature: `icm verify` accepts the change when the signature still has the cdhash artifacts.json recorded and the ticket validates.";
+
 /// macOS stage 1 (design §11.4): notarize and staple the app, then build
 /// the DMG (`icm release macos --dmg`).
 pub fn macos_app(c: &Common<'_>, app_zip: &str, app: &str) -> OwnerPlan {
@@ -594,16 +597,19 @@ pub fn macos_app(c: &Common<'_>, app_zip: &str, app: &str) -> OwnerPlan {
         "Notarize the app",
         notarize(app_zip, &profile, "notary-app.json"),
     ));
-    plan.push(OwnerStep::run(
-        StepKind::Upload,
-        "Staple the ticket to the app",
-        cmd(vec![
-            lit("xcrun"),
-            lit("stapler"),
-            lit("staple"),
-            Word::dist(app),
-        ]),
-    ));
+    plan.push(
+        OwnerStep::run(
+            StepKind::Upload,
+            "Staple the ticket to the app",
+            cmd(vec![
+                lit("xcrun"),
+                lit("stapler"),
+                lit("staple"),
+                Word::dist(app),
+            ]),
+        )
+        .note(STAPLED),
+    );
     let mut dmg = vec![lit("icm"), lit("release"), lit("macos"), lit("--dmg")];
     dmg.extend(c.config_arg());
     plan.push(
@@ -628,16 +634,21 @@ pub fn macos_dmg(c: &Common<'_>, dmg: &str) -> OwnerPlan {
         "Notarize the DMG",
         notarize(dmg, &profile, "notary-dmg.json"),
     ));
-    plan.push(OwnerStep::run(
-        StepKind::Upload,
-        "Staple the ticket to the DMG",
-        cmd(vec![
-            lit("xcrun"),
-            lit("stapler"),
-            lit("staple"),
-            Word::dist(dmg),
-        ]),
-    ));
+    plan.push(
+        OwnerStep::run(
+            StepKind::Upload,
+            "Staple the ticket to the DMG",
+            cmd(vec![
+                lit("xcrun"),
+                lit("stapler"),
+                lit("staple"),
+                Word::dist(dmg),
+            ]),
+        )
+        .note(&format!(
+            "{STAPLED} `icm ledger mark-uploaded` records the stapled DMG's sha256."
+        )),
+    );
     let mut verify = vec![
         lit("icm"),
         lit("verify"),

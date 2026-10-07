@@ -792,7 +792,7 @@ catalogue! {
         "Check the package's licence before shipping it: ask its authors to declare one, or replace the dependency.";
     ReleaseArtifactChanged = "release.artifact_changed", CheckFailed, Fail, Agent,
         "A release file differs from what artifacts.json recorded",
-        "Something changed the file after the release; rerun `icm release <target>` rather than editing its outputs.";
+        "Something changed the file after the release (a notarization ticket stapled to a macOS app or DMG is the one change verify accepts); rerun `icm release <target>` rather than editing its outputs.";
     StoreNoAgentBridge = "store.no_agent_bridge", CheckFailed, Fail, Agent,
         "A release build contains the agent bridge",
         "Build releases without the `icm-agent` feature.";

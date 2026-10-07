@@ -182,6 +182,7 @@ mod tests {
                 path: "Notes.ipa".into(),
                 bytes: 3,
                 sha256: "ab".into(),
+                cdhash: None,
             }],
             sign: "auto".into(),
             signed: true,

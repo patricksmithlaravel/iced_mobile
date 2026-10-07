@@ -47,7 +47,11 @@
 //! with ditto) or a `.dmg` (`hdiutil verify`, then the app inside, attached
 //! read-only and detached again); `--after-notarize` requires a stapled
 //! ticket (`macos.not_stapled`) and Gatekeeper's acceptance
-//! (`macos.gatekeeper`) instead of explaining its verdict.
+//! (`macos.gatekeeper`) instead of explaining its verdict. `artifacts.json`
+//! records the cdhash of the app's and the DMG's signatures, so a file the
+//! owner stapled since the release, whose sha256 changed, passes
+//! `release.artifact_changed` when codesign still verifies it with that
+//! cdhash and `stapler validate` finds the ticket ([`stapled_change`]).
 //!
 //! icm never notarizes or staples: those commands exist only in
 //! `owner_plans.rs`.
@@ -58,6 +62,7 @@ pub mod sign;
 
 use super::desktop::{self, icons};
 use super::diagnose::Input;
+use super::dist::FileEntry;
 use super::manifest::NoticesAt;
 use super::verify::Verify;
 use super::{Pipeline, Release, notices, owner_plans};
@@ -784,6 +789,7 @@ fn build_app(ctx: &mut Ctx, rel: &mut Release) -> Result<()> {
     rel.embed_notices(&bundle, NOTICES_IN_APP)?;
     rel.embed_notices(&zip, &format!("{app}/{NOTICES_IN_APP}"))?;
     rel.add_file("stage", "app", &bundle)?;
+    rel.set_cdhash(&bundle, display.cdhash.clone());
     rel.add_file("upload", "app_zip", &zip)?;
 
     let mut signing = signing_json(&signer);
@@ -862,7 +868,10 @@ fn build_dmg(ctx: &mut Ctx, rel: &mut Release) -> Result<()> {
         } else {
             file.role.as_str()
         };
-        rel.add_file(role, &file.kind, &file.absolute(&rel.dist))?;
+        // The app is stapled now: new bytes, the same signature.
+        let path = file.absolute(&rel.dist);
+        rel.add_file(role, &file.kind, &path)?;
+        rel.set_cdhash(&path, file.cdhash.clone());
     }
     for place in &previous.notices {
         if place.artifact.ends_with(".dmg") {
@@ -907,7 +916,7 @@ fn build_dmg(ctx: &mut Ctx, rel: &mut Release) -> Result<()> {
     )?;
 
     let mut checks = Vec::new();
-    let _ = signature_checks(ctx, &dmg, &mut checks)?;
+    let display = signature_checks(ctx, &dmg, &mut checks)?;
     checks.push(dmg_check(ctx, &dmg)?);
     checks.push(gatekeeper_check(ctx, &dmg, false)?);
     for check in checks {
@@ -916,6 +925,7 @@ fn build_dmg(ctx: &mut Ctx, rel: &mut Release) -> Result<()> {
 
     rel.embed_notices(&dmg, &format!("{app_file}/{NOTICES_IN_APP}"))?;
     rel.add_file("upload", "dmg", &dmg)?;
+    rel.set_cdhash(&dmg, display.cdhash);
     rel.signing = signing_json(&signer);
     rel.signed = rel.sign() == SignMode::Auto && signer.developer_id();
     rel.owner_plan = Some(owner_plans::macos_dmg(&rel.common(), &dmg_name(rel)));
@@ -1200,6 +1210,93 @@ impl Pipeline for Macos {
         let _ = std::fs::remove_dir_all(&scratch);
         result
     }
+
+    fn changed_file(
+        &self,
+        ctx: &Ctx,
+        file: &FileEntry,
+        path: &Path,
+        now: (u64, &str),
+    ) -> Result<Option<Check>> {
+        let Some(recorded) = file.cdhash.as_deref() else {
+            return Ok(None);
+        };
+        if !matches!(file.kind.as_str(), "app" | "dmg")
+            || desktop::require_host(&ctx.env, ReleaseTarget::Macos, "verify macos").is_err()
+        {
+            return Ok(None);
+        }
+        stapled_change(ctx, file, path, recorded, now).map(Some)
+    }
+}
+
+/// `release.artifact_changed` for a signed `.app` or `.dmg` whose bytes
+/// changed since the release. Stapling a notarization ticket does that (it
+/// adds `Contents/CodeResources` to an app and grows a disk image's
+/// signature) without changing the signature, so the change passes when
+/// codesign still verifies the file, its code directory hash is the one
+/// `artifacts.json` recorded and a ticket is stapled to it.
+fn stapled_change(
+    ctx: &Ctx,
+    file: &FileEntry,
+    path: &Path,
+    recorded: &str,
+    (bytes, sha256): (u64, &str),
+) -> Result<Check> {
+    let verified = ctx
+        .step("codesign.verify", &sign::verify_cmd(path))?
+        .success();
+    let outcome = ctx.step("codesign.display", &sign::display_cmd(path))?;
+    let display = sign::parse_display(&format!(
+        "{}\n{}",
+        outcome.stdout_text(),
+        outcome.stderr_text()
+    ));
+    let stapled = ctx
+        .step("stapler.validate", &sign::stapler_validate_cmd(path))?
+        .success();
+    let same = display
+        .cdhash
+        .as_deref()
+        .is_some_and(|cdhash| cdhash.eq_ignore_ascii_case(recorded));
+    if verified && same && stapled {
+        return Ok(Check::pass(
+            CheckId::ReleaseArtifactChanged,
+            format!(
+                "{}: stapled since the release (now {bytes} bytes with sha256 {sha256}); its signature is the recorded one (cdhash {recorded}) and verifies",
+                file.path
+            ),
+        ));
+    }
+    let mut why = Vec::new();
+    if !verified {
+        why.push("codesign --verify fails".to_string());
+    }
+    if !same {
+        why.push(match &display.cdhash {
+            Some(cdhash) => {
+                format!("its signature's cdhash is {cdhash}, not the recorded {recorded}")
+            }
+            None => format!("codesign shows no cdhash (recorded {recorded})"),
+        });
+    }
+    if !stapled {
+        why.push(
+            "no notarization ticket is stapled to it, so stapling does not explain the change"
+                .to_string(),
+        );
+    }
+    Ok(Check::fail(
+        CheckId::ReleaseArtifactChanged,
+        format!(
+            "{} changed since the release: {bytes} bytes with sha256 {sha256}, recorded {} with {}; {}",
+            file.path,
+            file.bytes,
+            file.sha256,
+            why.join("; ")
+        ),
+    )
+    .evidence(Evidence::file(path)))
 }
 
 /// A scratch directory for unzipping or mounting: under the project's

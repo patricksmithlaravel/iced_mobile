@@ -374,15 +374,16 @@ pub fn verify_cmd(path: &Path) -> Cmd {
     cmd.arg("-vv").arg(path).timeout(Duration::from_secs(300))
 }
 
-/// `codesign -d -vv <path>` (it writes to stderr).
+/// `codesign -d -vvv <path>` (it writes to stderr; `-vvv` adds the
+/// `CDHash`).
 pub fn display_cmd(path: &Path) -> Cmd {
     Cmd::tool("codesign")
-        .args(["-d", "-vv"])
+        .args(["-d", "-vvv"])
         .arg(path)
         .timeout(Duration::from_secs(60))
 }
 
-/// What `codesign -d -vv` says about a signature.
+/// What `codesign -d -vvv` says about a signature.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Display {
     /// The CodeDirectory flags (`runtime`, `adhoc`, ...).
@@ -398,6 +399,9 @@ pub struct Display {
     pub timestamp: Option<String>,
     /// `Identifier=`.
     pub identifier: Option<String>,
+    /// `CDHash=`: the code directory hash, which names the signature (a
+    /// notarization ticket is issued for it, and stapling leaves it).
+    pub cdhash: Option<String>,
 }
 
 impl Display {
@@ -407,7 +411,7 @@ impl Display {
     }
 }
 
-/// Parses `codesign -d -vv` output.
+/// Parses `codesign -d -vvv` output.
 pub fn parse_display(text: &str) -> Display {
     let mut display = Display::default();
     for line in text.lines() {
@@ -433,6 +437,8 @@ pub fn parse_display(text: &str) -> Display {
             display.timestamp = Some(time.to_string());
         } else if let Some(identifier) = line.strip_prefix("Identifier=") {
             display.identifier = Some(identifier.to_string());
+        } else if let Some(cdhash) = line.strip_prefix("CDHash=") {
+            display.cdhash = Some(cdhash.trim().to_ascii_lowercase());
         }
     }
     display
@@ -653,12 +659,16 @@ Policy: Code Signing
     #[test]
     fn codesign_display_is_read() {
         let display = parse_display(
-            "Executable=/d/Notes.app/Contents/MacOS/notes\nIdentifier=com.acme.notes\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=271 flags=0x10000(runtime) hashes=2+3 location=embedded\nAuthority=Developer ID Application: Acme Ltd (ABCDE12345)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nTimestamp=Oct 7, 2026 at 5:58:33 AM\nTeamIdentifier=ABCDE12345\n",
+            "Executable=/d/Notes.app/Contents/MacOS/notes\nIdentifier=com.acme.notes\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=271 flags=0x10000(runtime) hashes=2+3 location=embedded\nCandidateCDHash sha256=45d1613a435c6cb05794cbb585587a5245989943\nCDHash=45D1613A435C6CB05794CBB585587A5245989943\nAuthority=Developer ID Application: Acme Ltd (ABCDE12345)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nTimestamp=Oct 7, 2026 at 5:58:33 AM\nTeamIdentifier=ABCDE12345\n",
         );
         assert!(display.hardened());
         assert_eq!(display.authority.len(), 3);
         assert_eq!(display.team.as_deref(), Some("ABCDE12345"));
         assert!(display.timestamp.is_some());
+        assert_eq!(
+            display.cdhash.as_deref(),
+            Some("45d1613a435c6cb05794cbb585587a5245989943")
+        );
         let adhoc = parse_display(
             "CodeDirectory v=20500 size=271 flags=0x10002(adhoc,runtime) hashes=2+3\nSignature=adhoc\nTeamIdentifier=not set\n",
         );
