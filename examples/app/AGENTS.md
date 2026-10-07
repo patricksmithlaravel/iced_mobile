@@ -77,7 +77,8 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 - Android may end the app and start it over (Back at its root, or killing its process in the
   background to free memory): save what must survive on `Lifecycle::Suspended`
   (`iced::mobile::on_lifecycle`). To react in the UI (hide content, pause, lock), subscribe to
-  `iced::mobile::lifecycle()`, as `src/lib.rs` does: its messages come too late for saving. Hide
+  `iced::mobile::lifecycle()`, as `src/lib.rs` does: its `LifecycleEvent` messages come too late
+  for saving, and a `match` on them needs a wildcard arm. Hide
   content on `Inactive`, lock on `Background`, never on `Inactive` (a Face ID prompt makes the app
   inactive, and the unlock would loop).
 - Keep padding the root with the safe area (`App::padding` in `src/lib.rs`): phones draw under the

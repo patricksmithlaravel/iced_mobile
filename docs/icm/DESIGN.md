@@ -1593,8 +1593,8 @@ Each JSON object starts with `"v":1,"kind":"<kind>"`, for example `ICM_EVENT {"v
 | `start` | `protocol`, `framework`, `pid`, `platform`, `bridge` |
 | `theme` | `mode` (`light`, `dark`, `none`): Android and iOS, once at start and on every switch |
 | `ready` | after the first presented frame: `ms`, `window{size,scale}`, `backend` |
-| `lifecycle` | `state` |
-| `app_state` | `state` (`foreground`, `active`, `inactive`, `background`, `memory_warning`), what `iced::mobile::lifecycle()` delivers to `update` |
+| `lifecycle` | `state` (`suspended`, `resumed`), the `iced::mobile::Lifecycle` that the `on_lifecycle` hook receives |
+| `app_state` | `state` (`foreground`, `active`, `inactive`, `background`, `memory_warning`), the `iced::mobile::LifecycleEvent` that `iced::mobile::lifecycle()` delivers to `update` |
 | `panic` | `message`, `location`, `thread` |
 | `warning` | `code` (e.g. `font.default_missing`, `compositor.fallback`) |
 | `safe_area` | `insets` (`[top, right, bottom, left]`), `keyboard`, in logical pixels |

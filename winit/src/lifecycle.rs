@@ -9,11 +9,9 @@ use crate::core::time::{Duration, Instant};
 
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-/// The application's life, as two channels report it.
-///
-/// [`on_lifecycle`] runs a hook on the event loop's thread, before iced acts,
-/// with what winit says: [`Suspended`](Self::Suspended) and
-/// [`Resumed`](Self::Resumed), and nothing else.
+/// What winit says of the application's life, for a shell that must act on
+/// it at once: [`on_lifecycle`] runs a hook with it on the event loop's
+/// thread, before iced acts.
 ///
 /// | Platform | `Suspended` | `Resumed` |
 /// |---|---|---|
@@ -22,8 +20,48 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 /// | Web | the page is hidden into the back-forward cache (`pagehide`, persisted) | at launch, and when the page comes back from that cache (`pageshow`) |
 /// | Desktop | never | once, at launch |
 ///
-/// [`lifecycle()`] delivers the other five to `update`, as messages, a
-/// moment after the event:
+/// It has these two variants and no others, so a `match` on it needs no
+/// wildcard arm. (v0.14.1-mobile.1 marked it `#[non_exhaustive]`; a
+/// wildcard arm written for that tag after both variants is unreachable
+/// now, and can go.) The application's states reach `update` through
+/// [`lifecycle()`], as a [`LifecycleEvent`].
+///
+/// ```
+/// use iced_winit::Lifecycle;
+///
+/// fn hook(event: Lifecycle) {
+///     match event {
+///         Lifecycle::Suspended => {
+///             // Save what must outlive the process.
+///         }
+///         Lifecycle::Resumed => {}
+///     }
+/// }
+///
+/// iced_winit::on_lifecycle(hook);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+    /// winit's `Suspended`: on Android the native window is going away, as
+    /// the application leaves the screen; on iOS it is about to stop being
+    /// active.
+    Suspended,
+    /// winit's `Resumed`.
+    Resumed,
+}
+
+impl Lifecycle {
+    /// The name `ICM_EVENT` `lifecycle` lines give it.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Suspended => "suspended",
+            Self::Resumed => "resumed",
+        }
+    }
+}
+
+/// The application's state as it changes, which [`lifecycle()`] delivers to
+/// `update`, as a message, a moment after the event:
 ///
 /// | Variant | iOS | Android | Web | Desktop |
 /// |---|---|---|---|---|
@@ -42,39 +80,33 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 /// `Inactive` then `Active`, never `Background`, so locking on `Background`
 /// cannot loop through the unlock's own prompt.
 ///
+/// What must be done before the system acts (saving what must outlive the
+/// process) belongs in the hook of [`on_lifecycle`], which runs at once with
+/// a [`Lifecycle`].
+///
 /// More variants may be added, so a `match` on it needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Lifecycle {
-    /// [`on_lifecycle`] only. winit's `Suspended`: on Android the native
-    /// window is going away, as the application leaves the screen; on iOS
-    /// it is about to stop being active.
-    Suspended,
-    /// [`on_lifecycle`] only. winit's `Resumed`.
-    Resumed,
-    /// [`lifecycle()`] only. The application became visible: at launch, and
-    /// on every return from the background.
+pub enum LifecycleEvent {
+    /// The application became visible: at launch, and on every return from
+    /// the background.
     Foreground,
-    /// [`lifecycle()`] only. It is visible and takes input.
+    /// It is visible and takes input.
     Active,
-    /// [`lifecycle()`] only. It stopped taking input; it may still be
-    /// visible.
+    /// It stopped taking input; it may still be visible.
     Inactive,
-    /// [`lifecycle()`] only. It is no longer visible.
+    /// It is no longer visible.
     Background,
-    /// [`lifecycle()`] only. The system is short of memory: free caches and
-    /// whatever can be built again. On Android with GameActivity it also
-    /// comes each time the application goes to the background (see the
-    /// table).
+    /// The system is short of memory: free caches and whatever can be built
+    /// again. On Android with GameActivity it also comes each time the
+    /// application goes to the background (see the table).
     MemoryWarning,
 }
 
-impl Lifecycle {
-    /// The name `ICM_EVENT` lines give it.
+impl LifecycleEvent {
+    /// The name `ICM_EVENT` `app_state` lines give it.
     fn name(self) -> &'static str {
         match self {
-            Self::Suspended => "suspended",
-            Self::Resumed => "resumed",
             Self::Foreground => "foreground",
             Self::Active => "active",
             Self::Inactive => "inactive",
@@ -90,8 +122,8 @@ static HOOK: OnceLock<fn(Lifecycle)> = OnceLock::new();
 /// Calls `hook` on the event loop's thread whenever winit reports the
 /// application suspended or resumed, before iced acts on it.
 ///
-/// The hook receives [`Lifecycle::Suspended`] and [`Lifecycle::Resumed`]
-/// only. To react to the application's life in `update`, subscribe to
+/// The hook receives [`Lifecycle::Suspended`] and [`Lifecycle::Resumed`].
+/// To react to the application's life in `update`, subscribe to
 /// [`lifecycle()`] instead: its messages arrive a moment later, so what must
 /// be done before the system acts (saving what must outlive the process)
 /// belongs here.
@@ -116,19 +148,20 @@ pub fn on_lifecycle(hook: fn(Lifecycle)) {
 }
 
 /// The application's life as it changes, for `update`:
-/// [`Foreground`](Lifecycle::Foreground), [`Active`](Lifecycle::Active),
-/// [`Inactive`](Lifecycle::Inactive), [`Background`](Lifecycle::Background)
-/// and [`MemoryWarning`](Lifecycle::MemoryWarning), with the meanings and
-/// the order in the table on [`Lifecycle`].
+/// [`Foreground`](LifecycleEvent::Foreground),
+/// [`Active`](LifecycleEvent::Active), [`Inactive`](LifecycleEvent::Inactive),
+/// [`Background`](LifecycleEvent::Background) and
+/// [`MemoryWarning`](LifecycleEvent::MemoryWarning), with the meanings and
+/// the order in the table on [`LifecycleEvent`].
 ///
 /// ```no_run
-/// # mod iced { pub use iced_winit::futures::Subscription; pub mod mobile { pub use iced_winit::{Lifecycle, lifecycle}; } }
+/// # mod iced { pub use iced_winit::futures::Subscription; pub mod mobile { pub use iced_winit::{LifecycleEvent, lifecycle}; } }
 /// use iced::Subscription;
-/// use iced::mobile::{self, Lifecycle};
+/// use iced::mobile::{self, LifecycleEvent};
 ///
 /// #[derive(Debug, Clone)]
 /// enum Message {
-///     Lifecycle(Lifecycle),
+///     Lifecycle(LifecycleEvent),
 /// }
 ///
 /// struct Wallet {
@@ -139,9 +172,13 @@ pub fn on_lifecycle(hook: fn(Lifecycle)) {
 /// impl Wallet {
 ///     fn update(&mut self, message: Message) {
 ///         match message {
-///             Message::Lifecycle(Lifecycle::Inactive) => self.hidden = true,
-///             Message::Lifecycle(Lifecycle::Active) => self.hidden = false,
-///             Message::Lifecycle(Lifecycle::Background) => self.locked = true,
+///             Message::Lifecycle(LifecycleEvent::Inactive) => {
+///                 self.hidden = true;
+///             }
+///             Message::Lifecycle(LifecycleEvent::Active) => self.hidden = false,
+///             Message::Lifecycle(LifecycleEvent::Background) => {
+///                 self.locked = true;
+///             }
 ///             Message::Lifecycle(_) => {}
 ///         }
 ///     }
@@ -164,12 +201,12 @@ pub fn on_lifecycle(hook: fn(Lifecycle)) {
 /// application draw only while the Activity runs, so hiding content on
 /// `Inactive` does not reliably keep it out of the Recents thumbnail there:
 /// set `FLAG_SECURE` on the window for that.
-pub fn lifecycle() -> Subscription<Lifecycle> {
+pub fn lifecycle() -> Subscription<LifecycleEvent> {
     Subscription::run(|| EVENTS.subscribe())
 }
 
 /// The transitions, to every [`lifecycle`] subscription.
-static EVENTS: Broadcast<Lifecycle> = Broadcast::new(false);
+static EVENTS: Broadcast<LifecycleEvent> = Broadcast::new(false);
 
 /// The visibility and focus of the application running now.
 static TRACKER: Mutex<Tracker> = Mutex::new(Tracker::new());
@@ -249,8 +286,8 @@ impl Input {
         }
     }
 
-    /// What the hook receives for this input: `Suspended` and `Resumed`
-    /// only, as before [`lifecycle`] existed.
+    /// What the hook receives for this input: `Suspended` and `Resumed`, as
+    /// before [`lifecycle`] existed.
     fn hook_event(self) -> Option<Lifecycle> {
         match self {
             Self::Resumed => Some(Lifecycle::Resumed),
@@ -328,14 +365,14 @@ impl Tracker {
         &mut self,
         platform: Platform,
         input: Input,
-    ) -> impl Iterator<Item = Lifecycle> + use<> {
+    ) -> impl Iterator<Item = LifecycleEvent> + use<> {
         use Platform::{Android, Desktop, Ios, Web};
 
         let before = self.phase();
 
         match (platform, input) {
             (_, Input::MemoryWarning) => {
-                return [Some(Lifecycle::MemoryWarning), None]
+                return [Some(LifecycleEvent::MemoryWarning), None]
                     .into_iter()
                     .flatten();
             }
@@ -362,8 +399,8 @@ impl Tracker {
 }
 
 /// What the application sees when its state goes from `before` to `after`.
-fn transitions(before: Phase, after: Phase) -> [Option<Lifecycle>; 2] {
-    use Lifecycle::{Active, Background, Foreground, Inactive};
+fn transitions(before: Phase, after: Phase) -> [Option<LifecycleEvent>; 2] {
+    use LifecycleEvent::{Active, Background, Foreground, Inactive};
 
     match (before, after) {
         (Phase::Background, Phase::Inactive) => [Some(Foreground), None],
@@ -470,7 +507,9 @@ fn wake_up_by(
 mod tests {
     use super::*;
 
-    use Lifecycle::{Active, Background, Foreground, Inactive, MemoryWarning};
+    use LifecycleEvent::{
+        Active, Background, Foreground, Inactive, MemoryWarning,
+    };
 
     const PLATFORMS: [Platform; 4] = [
         Platform::Ios,
@@ -480,7 +519,7 @@ mod tests {
     ];
 
     /// Every transition a new tracker gives for `inputs`.
-    fn feed(platform: Platform, inputs: &[Input]) -> Vec<Lifecycle> {
+    fn feed(platform: Platform, inputs: &[Input]) -> Vec<LifecycleEvent> {
         let mut tracker = Tracker::new();
 
         inputs
@@ -622,7 +661,7 @@ mod tests {
     }
 
     /// Every sequence of up to five inputs, on every platform, keeps the
-    /// order of the table on [`Lifecycle`], with no repeats.
+    /// order of the table on [`LifecycleEvent`], with no repeats.
     #[test]
     fn transitions_keep_their_order_whatever_the_inputs() {
         const INPUTS: [Input; 6] = [
@@ -643,7 +682,7 @@ mod tests {
                     Active => state == Foreground || state == Inactive,
                     Inactive => state == Active,
                     Background => state == Inactive || state == Foreground,
-                    _ => false,
+                    MemoryWarning => false,
                 };
 
                 assert!(
@@ -669,6 +708,19 @@ mod tests {
         for platform in PLATFORMS {
             check(platform, &mut Vec::new(), 5);
         }
+    }
+
+    /// `ICM_EVENT` lines name them so, and launchers read the names.
+    #[test]
+    fn events_keep_their_icm_names() {
+        assert_eq!(Lifecycle::Suspended.name(), "suspended");
+        assert_eq!(Lifecycle::Resumed.name(), "resumed");
+
+        assert_eq!(Foreground.name(), "foreground");
+        assert_eq!(Active.name(), "active");
+        assert_eq!(Inactive.name(), "inactive");
+        assert_eq!(Background.name(), "background");
+        assert_eq!(MemoryWarning.name(), "memory_warning");
     }
 
     #[test]

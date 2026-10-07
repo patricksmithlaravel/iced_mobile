@@ -387,29 +387,33 @@
 //!
 //! Two channels report the application's life:
 //!
-//! - [`lifecycle()`] is a subscription that delivers
-//!   [`Lifecycle::Foreground`], [`Active`](Lifecycle::Active),
-//!   [`Inactive`](Lifecycle::Inactive), [`Background`](Lifecycle::Background)
-//!   and [`MemoryWarning`](Lifecycle::MemoryWarning) to `update`, with the
-//!   same meaning on iOS and Android. Hide what is on screen on `Inactive`
-//!   (Control Center, a Face ID prompt, a call, the notification shade), lock
-//!   or pause on `Background`, free caches on `MemoryWarning`. The messages
-//!   arrive a moment after the event.
+//! - [`lifecycle()`] is a subscription that delivers a [`LifecycleEvent`]
+//!   to `update`: [`Foreground`](LifecycleEvent::Foreground),
+//!   [`Active`](LifecycleEvent::Active),
+//!   [`Inactive`](LifecycleEvent::Inactive),
+//!   [`Background`](LifecycleEvent::Background) and
+//!   [`MemoryWarning`](LifecycleEvent::MemoryWarning), with the same meaning
+//!   on iOS and Android. Hide what is on screen on `Inactive` (Control
+//!   Center, a Face ID prompt, a call, the notification shade), lock or pause
+//!   on `Background`, free caches on `MemoryWarning`. The messages arrive a
+//!   moment after the event. More variants may be added, so a `match` on it
+//!   needs a wildcard arm.
 //! - [`on_lifecycle`] runs a hook on the event loop's thread whenever winit
-//!   reports the application suspended or resumed, before iced acts on it:
-//!   save there what must outlive the process. [`Lifecycle::Suspended`]
-//!   means different things per platform: on iOS the application is about
-//!   to stop being active, which also happens for Control Center,
-//!   notifications and Face ID; on Android its window is going away. On the
-//!   web it fires when the page goes into the back-forward cache. The
-//!   desktop never sends it.
+//!   reports the application suspended or resumed, before iced acts on it,
+//!   with a [`Lifecycle`]: save there what must outlive the process.
+//!   [`Lifecycle::Suspended`] means different things per platform: on iOS
+//!   the application is about to stop being active, which also happens for
+//!   Control Center, notifications and Face ID; on Android its window is
+//!   going away. On the web it fires when the page goes into the
+//!   back-forward cache. The desktop never sends it. [`Lifecycle`] has two
+//!   variants, `Suspended` and `Resumed`, and no others.
 //!
-//! [`Lifecycle`] has the full tables. Lock on `Background`, not on
-//! `Inactive` or `Suspended`: an unlock that asks for Face ID makes the app
-//! inactive again, and would loop.
+//! [`LifecycleEvent`] and [`Lifecycle`] have the full tables. Lock on
+//! `Background`, not on `Inactive` or `Suspended`: an unlock that asks for
+//! Face ID makes the app inactive again, and would loop.
 //!
 //! ```no_run,standalone_crate
-//! use iced::mobile::{self, Lifecycle};
+//! use iced::mobile::{self, Lifecycle, LifecycleEvent};
 //! use iced::widget::text;
 //! use iced::{Element, Subscription};
 //!
@@ -421,15 +425,21 @@
 //!
 //! #[derive(Debug, Clone)]
 //! enum Message {
-//!     Lifecycle(Lifecycle),
+//!     Lifecycle(LifecycleEvent),
 //! }
 //!
 //! impl Wallet {
 //!     fn update(&mut self, message: Message) {
 //!         match message {
-//!             Message::Lifecycle(Lifecycle::Inactive) => self.hidden = true,
-//!             Message::Lifecycle(Lifecycle::Active) => self.hidden = false,
-//!             Message::Lifecycle(Lifecycle::Background) => self.locked = true,
+//!             Message::Lifecycle(LifecycleEvent::Inactive) => {
+//!                 self.hidden = true;
+//!             }
+//!             Message::Lifecycle(LifecycleEvent::Active) => {
+//!                 self.hidden = false;
+//!             }
+//!             Message::Lifecycle(LifecycleEvent::Background) => {
+//!                 self.locked = true;
+//!             }
 //!             Message::Lifecycle(_) => {}
 //!         }
 //!     }
@@ -444,7 +454,21 @@
 //!     }
 //! }
 //!
+//! /// Runs before iced acts: what must outlive the process is saved here.
+//! fn hook(event: Lifecycle) {
+//!     match event {
+//!         Lifecycle::Suspended => save(),
+//!         Lifecycle::Resumed => {}
+//!     }
+//! }
+//!
+//! fn save() {
+//!     // Write what must not be lost to a file.
+//! }
+//!
 //! pub fn run() -> iced::Result {
+//!     mobile::on_lifecycle(hook);
+//!
 //!     iced::application(Wallet::default, Wallet::update, Wallet::view)
 //!         .subscription(Wallet::subscription)
 //!         .run()
@@ -693,7 +717,7 @@
 //!   without its level, so it cannot be told from a real shortage
 //!   ([Lifecycle](#lifecycle)).
 
-pub use crate::shell::{Lifecycle, lifecycle, on_lifecycle};
+pub use crate::shell::{Lifecycle, LifecycleEvent, lifecycle, on_lifecycle};
 
 /// The Android activity handle that android-activity gives `android_main`.
 #[cfg(target_os = "android")]

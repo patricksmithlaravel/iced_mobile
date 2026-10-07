@@ -128,7 +128,7 @@ pub fn activity_destroyed() -> bool {
 
 mod lifecycle;
 
-pub use lifecycle::{Lifecycle, lifecycle, on_lifecycle};
+pub use lifecycle::{Lifecycle, LifecycleEvent, lifecycle, on_lifecycle};
 
 /// Runs a [`Program`] with the provided settings.
 pub fn run<P>(program: P) -> Result<(), Error>

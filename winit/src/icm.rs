@@ -30,8 +30,8 @@
 //! | `start` | `protocol` (1), `framework` (the iced version), `pid` (`null` on the web), `platform` (`macos`, `linux`, `windows`, `ios`, `android`, `web`, ...), `bridge` (the agent bridge protocol, `null` when it is not compiled in) | the shell starts |
 //! | `theme` | `mode` (`light`, `dark`, `none` when the system does not say) | Android and iOS: the shell read the system's light or dark mode, once at start and again on every change |
 //! | `ready` | `ms` (since `start`), `window{size, physical, scale}` (logical and physical size, scale factor), `backend` (`wgpu`, `tiny-skia`), `adapter`, `api` (`Metal`, `Vulkan`, `Gl`, ...) | the shell's first frame was presented, once per `start` |
-//! | `lifecycle` | `state` (`suspended`, `resumed`) | winit reports the application suspended or resumed; see [`Lifecycle`](crate::Lifecycle) |
-//! | `app_state` | `state` (`foreground`, `active`, `inactive`, `background`, `memory_warning`) | the application's state changed, as [`lifecycle()`](crate::lifecycle()) delivers it to `update`; see [`Lifecycle`](crate::Lifecycle) |
+//! | `lifecycle` | `state` (`suspended`, `resumed`) | winit reports the application suspended or resumed, as the hook of [`on_lifecycle`](crate::on_lifecycle) receives it; see [`Lifecycle`](crate::Lifecycle) |
+//! | `app_state` | `state` (`foreground`, `active`, `inactive`, `background`, `memory_warning`) | the application's state changed, as [`lifecycle()`](crate::lifecycle()) delivers it to `update`; see [`LifecycleEvent`](crate::LifecycleEvent) |
 //! | `panic` | `message`, `location` (`file:line:column` or `null`), `thread` | a thread panics, once [`install_panic_hook`] ran |
 //! | `warning` | `code`, `message` | something degraded; see [`warning`] |
 //! | `safe_area` | `insets` (`[top, right, bottom, left]`), `keyboard` (the on-screen keyboard's height above the bottom edge, 0 while hidden), in logical pixels | the shell read a new [`SafeArea`](crate::SafeArea): when the first window opens (zeros on the desktop and the web), then on every change on Android and iOS |

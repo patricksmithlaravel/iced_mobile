@@ -21,7 +21,7 @@ every app instead. Its source is [examples/app/AGENTS.md](examples/app/AGENTS.md
 | Path | What it is |
 |---|---|
 | `src/mobile.rs` | `iced::mobile` and `iced::android_main!`: the app-facing mobile API. Its docs are the main mobile documentation (features, manifest and plist keys, logs, lifecycle, Activity destruction, known limitations). |
-| `winit/src/lib.rs` | `iced_winit`: `set_android_app`, `activity_destroyed`, and the Android and iOS handling in the event loop. `Lifecycle`, `on_lifecycle` and the `lifecycle()` subscription are in `winit/src/lifecycle.rs`; the other platform services in `safe_area.rs` (with `runtime/src/safe_area.rs`), `appearance.rs` (dark mode), `clipboard/` and `modifiers.rs` |
+| `winit/src/lib.rs` | `iced_winit`: `set_android_app`, `activity_destroyed`, and the Android and iOS handling in the event loop. `Lifecycle`, `on_lifecycle`, `LifecycleEvent` and the `lifecycle()` subscription are in `winit/src/lifecycle.rs`; the other platform services in `safe_area.rs` (with `runtime/src/safe_area.rs`), `appearance.rs` (dark mode), `clipboard/` and `modifiers.rs` |
 | `winit/src/icm.rs` | the `ICM_EVENT` protocol (start, theme, ready, lifecycle, app_state, panic, warning, safe_area, exit) that launchers read |
 | `winit/src/scene.rs`, `winit/src/ios_sdk.rs` | iOS: windows in the UIKit scene, and the SDK the app was linked with |
 | `vendor/winit/`, `vendor/patches/` | winit 0.30.13 with Android fixes, its own workspace; `vendor/winit/PATCHES.md` lists the patches |
@@ -158,7 +158,10 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
 
 - **Keep the API that Tawara pins stable.** `iced_winit::set_android_app`, `iced_winit::on_lifecycle`
   and `iced_winit::Lifecycle`, with their `iced::mobile` re-exports. You may add to them, but do not
-  rename them, remove them or change their signatures.
+  rename them, remove them or change their signatures. `Lifecycle` stays an exhaustive enum of
+  `Suspended` and `Resumed` with the derives it had: a variant or `#[non_exhaustive]` breaks an
+  app's exhaustive `match`. New lifecycle events go into `LifecycleEvent`, which is
+  `#[non_exhaustive]`.
 - **Gate mobile behaviour** behind `target_os = "android"` / `target_os = "ios"`. Desktop and wasm
   behave as upstream does unless an app or a launcher opts in: a feature, `iced::mobile::init_logger`,
   or `ICM_EVENTS=1` (`?icm_events=1` on the web).

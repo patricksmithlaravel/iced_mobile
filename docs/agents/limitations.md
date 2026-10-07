@@ -74,9 +74,10 @@ this file in the commit that fixes or finds a limitation.
   iOS the status bar always follows the system's mode, also when the app
   forces the other one.
 - **Two lifecycle channels, with different timing.**
-  `iced::mobile::lifecycle()` delivers `Foreground`, `Active`, `Inactive`,
-  `Background` and `MemoryWarning` to `update`, the same on iOS and
-  Android, a moment after the event. Hide sensitive content on `Inactive`
+  `iced::mobile::lifecycle()` delivers an `iced::mobile::LifecycleEvent`
+  (`Foreground`, `Active`, `Inactive`, `Background` and `MemoryWarning`;
+  match it with a wildcard arm, as more may come) to `update`, the same on
+  iOS and Android, a moment after the event. Hide sensitive content on `Inactive`
   (Control Center, Face ID prompts, calls, the notification shade) and lock
   on `Background`, never on `Inactive`: an unlock that asks for Face ID
   makes the app inactive again, and loops. `on_lifecycle` runs one plain

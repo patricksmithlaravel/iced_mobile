@@ -5,7 +5,7 @@
 //! [`application`] is the program. [`run`] runs it, and `tests/icm.rs`
 //! drives it headless: the `.ice` flows in `tests/flows`, `icm shot
 //! --headless` and `icm ui --headless`.
-use iced::mobile::{Lifecycle, SafeArea};
+use iced::mobile::{LifecycleEvent, SafeArea};
 use iced::theme;
 use iced::widget::{
     Column, button, column, container, operation, responsive, row, scrollable,
@@ -45,7 +45,7 @@ pub struct App {
     appearance: theme::Mode,
     /// Whether the app is active, inactive or in the background, as the
     /// platform last reported it.
-    lifecycle: Option<Lifecycle>,
+    lifecycle: Option<LifecycleEvent>,
     count: i64,
     draft: String,
     items: Vec<String>,
@@ -75,7 +75,7 @@ pub enum Message {
     AppearanceChanged(theme::Mode),
     /// The app came to the foreground, became active or inactive, went to
     /// the background, or the system is short of memory.
-    LifecycleChanged(Lifecycle),
+    LifecycleChanged(LifecycleEvent),
     /// The "Increment" button was pressed.
     Increment,
     /// The text in the field changed.
@@ -108,7 +108,7 @@ impl App {
                 Task::none()
             }
             // An app frees its caches here.
-            Message::LifecycleChanged(Lifecycle::MemoryWarning) => {
+            Message::LifecycleChanged(LifecycleEvent::MemoryWarning) => {
                 log::warn!("the system is short of memory");
 
                 Task::none()
@@ -224,10 +224,10 @@ impl App {
             .size(14)
             .width(Fill),
             text(match self.lifecycle {
-                Some(Lifecycle::Foreground) => "Lifecycle: foreground",
-                Some(Lifecycle::Active) => "Lifecycle: active",
-                Some(Lifecycle::Inactive) => "Lifecycle: inactive",
-                Some(Lifecycle::Background) => "Lifecycle: background",
+                Some(LifecycleEvent::Foreground) => "Lifecycle: foreground",
+                Some(LifecycleEvent::Active) => "Lifecycle: active",
+                Some(LifecycleEvent::Inactive) => "Lifecycle: inactive",
+                Some(LifecycleEvent::Background) => "Lifecycle: background",
                 _ => "Lifecycle: not reported",
             })
             .size(14),
@@ -445,8 +445,9 @@ mod tests {
     fn the_lifecycle_is_shown() {
         let mut app = App::default();
 
-        let _ = app.update(Message::LifecycleChanged(Lifecycle::Inactive));
-        let _ = app.update(Message::LifecycleChanged(Lifecycle::MemoryWarning));
+        let _ = app.update(Message::LifecycleChanged(LifecycleEvent::Inactive));
+        let _ = app
+            .update(Message::LifecycleChanged(LifecycleEvent::MemoryWarning));
 
         let mut ui = simulator(app.view());
 
