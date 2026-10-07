@@ -27,6 +27,10 @@ pub fn run(ctx: &mut Ctx, args: &DevicesArgs) -> Result<()> {
     };
     let single = platforms.len() == 1;
 
+    if ctx.dry_run() {
+        return plan(ctx, &platforms);
+    }
+
     let mut text = String::new();
     let mut listed = Map::new();
     let mut counts = Vec::new();
@@ -67,6 +71,35 @@ pub fn run(ctx: &mut Ctx, args: &DevicesArgs) -> Result<()> {
     ctx.rep.set("platforms", Value::Object(listed));
     ctx.rep.summary(counts.join("; "));
     ctx.rep.content(text);
+    Ok(())
+}
+
+/// `--dry-run`: what each platform's listing would ask, as a plan; nothing
+/// is listed (`devices android` plans in `android::plan`).
+fn plan(ctx: &Ctx, platforms: &[Platform]) -> Result<()> {
+    let mut plan = crate::plan::Plan::new();
+    for platform in platforms {
+        let (name, description) = match platform {
+            Platform::Desktop => ("desktop.devices", "this machine: its OS and architecture"),
+            Platform::Web => (
+                "web.devices",
+                "find headless Chrome (host.toml `chrome`, or where it is usually installed) and its version",
+            ),
+            Platform::IosSim => (
+                "ios-sim.devices",
+                "xcrun simctl list -j devices available, the iOS ones",
+            ),
+            Platform::IosDevice => ("ios-device.devices", "xcrun devicectl list devices"),
+            Platform::Android => (
+                "android.devices",
+                "adb devices -l, and the AVDs in ANDROID_AVD_HOME",
+            ),
+        };
+        plan.push(crate::plan::Step::internal(name, description));
+    }
+    plan.report(ctx);
+    ctx.rep
+        .summary("the plan of icm devices (--dry-run: nothing was listed)");
     Ok(())
 }
 

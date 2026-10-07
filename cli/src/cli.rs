@@ -47,7 +47,7 @@ pub struct GlobalArgs {
     #[arg(long, global = true, env = "ICM_CONFIG", value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Print the plan; change nothing; exit 0
+    /// Print the plan; change nothing; exit 0 (check, ui, verify and host test have no plan and refuse it, exit 2)
     #[arg(long, global = true)]
     pub dry_run: bool,
 

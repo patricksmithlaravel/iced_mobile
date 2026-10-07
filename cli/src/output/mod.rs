@@ -800,7 +800,11 @@ impl Inner {
             text.push('\n');
             let _ = rundir::write_atomic(&dir.join("result.json"), text.as_bytes());
             let _ = rundir::write_atomic(&root.join("last.json"), text.as_bytes());
-            if let Some(platform) = self.latest.clone() {
+            // `latest/<platform>` is the last real run's: a plan
+            // (`--dry-run`) leaves it where it was.
+            if let Some(platform) = self.latest.clone()
+                && result.get("dry_run") != Some(&Value::Bool(true))
+            {
                 let _ = rundir::link_latest(&root, &platform, &dir);
             }
         }

@@ -131,6 +131,10 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
         .as_deref()
         .map(absolute)
         .unwrap_or_else(|| project.icm_dir.join("host").join("shots"));
+    let jobs = jobs(args, &viewports, theme, &out_dir);
+    if ctx.dry_run() {
+        return plan(ctx, &project, &jobs);
+    }
     std::fs::create_dir_all(&out_dir).map_err(|error| {
         IcmError::new(
             CheckId::ToolFailed,
@@ -139,50 +143,7 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
     })?;
 
     let harness = harness::build(ctx)?;
-    let wait_ms = args.wait.as_millis().to_string();
     let several = viewports.len() > 1;
-
-    let jobs: Vec<Job> = viewports
-        .iter()
-        .map(|viewport| {
-            let label = match &args.name {
-                Some(name) => file_part(name),
-                None => {
-                    let mut label = format!("{}-{theme}", file_part(&viewport.label));
-                    if let Some(preset) = &args.preset {
-                        label.push('-');
-                        label.push_str(&file_part(preset));
-                    }
-                    label
-                }
-            };
-            let path = match &args.out {
-                Some(out) => absolute(out),
-                None => out_dir.join(format!("{label}.png")),
-            };
-            let preview = raster::preview_path(&path);
-
-            let mut command = vec!["icm-shot".to_string()];
-            command.extend(viewport.args());
-            command.extend(["--theme".to_string(), theme.to_string()]);
-            if let Some(preset) = &args.preset {
-                command.extend(["--preset".to_string(), preset.clone()]);
-            }
-            command.extend([
-                "--wait-ms".to_string(),
-                wait_ms.clone(),
-                "--out".to_string(),
-                path.display().to_string(),
-            ]);
-            Job {
-                viewport: viewport.clone(),
-                label,
-                path,
-                preview,
-                command,
-            }
-        })
-        .collect();
 
     // Each render is its own process on one CPU core: run a few at once.
     let rendered = render_all(ctx, &harness, &jobs);
@@ -285,6 +246,83 @@ struct Job {
     path: PathBuf,
     preview: PathBuf,
     command: Vec<String>,
+}
+
+/// The screenshots `shot --headless` takes: one per viewport.
+fn jobs(args: &ShotArgs, viewports: &[Viewport], theme: &str, out_dir: &Path) -> Vec<Job> {
+    let wait_ms = args.wait.as_millis().to_string();
+    viewports
+        .iter()
+        .map(|viewport| {
+            let label = match &args.name {
+                Some(name) => file_part(name),
+                None => {
+                    let mut label = format!("{}-{theme}", file_part(&viewport.label));
+                    if let Some(preset) = &args.preset {
+                        label.push('-');
+                        label.push_str(&file_part(preset));
+                    }
+                    label
+                }
+            };
+            let path = match &args.out {
+                Some(out) => absolute(out),
+                None => out_dir.join(format!("{label}.png")),
+            };
+            let preview = raster::preview_path(&path);
+
+            let mut command = vec!["icm-shot".to_string()];
+            command.extend(viewport.args());
+            command.extend(["--theme".to_string(), theme.to_string()]);
+            if let Some(preset) = &args.preset {
+                command.extend(["--preset".to_string(), preset.clone()]);
+            }
+            command.extend([
+                "--wait-ms".to_string(),
+                wait_ms.clone(),
+                "--out".to_string(),
+                path.display().to_string(),
+            ]);
+            Job {
+                viewport: viewport.clone(),
+                label,
+                path,
+                preview,
+                command,
+            }
+        })
+        .collect()
+}
+
+/// `--dry-run`: the harness build and one render per viewport, as a plan;
+/// nothing is built, rendered or written. The harness target must exist,
+/// as for the real run (`harness.missing`).
+fn plan(ctx: &Ctx, project: &Project, jobs: &[Job]) -> Result<()> {
+    if !harness::has_target(&project.package) {
+        return Err(harness::missing(&project.package));
+    }
+    let mut plan = crate::plan::Plan::new();
+    let build = harness::invocation(
+        project,
+        crate::cargo::Select::Test(harness::TARGET.to_string()),
+        &["--no-run"],
+    );
+    plan.push(crate::plan::Step::exec("cargo.test.build", build.cmd()));
+    for job in jobs {
+        plan.push(crate::plan::Step::internal(
+            "harness.shot",
+            &format!(
+                "render {} with the harness ({}) to {} and its preview",
+                job.viewport.label,
+                job.command.join(" "),
+                crate::paths::display(&job.path)
+            ),
+        ));
+    }
+    plan.report(ctx);
+    ctx.rep
+        .summary("the plan of icm shot --headless (--dry-run: nothing was built or rendered)");
+    Ok(())
 }
 
 /// How many renders run at once.

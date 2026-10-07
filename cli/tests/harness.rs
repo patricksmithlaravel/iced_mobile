@@ -383,6 +383,89 @@ fn blank_headless_shots_warn() {
     assert_eq!(strict["exit"], 1);
 }
 
+/// `--dry-run` keeps its promise here too: `shot --headless` prints the
+/// harness build and one render per viewport and builds or renders
+/// nothing; the commands that have no plan refuse it (exit 2) instead of
+/// building and running the app's code.
+#[test]
+fn dry_runs_build_and_render_nothing() {
+    let fake = Fake::new(true);
+    let result = final_result(&fake.run(&[
+        "shot",
+        "--headless",
+        "--all-viewports",
+        "--theme",
+        "dark",
+        "--dry-run",
+        "--json",
+        "-q",
+    ]));
+    assert_eq!(result["exit"], 0, "{result:#}");
+    assert_eq!(result["dry_run"], true);
+    let plan = result["plan"].as_array().unwrap();
+    let names: Vec<&str> = plan
+        .iter()
+        .map(|step| step["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["cargo.test.build", "harness.shot", "harness.shot"]);
+    let build: Vec<&str> = plan[0]["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap())
+        .collect();
+    assert!(
+        build.windows(2).any(|pair| pair == ["--test", "icm"]),
+        "{build:?}"
+    );
+    assert!(build.contains(&"--no-run"), "{build:?}");
+    assert!(
+        plan[1]["display"]
+            .as_str()
+            .unwrap()
+            .contains("icm-shot --viewport iphone-17 --theme dark"),
+        "{}",
+        plan[1]
+    );
+    assert!(
+        plan[2]["display"]
+            .as_str()
+            .unwrap()
+            .contains("desktop-dark.png")
+    );
+
+    // `print plan` is the same.
+    let printed = final_result(&fake.run(&["print", "plan", "shot", "--headless", "--json", "-q"]));
+    assert_eq!(printed["exit"], 0, "{printed:#}");
+    assert_eq!(printed["dry_run"], true);
+
+    for args in [
+        &["test", "--dry-run"][..],
+        &["check", "--dry-run"][..],
+        &["ui", "--headless", "tree", "--dry-run"][..],
+        &["verify", "android", "--dry-run"][..],
+        &["print", "plan", "test", "--filter", "smoke"][..],
+    ] {
+        let mut args = args.to_vec();
+        args.extend(["--json", "-q"]);
+        let result = final_result(&fake.run(&args));
+        assert_eq!(result["exit"], 2, "{args:?}: {result:#}");
+        assert_eq!(result["errors"][0]["id"], "usage.bad_args", "{args:?}");
+        let detail = result["errors"][0]["detail"].as_str().unwrap();
+        assert!(detail.contains("has no plan"), "{detail}");
+    }
+    let refused =
+        final_result(&fake.run(&["print", "plan", "test", "--filter", "smoke", "--json", "-q"]));
+    assert_eq!(
+        refused["errors"][0]["fix"]["commands"][0],
+        "icm test --filter smoke --json -q"
+    );
+
+    assert_eq!(fake.argv("cargo"), "", "cargo built or ran something");
+    assert_eq!(fake.argv("harness"), "", "the harness ran");
+    assert!(!fake.project.join("target/icm/host").exists());
+}
+
 #[test]
 fn shot_usage_errors() {
     let fake = Fake::new(true);

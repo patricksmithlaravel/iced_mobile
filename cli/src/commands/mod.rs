@@ -70,7 +70,55 @@ fn with_signatures(mut error: IcmError, platform: Platform) -> IcmError {
     error
 }
 
+/// The commands that have no plan: they build and run the app's code
+/// (`check`, host `test`, `ui`) or read and run a release (`verify`). The
+/// lifecycle suite plans (`test --on android --lifecycle`), and `test --on`
+/// anything else is refused by `test` itself.
+fn planless(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Check(_) => Some("check"),
+        Command::Test(args) if args.device().is_none() && !args.lifecycle => Some("test"),
+        Command::Ui(_) => Some("ui"),
+        Command::Verify(_) => Some("verify"),
+        _ => None,
+    }
+}
+
+/// `--dry-run` promises a plan and no change (`icm --help`): a command
+/// without a plan refuses it before it starts, rather than run for real.
+/// The fix is the same command line without `--dry-run` (or `print plan`).
+fn refuse_dry_run(argv: &[String], name: &str) -> IcmError {
+    let mut args: Vec<&str> = argv
+        .iter()
+        .skip(1)
+        .map(String::as_str)
+        .filter(|arg| *arg != "--dry-run")
+        .collect();
+    if args.starts_with(&["print", "plan"]) {
+        let _ = args.drain(..2);
+    }
+    let again = std::iter::once("icm".to_string())
+        .chain(args.iter().map(|arg| crate::process::shell_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    IcmError::new(
+        CheckId::UsageBadArgs,
+        format!(
+            "`icm {name}` has no plan to print, so it refuses --dry-run (and `icm print plan`) instead of running for real; nothing ran"
+        ),
+    )
+    .fix(
+        format!("Run `icm {name}` without --dry-run; it touches no device."),
+        &[again.as_str()],
+    )
+}
+
 fn route(ctx: &mut Ctx, command: Command) -> Result<()> {
+    if ctx.dry_run()
+        && let Some(name) = planless(&command)
+    {
+        return Err(refuse_dry_run(&ctx.argv, name));
+    }
     let android = Some(Platform::Android);
     match command {
         Command::Explain(args) => explain::run(ctx, &args),

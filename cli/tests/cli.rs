@@ -594,8 +594,9 @@ fn a_detached_failure_keeps_its_exit_code() {
     assert_eq!(done["errors"][0]["id"], "env.jdk_missing");
 }
 
-/// `--dry-run` on the web, Android and session commands prints a plan and
-/// touches nothing: no adb, no browser, no build, no session, no ledger.
+/// `--dry-run` on the web, Android, desktop, `devices` and session commands
+/// prints a plan and touches nothing: no adb, no xcrun, no browser, no
+/// build, no session, no ledger. A desktop shot needs no running app.
 #[test]
 fn dry_runs_touch_nothing() {
     let sandbox = Sandbox::with_fixture("app");
@@ -637,6 +638,14 @@ fn dry_runs_touch_nothing() {
         &["shot", "ios-sim"],
         &["logs", "ios-sim"],
         &["logs", "desktop"],
+        &["shot", "desktop"],
+        &["stop", "desktop"],
+        &["devices"],
+        &["devices", "web"],
+        &["devices", "ios-sim"],
+        &["devices", "ios-device"],
+        &["run", "ios-sim"],
+        &["run", "ios-device"],
         &["build", "--all"],
         &["ledger", "mark-uploaded", "android", "--build", "3"],
     ];
@@ -679,7 +688,8 @@ fn dry_runs_touch_nothing() {
         std::fs::read_to_string(&log).unwrap()
     );
     let icm = sandbox.cwd.join("target/icm");
-    for dir in ["build", "sessions", "locks", "gen"] {
+    // `latest/<platform>` stays the last real run's.
+    for dir in ["build", "sessions", "locks", "gen", "latest"] {
         assert!(!icm.join(dir).exists(), "target/icm/{dir} was created");
     }
     assert!(!sandbox.cwd.join(".icm/ledger.toml").exists());

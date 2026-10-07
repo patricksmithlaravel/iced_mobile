@@ -2010,23 +2010,6 @@ fn attach(ctx: &Ctx, project: &Project, session: &Session, launched: &Launched) 
 /// `icm shot desktop`: captures the running app again.
 pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
     let project = ctx.project()?.clone();
-    let Some(session) = read_session(&project) else {
-        return Err(no_session("no desktop app is running for this project"));
-    };
-    if !running(&session) {
-        remove_session(&project, session.pid);
-        return Err(no_session(format!(
-            "the desktop app (pid {}) of run {} is no longer running",
-            session.pid, session.run
-        )));
-    }
-    ctx.rep
-        .set("session", json!(paths::display(&session_path(&project))));
-    ctx.rep.set(
-        "process",
-        json!({"pid": session.pid, "alive": true, "run": session.run}),
-    );
-
     let run_dir = run_dir(ctx, &project)?;
     let name = match &args.name {
         Some(name) => {
@@ -2050,19 +2033,44 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
         None => run_dir.join(name),
     };
 
+    // Planned before the session is read: a dry run needs no running app,
+    // and leaves a stale session record where it is.
     if ctx.dry_run() {
+        let app = match read_session(&project) {
+            Some(session) => format!("pid {}", session.pid),
+            None => "none runs now".to_string(),
+        };
         let mut plan = Plan::new();
         plan.push(Step::internal(
             "desktop.screenshot",
             &format!(
-                "capture the window of pid {} to {} (headless render without Screen Recording)",
-                session.pid,
+                "capture the window of the app in {} ({app}) to {} (headless render without Screen Recording)",
+                paths::display(&session_path(&project)),
                 paths::display(&out)
             ),
         ));
         plan.report(ctx);
+        ctx.rep
+            .summary("the plan of icm shot desktop (--dry-run: nothing ran)");
         return Ok(());
     }
+
+    let Some(session) = read_session(&project) else {
+        return Err(no_session("no desktop app is running for this project"));
+    };
+    if !running(&session) {
+        remove_session(&project, session.pid);
+        return Err(no_session(format!(
+            "the desktop app (pid {}) of run {} is no longer running",
+            session.pid, session.run
+        )));
+    }
+    ctx.rep
+        .set("session", json!(paths::display(&session_path(&project))));
+    ctx.rep.set(
+        "process",
+        json!({"pid": session.pid, "alive": true, "run": session.run}),
+    );
 
     match screenshot(ctx, &project, session.pid, session.window, &out, false)? {
         Some(shot) => ctx.rep.summary(format!(
