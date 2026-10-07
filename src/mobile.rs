@@ -15,7 +15,9 @@
 //! shell is re-exported here. A crate that also depends on `iced_winit`
 //! directly must take it from the same source as `iced`, character for
 //! character, or the build holds two copies of the shell and
-//! `set_android_app` fills the one `iced` does not use.
+//! `set_android_app` fills the one `iced` does not use. Do not depend on
+//! winit from crates.io either: iced runs on a fork of it (see
+//! [winit](#winit)).
 //!
 //! # Features
 //!
@@ -276,6 +278,37 @@
 //! still runs. android-activity 0.6.0 aborts the process then; with 0.6.1,
 //! iced cannot build the second event loop and the process ends. Android
 //! then starts the new Activity in a new process, or the next launch does.
+//!
+//! # winit
+//!
+//! iced takes winit 0.30.13 from a fork,
+//! [patricksmithlaravel/winit](https://github.com/patricksmithlaravel/winit),
+//! branch `iced-mobile/0.30`, which carries Android fixes until they ship in
+//! a winit release (winit PR #4739): the event loop ends when the Activity
+//! is destroyed, a new one can be built in the same process, and content
+//! rect changes are reported (as `Resized`).
+//!
+//! An application must not depend on winit from crates.io: the build would
+//! hold two copies of winit, and iced would use the fork alone. The two
+//! share no types but `AndroidApp` (it comes from android-activity), and on
+//! iOS both would declare winit's Objective-C classes under the same names.
+//! Use what iced re-exports instead:
+//!
+//! - `iced::mobile::AndroidApp`, for `android_main` and for JNI
+//!   (`AndroidApp::vm_as_ptr`, `AndroidApp::activity_as_ptr`);
+//! - the rest of winit as `iced_winit::winit`, through a dependency on
+//!   `iced_winit` from the same source as `iced`, for instance
+//!   `iced_winit::winit::platform::android::activity::WindowManagerFlags`.
+//!
+//! An application that depended on winit to name `AndroidApp` or to turn
+//! on `android-native-activity` drops that dependency. The activity feature
+//! comes from iced's defaults, or, with `default-features = false`, from
+//! `features = ["android-native-activity", ...]` on `iced` (or on
+//! `iced_winit`, which has the same feature). In the code,
+//! `winit::platform::android::activity::AndroidApp` becomes
+//! `iced::mobile::AndroidApp`, or the same path under `iced_winit::winit`.
+//! `cargo tree -i winit --target all` must then list one winit, from the
+//! fork's git URL.
 //!
 //! # Known limitations
 //!
