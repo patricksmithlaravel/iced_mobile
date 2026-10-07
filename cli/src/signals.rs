@@ -9,10 +9,34 @@
 //! grace period, writes the result itself and exits 130.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 static PENDING: AtomicI32 = AtomicI32::new(0);
 static GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+static CLEANING: AtomicUsize = AtomicUsize::new(0);
+
+/// While alive, the main thread is stopping what it started (an app's
+/// SIGTERM grace, removing its session): the watchdog waits for it
+/// instead of exiting in the middle.
+#[must_use = "the cleanup ends when the guard is dropped"]
+pub struct Cleanup(());
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = CLEANING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Marks a cleanup in progress until the guard is dropped.
+pub fn cleanup() -> Cleanup {
+    let _ = CLEANING.fetch_add(1, Ordering::SeqCst);
+    Cleanup(())
+}
+
+/// Whether a [`cleanup`] is in progress.
+pub fn cleaning() -> bool {
+    CLEANING.load(Ordering::SeqCst) > 0
+}
 
 extern "C" fn on_signal(signal: libc::c_int) {
     PENDING.store(signal, Ordering::SeqCst);

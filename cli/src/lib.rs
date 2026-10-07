@@ -66,6 +66,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 static FINISHED: AtomicBool = AtomicBool::new(false);
+
+/// How long the watchdog waits for a cleanup in progress
+/// ([`signals::cleanup`]): longer than any stop grace plus its SIGKILL wait.
+const CLEANUP_PATIENCE: Duration = Duration::from_secs(20);
 static PANIC: Mutex<Option<String>> = Mutex::new(None);
 
 /// icm's entry point; returns the process exit code.
@@ -253,16 +257,24 @@ fn start_watchdog() {
                 };
 
                 // The runner normally handles it within one poll; step in
-                // only when the main thread is busy elsewhere.
+                // only when the main thread is busy elsewhere. While the
+                // main thread is stopping what it started (an app gets its
+                // SIGTERM grace, then SIGKILL, then its session file is
+                // removed: `signals::cleanup`), wait for it rather than
+                // exit in the middle, up to CLEANUP_PATIENCE in all.
+                let patience = Instant::now() + CLEANUP_PATIENCE;
                 let finished_within = |limit: Duration| {
                     let until = Instant::now() + limit;
-                    while Instant::now() < until {
+                    loop {
                         if FINISHED.load(Ordering::SeqCst) {
                             return true;
                         }
+                        let now = Instant::now();
+                        if now >= until && !(signals::cleaning() && now < patience) {
+                            return false;
+                        }
                         std::thread::sleep(Duration::from_millis(50));
                     }
-                    false
                 };
                 if finished_within(Duration::from_secs(2)) {
                     return;

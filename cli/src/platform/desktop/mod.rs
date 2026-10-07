@@ -1767,10 +1767,10 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     signals::register_group(launched.pid);
     let mut watch = Watch::new(launched.pid, &launched.stderr);
     let outcome = observe(ctx, &project, args, &launched, &mut watch, &mut session);
-    signals::unregister_group(launched.pid);
 
     match outcome {
         Ok(_) => {
+            signals::unregister_group(launched.pid);
             // The project's `[checks] desktop` scripts (design §13.6).
             crate::hooks::run_for(
                 ctx,
@@ -1792,11 +1792,16 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
             }
         }
         Err((error, ready)) => {
-            // A failed run leaves nothing running.
+            // A failed run leaves nothing running. The group stays
+            // registered until the app is gone, and the watchdog waits for
+            // the cleanup, so an interrupted run never leaves the app or
+            // its session behind.
+            let _cleanup = signals::cleanup();
             let exit = match watch.ended {
                 Some(ended) => ended.to_json(),
                 None => json!({"stopped_by_icm": terminate(launched.pid, launched.pid)}),
             };
+            signals::unregister_group(launched.pid);
             remove_session(&project, launched.pid);
             write_logs(ctx, &session);
             ctx.rep.set(
@@ -1927,6 +1932,12 @@ fn attach(ctx: &Ctx, project: &Project, session: &Session, launched: &Launched) 
     }
     signals::register_group(session.pid);
     let end = follow(ctx, &mut tails, session.pid, &Filter::default());
+    // As in `run`: registered until the app is gone, and the watchdog waits.
+    let _cleanup = signals::cleanup();
+    let how = match end {
+        FollowEnd::Signal | FollowEnd::Deadline => Some(terminate(session.pid, session.pgid)),
+        FollowEnd::Exited(_) => None,
+    };
     signals::unregister_group(session.pid);
     remove_session(project, session.pid);
     match end {
@@ -1959,7 +1970,7 @@ fn attach(ctx: &Ctx, project: &Project, session: &Session, launched: &Launched) 
             }
         }
         FollowEnd::Signal | FollowEnd::Deadline => {
-            let how = terminate(session.pid, session.pgid);
+            let how = how.unwrap_or("already exited");
             write_logs(ctx, session);
             ctx.rep.set(
                 "process",
