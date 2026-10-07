@@ -6,7 +6,11 @@
 //! - `ICM_VERSION_LINE`: what `icm --version` prints after `icm `;
 //! - `$OUT_DIR/explain_docs.rs`: the hand-written `docs/explain/*.md`;
 //! - `$OUT_DIR/template.rs`: the template `icm new` copies (`examples/app`
-//!   of the fork) and `docs/agents/limitations.md`, which AGENTS.md embeds.
+//!   of the fork) and `docs/agents/limitations.md`, which AGENTS.md embeds;
+//! - `$OUT_DIR/ofl.txt`: Fira Sans's licence (`graphics/fonts/OFL.txt`),
+//!   for releases' THIRD_PARTY_NOTICES.
+//!
+//! `policy/stores.toml` and `tools.toml` are embedded with `include_str!`.
 
 use std::env;
 use std::fs;
@@ -58,6 +62,18 @@ fn main() {
 
     write_explain_docs(&manifest_dir, &out_dir);
     write_template(&manifest_dir, &out_dir);
+    write_ofl(&manifest_dir, &out_dir);
+}
+
+/// Copies the fork's `graphics/fonts/OFL.txt` (Fira Sans's licence) to
+/// `$OUT_DIR/ofl.txt`, the fallback THIRD_PARTY_NOTICES uses when a
+/// release cannot find the framework's own copy. Empty outside the fork.
+fn write_ofl(manifest_dir: &Path, out_dir: &Path) {
+    let fork = manifest_dir.parent().unwrap_or(manifest_dir);
+    let ofl = fork.join("graphics").join("fonts").join("OFL.txt");
+    println!("cargo:rerun-if-changed={}", ofl.display());
+    let text = fs::read_to_string(&ofl).unwrap_or_default();
+    fs::write(out_dir.join("ofl.txt"), text).expect("write ofl.txt");
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {

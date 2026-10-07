@@ -43,6 +43,16 @@
 //!   `artifacts.json` counts it and `--sign none` turns owner-dependent
 //!   failures into WARNs; owner preconditions go through
 //!   [`Release::needs_owner`] or [`Release::needs_owner_later`];
+//! - build with [`Release::invocation`] and [`Release::cargo`] (the
+//!   target's profile, `--locked`, the dedicated target directory, the
+//!   deployment-target stamp; [`compile`]);
+//! - once built, generate `THIRD_PARTY_NOTICES.txt` with
+//!   [`Release::notices`], put it inside the artifacts and record where
+//!   with [`Release::embed_notices`]; the core gates `release.notices`
+//!   ([`notices`]);
+//! - fetch pinned tools (bundletool, wasm-opt, appimagetool) with
+//!   `crate::pinned::require`, which downloads only with `--yes`, and read
+//!   store floors from `crate::policy`;
 //! - set [`Release::signed`], [`Release::signing`] (references only) and
 //!   record tool versions with [`Release::tool`];
 //! - set [`Release::owner_plan`] from [`owner_plans`], the only file that
@@ -65,6 +75,7 @@ pub mod ledger;
 pub mod linux;
 pub mod macos;
 pub mod manifest;
+pub mod notices;
 pub mod owner_plans;
 pub mod upload;
 pub mod verify;
@@ -170,6 +181,7 @@ pub struct Release {
     pub ledger: ledger::Ledger,
     /// Where the artifacts carry the third-party notices.
     pub notices: Vec<manifest::NoticesAt>,
+    notices_ready: bool,
     files: Vec<FileEntry>,
 }
 
@@ -202,6 +214,7 @@ impl Release {
             owner_plan: None,
             ledger: ledger::read(project.dir())?,
             notices: Vec::new(),
+            notices_ready: false,
             files: Vec::new(),
             project: project.clone(),
             package,
@@ -919,6 +932,11 @@ fn finish(ctx: &Ctx, rel: &mut Release) -> Result<()> {
             format!("cannot {what} {}: {error}", crate::paths::display(path)),
         )
     };
+
+    // `release.notices`: every release carries THIRD_PARTY_NOTICES.
+    for check in notices::checks(&rel.dist, &rel.notices) {
+        rel.check(ctx, check);
+    }
 
     let plan = rel.owner_plan.take().unwrap_or_else(|| {
         let mut plan = OwnerPlan::new("its destination");

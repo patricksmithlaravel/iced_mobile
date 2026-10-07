@@ -104,13 +104,56 @@ impl Pipeline for Fake {
             rel.version,
             rel.build
         );
-        if kind == "site" {
-            std::fs::create_dir_all(&path).map_err(|e| io(&path, e))?;
-            std::fs::write(path.join("index.html"), &content)
-                .map_err(|e| io(&path.join("index.html"), e))?;
-        } else {
-            std::fs::write(&path, &content).map_err(|e| io(&path, e))?;
+        // The notices go where the real pipeline puts them: inside the
+        // bundle for zips and the site, declared for the rest.
+        let triple = match rel.target {
+            ReleaseTarget::Ios => "aarch64-apple-ios",
+            ReleaseTarget::Android => "aarch64-linux-android",
+            ReleaseTarget::Web => "wasm32-unknown-unknown",
+            ReleaseTarget::Macos => crate::toolchain::host_triple(),
+            ReleaseTarget::Windows => "x86_64-pc-windows-msvc",
+            ReleaseTarget::Linux => "x86_64-unknown-linux-gnu",
+        };
+        let notices = rel.notices(ctx, Some(triple))?;
+        let app = &rel.config().app.name;
+        let inner = match rel.target {
+            ReleaseTarget::Ios => format!("Payload/{app}.app/{}", super::notices::FILE),
+            ReleaseTarget::Android => format!("base/assets/{}", super::notices::FILE),
+            ReleaseTarget::Macos => {
+                format!("{app}.app/Contents/Resources/{}", super::notices::FILE)
+            }
+            ReleaseTarget::Web => super::notices::FILE.to_string(),
+            ReleaseTarget::Windows | ReleaseTarget::Linux => {
+                format!("doc/{}", super::notices::FILE)
+            }
+        };
+        match kind {
+            "site" => {
+                std::fs::create_dir_all(&path).map_err(|e| io(&path, e))?;
+                std::fs::write(path.join("index.html"), &content)
+                    .map_err(|e| io(&path.join("index.html"), e))?;
+                std::fs::copy(&notices, path.join(&inner)).map_err(|e| io(&path, e))?;
+            }
+            "ipa" | "aab" | "app_zip" => {
+                use crate::android::zip::{Entry, Source, write};
+                write(
+                    &path,
+                    &[
+                        Entry {
+                            name: "stand-in.txt".to_string(),
+                            source: Source::Bytes(content.into_bytes()),
+                        },
+                        Entry {
+                            name: inner.clone(),
+                            source: Source::File(notices.clone()),
+                        },
+                    ],
+                )
+                .map_err(|e| io(&path, e))?;
+            }
+            _ => std::fs::write(&path, &content).map_err(|e| io(&path, e))?,
         }
+        rel.embed_notices(&path, &inner)?;
         rel.add_file("upload", kind, &path)?;
         rel.signed = rel.sign() == SignMode::Auto;
         rel.check(

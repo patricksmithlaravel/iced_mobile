@@ -70,6 +70,7 @@ pub fn run_with(ctx: &mut Ctx, args: &VerifyArgs, pipeline: &dyn Pipeline) -> Re
 
     let mut verify = locate(ctx, args)?;
     files(ctx, &mut verify);
+    notices(ctx, &mut verify);
     ctx.rep.set(
         "verify",
         json!({
@@ -208,6 +209,39 @@ fn locate(ctx: &mut Ctx, args: &VerifyArgs) -> Result<Verify> {
     }
     verify.artifact = artifact;
     Ok(verify)
+}
+
+/// `release.notices`: the places `artifacts.json` records, or, for an
+/// artifact built elsewhere, a THIRD_PARTY_NOTICES anywhere inside it (when
+/// icm can look inside).
+fn notices(ctx: &Ctx, verify: &mut Verify) {
+    use super::notices::{self, Presence};
+    if let (Some(dir), Some(manifest)) = (verify.dir.clone(), verify.manifest.clone()) {
+        for check in notices::checks(&dir, &manifest.notices) {
+            verify.check(ctx, check);
+        }
+        return;
+    }
+    let Some(artifact) = verify.artifact.clone() else {
+        return;
+    };
+    let shown = crate::paths::display(&artifact);
+    let check = match notices::find_any(&artifact) {
+        Presence::Present => Check::pass(
+            CheckId::ReleaseNotices,
+            format!("{shown} carries {}", notices::FILE),
+        ),
+        Presence::Missing => Check::fail(
+            CheckId::ReleaseNotices,
+            format!("{shown} carries no {}", notices::FILE),
+        )
+        .evidence(Evidence::file(&artifact)),
+        Presence::Unknown => Check::skip(
+            CheckId::ReleaseNotices,
+            format!("icm does not look inside {shown} for {}", notices::FILE),
+        ),
+    };
+    verify.check(ctx, check);
 }
 
 /// `release.artifact_changed`: every file `artifacts.json` lists still has

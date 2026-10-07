@@ -703,6 +703,12 @@ catalogue! {
     ReleaseNotFound = "release.not_found", Usage, Fail, Agent,
         "There is no release of that target (or no artifact at that path)",
         "Make one with `icm release <target>`, or pass `--artifact <path>` of an existing artifact.";
+    ReleaseNotices = "release.notices", CheckFailed, Fail, Agent,
+        "The release does not carry THIRD_PARTY_NOTICES",
+        "The target's pipeline puts the notices inside its artifacts (Release::notices, Release::embed_notices); rerun the release.";
+    ReleaseLicenceUnknown = "release.licence_unknown", CheckFailed, Warn, Agent,
+        "A package the release ships declares no licence",
+        "Check the package's licence before shipping it: ask its authors to declare one, or replace the dependency.";
     ReleaseArtifactChanged = "release.artifact_changed", CheckFailed, Fail, Agent,
         "A release file differs from what artifacts.json recorded",
         "Something changed the file after the release; rerun `icm release <target>` rather than editing its outputs.";

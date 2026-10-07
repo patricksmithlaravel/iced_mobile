@@ -1,0 +1,15 @@
+[package]
+name = "iced"
+version = "0.14.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/patricksmithlaravel/iced_mobile"
+publish = false
+
+[features]
+default = ["mobile-fira-sans"]
+fira-sans = ["iced_graphics/fira-sans"]
+mobile-fira-sans = ["iced_graphics/mobile-fira-sans"]
+
+[dependencies]
+iced_graphics = { path = "../iced_graphics" }

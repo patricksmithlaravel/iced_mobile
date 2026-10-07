@@ -1,0 +1,30 @@
+# An app crate for the release core's tests: every dependency is a local
+# path package, so `cargo metadata --locked` works offline in a second.
+# vendor/ holds stand-ins: an `iced` whose `fira-sans` reaches
+# `iced_graphics` (which keeps Fira Sans's OFL.txt), a dependency with two
+# licence files and one without a licence, and a build and a dev
+# dependency that must stay out of THIRD_PARTY_NOTICES.
+[package]
+name = "release-app"
+version = "0.3.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "release-app"
+path = "src/main.rs"
+
+[dependencies]
+iced = { path = "vendor/iced", features = ["fira-sans"] }
+notes_dep = { path = "vendor/notes_dep" }
+
+[build-dependencies]
+build_only = { path = "vendor/build_only" }
+
+[dev-dependencies]
+dev_only = { path = "vendor/dev_only" }
+
+[workspace]

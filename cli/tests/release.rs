@@ -36,7 +36,7 @@ struct App {
 impl App {
     fn new() -> App {
         let root = tempfile::tempdir().unwrap();
-        copy_dir(&fixtures().join("app"), &root.path().join("app"));
+        copy_dir(&fixtures().join("release"), &root.path().join("app"));
         App {
             root,
             env: vec![("ICM_TODAY".into(), "2026-10-07".into())],
@@ -279,11 +279,25 @@ fn an_unsigned_release_writes_the_dist_and_refuses_to_upload() {
     assert_eq!(manifest["app"]["build"], 7);
     assert_eq!(manifest["sign"], "none");
     assert_eq!(manifest["uploadable"], false);
-    assert_eq!(manifest["files"][0]["path"], "Fixture.ipa");
-    assert_eq!(manifest["files"][0]["role"], "upload");
+    let file = |role: &str| -> Value {
+        manifest["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["role"] == role)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {role} file in {manifest}"))
+    };
+    assert_eq!(file("upload")["path"], "Fixture.ipa");
+    assert_eq!(file("upload")["kind"], "ipa");
     assert_eq!(
-        manifest["files"][0]["sha256"],
+        file("upload")["sha256"],
         icm::hash::sha256_hex(&std::fs::read(&ipa).unwrap())
+    );
+    assert_eq!(file("notices")["path"], "THIRD_PARTY_NOTICES.txt");
+    assert_eq!(
+        manifest["notices"][0],
+        serde_json::json!({"artifact": "Fixture.ipa", "path": "Payload/Fixture.app/THIRD_PARTY_NOTICES.txt"})
     );
     assert!(
         manifest["checks"]["ids_warn"]
@@ -291,14 +305,8 @@ fn an_unsigned_release_writes_the_dist_and_refuses_to_upload() {
             .unwrap()
             .contains(&Value::from("config.owner_decision"))
     );
-    assert_eq!(
-        manifest["framework"]["source"]
-            .as_str()
-            .unwrap()
-            .split('?')
-            .next(),
-        Some("git+https://github.com/patricksmithlaravel/iced_mobile")
-    );
+    // The fixture's iced is a path dependency.
+    assert_eq!(manifest["framework"]["source"], "path");
 
     // dist/latest/ios points at it.
     let latest = app.dir().join("target/icm/dist/latest/ios");
@@ -521,7 +529,13 @@ fn releases_come_from_a_clean_commit() {
     assert_eq!(manifest["source"]["dirty"], false);
     assert!(manifest["source"]["git_rev"].as_str().unwrap().len() == 40);
     // The web site is a directory, hashed as a whole.
-    assert_eq!(manifest["files"][0]["kind"], "site");
+    assert!(
+        manifest["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "site")
+    );
 
     app.config("\n# a change\n");
     let dirty = app.json(&["__test", "release", "web", "--sign", "none"]);
@@ -656,7 +670,7 @@ fn release_builds_use_their_profile_dir_and_stamps() {
     let first = lines.lines().next().unwrap();
     assert!(first.starts_with("clean --manifest-path"), "{lines}");
     assert!(
-        first.contains("-p fixture-app --target aarch64-apple-ios --release"),
+        first.contains("-p release-app --target aarch64-apple-ios --release"),
         "{lines}"
     );
     assert!(
@@ -676,6 +690,82 @@ fn release_builds_use_their_profile_dir_and_stamps() {
     );
     // The dev stamps are not touched.
     assert!(!app.dir().join("target/icm/stamps").exists());
+}
+
+#[test]
+fn releases_carry_third_party_notices() {
+    let app = App::new();
+    let result = app.json(&["__test", "release", "ios", "--sign", "none"]);
+    assert_eq!(result["exit"], 0, "{result}");
+    let notices = std::fs::read_to_string(app.abs(&result["artifacts"]["notices"])).unwrap();
+    // The shipped packages, with their licences; Fira Sans's OFL first.
+    assert!(notices.starts_with("THIRD-PARTY NOTICES"), "{notices}");
+    assert!(
+        notices.contains("Fira Sans: SIL Open Font License 1.1"),
+        "{notices}"
+    );
+    assert!(
+        notices.contains("SIL OPEN FONT LICENSE Version 1.1 (the fixture"),
+        "{notices}"
+    );
+    for line in [
+        "iced 0.14.1: MIT (https://github.com/patricksmithlaravel/iced_mobile)",
+        "iced_graphics 0.14.1: MIT",
+        "notes_dep 1.2.0: MIT OR Apache-2.0",
+        "no_licence 0.1.0: no licence declared",
+        "notes_dep: the MIT licence",
+        "notes_dep: the Apache License 2.0",
+        "Copyright (fixture) the iced stand-in's authors",
+    ] {
+        assert!(notices.contains(line), "{line:?} missing from:\n{notices}");
+    }
+    // Build and dev dependencies, and the app itself, never ship.
+    for absent in ["build_only", "dev_only", "release-app"] {
+        assert!(!notices.contains(absent), "{absent} in:\n{notices}");
+    }
+    // iced_graphics has no licence file: the nearest one up its tree is not
+    // taken past the app's workspace root.
+    assert!(notices.contains("iced_graphics 0.14.1 (MIT)"), "{notices}");
+    assert!(ids(&result, "warnings").contains(&"release.licence_unknown".to_string()));
+
+    // The gate looked inside the .ipa.
+    let ipa = app.abs(&result["artifacts"]["ipa"]);
+    assert_eq!(
+        icm::release::notices::presence(&ipa, "Payload/Fixture.app/THIRD_PARTY_NOTICES.txt"),
+        icm::release::notices::Presence::Present
+    );
+    let verify = app.json(&[
+        "__test",
+        "verify",
+        "ios",
+        "--artifact",
+        ipa.to_str().unwrap(),
+    ]);
+    assert_eq!(verify["exit"], 0, "{verify}");
+    assert_eq!(verify["checks"]["fail"], 0, "{verify}");
+
+    // Without `fira-sans`, Fira Sans ships only on the phones
+    // (`mobile-fira-sans`, on by default).
+    let manifest = app.dir().join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .unwrap()
+        .replace(", features = [\"fira-sans\"]", "");
+    std::fs::write(&manifest, text).unwrap();
+    let linux = app.json(&["__test", "release", "linux", "--sign", "none"]);
+    let text = std::fs::read_to_string(app.abs(&linux["artifacts"]["notices"])).unwrap();
+    assert!(!text.contains("Fira Sans"), "{text}");
+    let android = app.json(&["__test", "release", "android", "--sign", "none"]);
+    let text = std::fs::read_to_string(app.abs(&android["artifacts"]["notices"])).unwrap();
+    assert!(
+        text.contains("Fira Sans: SIL Open Font License 1.1"),
+        "{text}"
+    );
+    // A .deb is not looked inside: the place is declared (INFO).
+    assert!(
+        std::fs::read_to_string(app.abs(&linux["artifacts"]["manifest"]))
+            .unwrap()
+            .contains("\"path\": \"doc/THIRD_PARTY_NOTICES.txt\"")
+    );
 }
 
 #[test]
