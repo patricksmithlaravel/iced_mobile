@@ -1,6 +1,7 @@
 //! Command dispatch. Commands this build does not implement yet fail with
 //! `usage.not_implemented` (exit 2) and say so.
 
+pub mod build;
 pub mod check;
 pub mod detach;
 pub mod doctor;
@@ -88,6 +89,7 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
         Command::Logs(args) if args.platform == Platform::Web => crate::web::logs(ctx, &args),
         Command::Input(args) if args.platform == Platform::Web => crate::web::input(ctx, &args),
         Command::Session(args) => crate::web::host::main(ctx, &args.args),
+        Command::Build(args) if args.all || args.platform.is_none() => build::all(ctx, &args),
         Command::Build(_) => not_implemented("build"),
         Command::Run(_) => not_implemented("run"),
         Command::Stop(args) => stop::stop(ctx, &args),

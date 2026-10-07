@@ -436,3 +436,21 @@ fn run_runs_the_projects_desktop_hooks() {
     assert_eq!(sandbox.result(&["stop", "desktop"])["exit"], 0);
     wait_dead(second);
 }
+
+#[test]
+fn build_all_builds_every_app_platform() {
+    let sandbox = Sandbox::new();
+    // The fixture's [app] platforms is just the desktop.
+    let all = sandbox.result(&["build", "--all"]);
+    assert_eq!(all["exit"], 0, "{all}");
+    assert_eq!(all["built"], serde_json::json!(["desktop"]), "{all}");
+    assert!(
+        sandbox
+            .path(&all["artifacts"]["bundle"])
+            .ends_with("target/icm/build/desktop/debug/fixture-desktop"),
+        "{all}"
+    );
+    // No platform means the same.
+    let bare = sandbox.result(&["build"]);
+    assert_eq!(bare["built"], serde_json::json!(["desktop"]), "{bare}");
+}
