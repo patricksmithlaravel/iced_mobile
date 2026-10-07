@@ -304,6 +304,25 @@ pub fn single_winit(lock: &Lock) -> Check {
     }
 }
 
+/// The winit a lock has instead of iced's own ("winit 0.30.13 from
+/// crates.io"), when none of its winits comes from iced's source: the
+/// framework is from before it vendored winit with the Android lifecycle
+/// fix, and freezes when Android recreates its activity. `None` when a
+/// winit comes from iced's source, or the lock has no winit or no iced.
+pub fn winit_outside_iced(lock: &Lock) -> Option<String> {
+    let iced = iced_origin(lock)?;
+    let winits: Vec<&LockPackage> = lock.named("winit").collect();
+    let first = winits.first()?;
+    if winits.iter().any(|package| origin(package) == iced) {
+        return None;
+    }
+    Some(format!(
+        "winit {} from {}",
+        first.version,
+        origin_kind(first)
+    ))
+}
+
 fn origin_kind(package: &LockPackage) -> String {
     match Source::parse(package.source.as_deref()) {
         Source::Path => "path".to_string(),
@@ -774,6 +793,35 @@ mod tests {
             ("winit", "0.30.13", Some(FORK_OTHER_REV)),
         ]);
         assert_eq!(single_winit(&other_rev).status, Status::Fail);
+    }
+
+    #[test]
+    fn a_winit_from_elsewhere_means_an_older_framework() {
+        // iced from the fork's git source, winit from crates.io: a
+        // framework from before winit was vendored.
+        let older = lock(&[
+            ("iced", "0.14.1", Some(FORK)),
+            ("iced_winit", "0.14.1", Some(FORK)),
+            ("winit", "0.30.13", Some(CRATES_IO)),
+        ]);
+        assert_eq!(
+            winit_outside_iced(&older).as_deref(),
+            Some("winit 0.30.13 from crates.io")
+        );
+        // winit from the same source as iced: today's framework.
+        let vendored = lock(&[
+            ("iced", "0.14.1", Some(FORK)),
+            ("winit", "0.30.13", Some(FORK)),
+            ("winit", "0.30.13", Some(CRATES_IO)),
+        ]);
+        assert_eq!(winit_outside_iced(&vendored), None);
+        // The framework's own workspace: both paths.
+        let workspace = lock(&[("iced", "0.14.1", None), ("winit", "0.30.13", None)]);
+        assert_eq!(winit_outside_iced(&workspace), None);
+        assert_eq!(
+            winit_outside_iced(&lock(&[("iced", "0.14.1", Some(FORK))])),
+            None
+        );
     }
 
     #[test]

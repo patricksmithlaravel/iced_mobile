@@ -646,8 +646,8 @@ catalogue! {
         "The app is alive but never drew a first frame",
         "Read `icm logs <platform> --level warn`; raise `--wait-ready` if it is legitimately slow.";
     RunActivityRecreated = "run.activity_recreated", CheckFailed, Warn, Agent,
-        "Android recreated the activity, and the app started over",
-        "Follow the detail: rebuild a stale APK, raise [android] target_sdk to 36 for assetsPaths, or rerun once a fresh emulator has settled; never remove configChanges values.";
+        "Android recreated the app's activity",
+        "Follow the detail: rebuild a stale APK, raise [android] target_sdk to 36 for assetsPaths, or rerun once a fresh emulator has settled; never remove configChanges values. A FAIL means the app did not start over in the new activity: update an iced_mobile pin from before the Android lifecycle fix.";
     RunScreenBlank = "run.screen_blank", CheckFailed, Warn, Agent,
         "The screenshot is a single colour",
         "Compare with `icm shot --headless`; check fonts and theme; read the logs.";

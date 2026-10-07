@@ -13,9 +13,18 @@ state, windows and tasks are dropped, `android_main` returns, and the new
 activity starts the application again, from its boot function, usually in
 the same process (a new `ICM_EVENT start`, then `ready`). The app keeps
 running, so this is a WARN, but whatever it held in memory is gone, and a
-user would see it reset. When the relaunch comes before the first frame and
-the new activity does not draw within ten seconds, the run fails
-`run.not_ready` (exit 10) with the relaunch as its likely cause.
+user would see it reset.
+
+It is a FAIL (exit 1 when nothing else fails) when the app did not start
+over: no new `ICM_EVENT start` followed the last relaunch within ten
+seconds, or the app sends no `ICM_EVENT` at all. That is what a framework
+from before the Android lifecycle fix does: its winit does not end the event
+loop when the activity is destroyed, so the app stops drawing and answering
+input. When the app's `Cargo.lock` has a winit that does not come from
+iced's own source (winit from crates.io, as before iced vendored it), the
+detail says so and icm does not wait. When the relaunch comes before the
+first frame and the new activity does not draw within ten seconds, the run
+also fails `run.not_ready` (exit 10) with the relaunch as its likely cause.
 
 Common causes:
 
@@ -39,4 +48,7 @@ Do what the detail says: rerun `icm run android` without `--no-build` for a
 stale APK, raise `[android] target_sdk` to 36 for `assetsPaths`, or rerun once
 a fresh emulator has settled. Never remove a `configChanges` value. Save what
 must survive a destroyed activity on `Lifecycle::Suspended`, which comes
-before it.
+before it. For a FAIL, update the app's iced_mobile pin to one with the
+Android lifecycle fix (`cargo tree -i winit --target all` then shows winit
+from iced's own source), and read `icm logs android --level warn` for why
+the new activity did not start the app.

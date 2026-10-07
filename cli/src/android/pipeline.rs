@@ -361,7 +361,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     });
 
     let logs = collect_logs(ctx, &adb, &dir, &app_id, &mark, &pids);
-    let recreated = recreation(ctx, &adb, &dir, &project, &mark);
+    let recreated = recreation(ctx, &adb, &dir, &project, &mark, &pids);
     if let Err(error) = &mut result {
         attach_evidence(error, &logs, &project);
         if let Some(recreated) = &recreated {
@@ -1165,17 +1165,34 @@ struct Recreated {
     evidence: Option<Evidence>,
 }
 
-/// `run.activity_recreated` (WARN): Android relaunched the app's activity
-/// since the launch mark, so the app started over in the new one and lost
-/// what it kept in memory. Writes the events buffer since the mark to
-/// `events.txt` (design §10.4 step 12) and reports the first relaunch with
-/// the configuration changes that caused it ([`describe_recreation`]).
+/// Whether the app started over after Android relaunched its activity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Restart {
+    /// The new activity sent its own `ICM_EVENT start`.
+    Seen,
+    /// No `start` followed the last relaunch within [`RELAUNCH_GRACE`] (or
+    /// the app sends none at all): the app did not start over.
+    Missing,
+    /// As `Missing`, and the lock's winit is not the one iced brings
+    /// ([`crate::deps::winit_outside_iced`] names it): a framework from
+    /// before the Android lifecycle fix, which freezes on a relaunch.
+    OldFramework(String),
+}
+
+/// `run.activity_recreated`: Android relaunched the app's activity since
+/// the launch mark. A WARN when the app started over in the new activity
+/// (it lost what it kept in memory); a FAIL when it did not, as a
+/// framework from before the Android lifecycle fix freezes there. Writes
+/// the events buffer since the mark to `events.txt` (design §10.4 step 12)
+/// and reports the first relaunch with the configuration changes that
+/// caused it ([`describe_recreation`]).
 fn recreation(
     ctx: &Ctx,
     adb: &Adb,
     dir: &Path,
     project: &Project,
     mark: &str,
+    pids: &BTreeSet<u32>,
 ) -> Option<Recreated> {
     let text = events_buffer(adb, mark, &[])?;
     let path = dir.join("events.txt");
@@ -1185,10 +1202,31 @@ fn recreation(
     let config = &project.config.config;
     let found = logcat::relaunches(&logcat::parse(&text), &config.app.id);
     let first = found.first()?;
+    let last = found.last()?;
+    let old_winit = project
+        .lock()
+        .ok()
+        .flatten()
+        .and_then(|lock| crate::deps::winit_outside_iced(&lock));
+    // A framework from before the fix sends no `start` after a relaunch:
+    // there is nothing to wait for.
+    let restart = if restarted(
+        adb,
+        mark,
+        last.record.seconds(),
+        &config.app.id,
+        pids,
+        old_winit.is_none(),
+    ) {
+        Restart::Seen
+    } else {
+        old_winit.map_or(Restart::Missing, Restart::OldFramework)
+    };
     let (detail, recreated) = describe_recreation(
         &found,
         mark.parse().unwrap_or(0.0),
         config.android.target_sdk,
+        &restart,
     )?;
     let line = text
         .lines()
@@ -1196,8 +1234,13 @@ fn recreation(
         .map_or(1, |index| index as u32 + 1);
     let evidence = Evidence::line(&path, line, first.record.line());
     let commands: Vec<&str> = recreated.commands.iter().map(String::as_str).collect();
+    let status = if restart == Restart::Seen {
+        Status::Warn
+    } else {
+        Status::Fail
+    };
     ctx.rep.check(
-        Check::warn(CheckId::RunActivityRecreated, detail)
+        Check::new(CheckId::RunActivityRecreated, status, detail)
             .evidence(evidence.clone())
             .fix(recreated.fix.clone(), &commands),
     );
@@ -1205,6 +1248,46 @@ fn recreation(
         evidence: Some(evidence),
         ..recreated
     })
+}
+
+/// Whether the app sent an `ICM_EVENT start` after `after` (epoch seconds:
+/// the last relaunch), from one of `pids` or the app's process now. With
+/// `wait`, waits for it until [`RELAUNCH_GRACE`] after the relaunch, unless
+/// the app sent no `start` at all since the mark (it speaks no
+/// `ICM_EVENT`).
+fn restarted(
+    adb: &Adb,
+    mark: &str,
+    after: f64,
+    app_id: &str,
+    pids: &BTreeSet<u32>,
+    wait: bool,
+) -> bool {
+    let mut pids = pids.clone();
+    loop {
+        pids.extend(adb.pids(app_id));
+        let starts: Vec<f64> = events_since(adb, mark)
+            .iter()
+            .filter(|record| {
+                pids.contains(&record.pid)
+                    && logcat::event(record).is_some_and(|event| logcat::kind(&event) == "start")
+            })
+            .map(Record::seconds)
+            .collect();
+        if starts.iter().any(|&at| at > after) {
+            return true;
+        }
+        if !wait || starts.is_empty() || crate::signals::pending().is_some() {
+            return false;
+        }
+        let Some(now) = adb.epoch().and_then(|epoch| epoch.parse::<f64>().ok()) else {
+            return false;
+        };
+        if now - after >= RELAUNCH_GRACE.as_secs_f64() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// The `run.activity_recreated` detail and what it means, for the
@@ -1215,6 +1298,7 @@ fn describe_recreation(
     found: &[logcat::Relaunch],
     mark: f64,
     target_sdk: u32,
+    restart: &Restart,
 ) -> Option<(String, Recreated)> {
     let first = found.first()?;
     let after = crate::time::format_duration(Duration::from_secs_f64(
@@ -1271,14 +1355,40 @@ fn describe_recreation(
     if found.len() > 1 {
         detail.push_str(&format!(", {} relaunches", found.len()));
     }
-    detail.push_str(&format!(
-        ": {why}. The app ended with its activity and started over in the new one, losing what it kept in memory"
-    ));
+    let grace = crate::time::format_duration(RELAUNCH_GRACE);
+    let (outcome, consequence, fix) = match restart {
+        Restart::Seen => (
+            "The app ended with its activity and started over in the new one, losing what it kept in memory".to_string(),
+            "which ends the app and starts it over in the new activity".to_string(),
+            fix.to_string(),
+        ),
+        Restart::Missing => (
+            format!(
+                "No ICM_EVENT start followed within {grace}, so the app did not start over in the new activity: it stopped drawing and answering input (a framework from before the Android lifecycle fix freezes there)"
+            ),
+            "and the app did not start over in the new activity (it stopped drawing and answering input)".to_string(),
+            format!(
+                "{fix} Then read the app's logs for why it did not start again; an iced_mobile pin from before the Android lifecycle fix freezes on every relaunch, so update it."
+            ),
+        ),
+        Restart::OldFramework(winit) => (
+            format!(
+                "The app's framework is from before the Android lifecycle fix (its Cargo.lock has {winit}, not the winit iced brings), and it freezes when its activity is recreated: it stops drawing and answering input"
+            ),
+            format!(
+                "and an iced app on a framework from before the Android lifecycle fix ({winit} in Cargo.lock) freezes when its activity is recreated (it stops drawing and answering input)"
+            ),
+            format!(
+                "{fix} Update the app's iced_mobile pin to one with the Android lifecycle fix (winit from iced's own source); until then never let Android recreate the activity."
+            ),
+        ),
+    };
+    detail.push_str(&format!(": {why}. {outcome}"));
     let recreated = Recreated {
         cause: format!(
-            "Android relaunched the activity {after} after launch, which ends the app and starts it over in the new activity: {why} (run.activity_recreated)"
+            "Android relaunched the activity {after} after launch, {consequence}: {why} (run.activity_recreated)"
         ),
-        fix: fix.to_string(),
+        fix,
         commands: vec!["icm run android --json -q".to_string()],
         evidence: None,
     };
@@ -2112,12 +2222,13 @@ mod tests {
 
     #[test]
     fn recreations_name_their_cause() {
-        assert!(describe_recreation(&[], 0.0, 36).is_none());
+        assert!(describe_recreation(&[], 0.0, 36, &Restart::Seen).is_none());
 
         // The fresh-emulator case: SystemUI's overlays, with a manifest
         // linked below API 36, which cannot list assetsPaths.
         let overlays = [relaunch("100.400", Some(0x8000_0000))];
-        let (detail, recreated) = describe_recreation(&overlays, 100.0, 35).unwrap();
+        let (detail, recreated) =
+            describe_recreation(&overlays, 100.0, 35, &Restart::Seen).unwrap();
         assert!(
             detail.starts_with(
                 "Android relaunched com.example.app/android.app.NativeActivity 400ms after launch (assetsPaths)"
@@ -2130,7 +2241,7 @@ mod tests {
         assert!(recreated.fix.contains("target_sdk to 36"));
 
         // From API 36 icm's manifest lists it: the installed APK is older.
-        let (_, stale) = describe_recreation(&overlays, 100.0, 36).unwrap();
+        let (_, stale) = describe_recreation(&overlays, 100.0, 36, &Restart::Seen).unwrap();
         assert!(
             stale.cause.contains("an earlier icm built it"),
             "{}",
@@ -2143,7 +2254,7 @@ mod tests {
             relaunch("101.5", Some(0x0100_0000)),
             relaunch("102", Some(0x0100_0000)),
         ];
-        let (detail, recreated) = describe_recreation(&unknown, 100.0, 36).unwrap();
+        let (detail, recreated) = describe_recreation(&unknown, 100.0, 36, &Restart::Seen).unwrap();
         assert!(detail.contains("(0x1000000), 2 relaunches"), "{detail}");
         assert!(
             recreated
@@ -2152,7 +2263,42 @@ mod tests {
         );
 
         // Older releases log no mask.
-        let (detail, _) = describe_recreation(&[relaunch("100", None)], 100.0, 36).unwrap();
+        let (detail, _) =
+            describe_recreation(&[relaunch("100", None)], 100.0, 36, &Restart::Seen).unwrap();
         assert!(detail.contains("(no change named)"), "{detail}");
+    }
+
+    #[test]
+    fn a_relaunch_the_app_did_not_survive_says_so() {
+        let unlisted = [relaunch("101", Some(0x200))];
+        let (detail, missing) =
+            describe_recreation(&unlisted, 100.0, 36, &Restart::Missing).unwrap();
+        assert!(detail.contains("(uiMode)"), "{detail}");
+        assert!(
+            detail.contains("No ICM_EVENT start followed within 10.0s"),
+            "{detail}"
+        );
+        assert!(!detail.contains("started over in the new one"), "{detail}");
+        assert!(
+            missing.cause.contains("did not start over"),
+            "{}",
+            missing.cause
+        );
+        assert!(missing.fix.contains("update it"), "{}", missing.fix);
+
+        let (detail, old) = describe_recreation(
+            &unlisted,
+            100.0,
+            36,
+            &Restart::OldFramework("winit 0.30.13 from crates.io".to_string()),
+        )
+        .unwrap();
+        assert!(
+            detail.contains("its Cargo.lock has winit 0.30.13 from crates.io"),
+            "{detail}"
+        );
+        assert!(detail.contains("freezes"), "{detail}");
+        assert!(old.cause.contains("freezes"), "{}", old.cause);
+        assert!(old.fix.contains("iced_mobile pin"), "{}", old.fix);
     }
 }
