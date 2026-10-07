@@ -5,6 +5,7 @@
 //! [`application`] is the program. [`run`] runs it, and `tests/icm.rs`
 //! drives it headless: the `.ice` flows in `tests/flows`, `icm shot
 //! --headless` and `icm ui --headless`.
+use iced::mobile::{Lifecycle, SafeArea};
 use iced::theme;
 use iced::widget::{
     Column, button, column, container, operation, responsive, row, scrollable,
@@ -31,11 +32,20 @@ const TAP: Padding = Padding {
     left: 16.0,
 };
 
+/// The space around the content, beside what the system covers.
+const MARGIN: f32 = 16.0;
+
 /// The state of the app.
 #[derive(Debug)]
 pub struct App {
+    /// What the status bar, the notch, the home indicator or navigation bar
+    /// and the keyboard cover, once the platform has reported it.
+    safe_area: Option<SafeArea>,
     /// The system's light or dark mode, as the platform last reported it.
     appearance: theme::Mode,
+    /// Whether the app is active, inactive or in the background, as the
+    /// platform last reported it.
+    lifecycle: Option<Lifecycle>,
     count: i64,
     draft: String,
     items: Vec<String>,
@@ -44,7 +54,9 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            safe_area: None,
             appearance: theme::Mode::None,
+            lifecycle: None,
             count: 0,
             draft: String::new(),
             items: (1..=20).map(|i| format!("Item {i}")).collect(),
@@ -55,15 +67,27 @@ impl Default for App {
 /// Everything that can happen in the app.
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// The platform reported the safe area, or a change: a rotation, the
+    /// keyboard showing or hiding.
+    SafeAreaChanged(SafeArea),
     /// The system switched between light and dark mode, or reported its
     /// mode at launch.
     AppearanceChanged(theme::Mode),
+    /// The app came to the foreground, became active or inactive, went to
+    /// the background, or the system is short of memory.
+    LifecycleChanged(Lifecycle),
     /// The "Increment" button was pressed.
     Increment,
     /// The text in the field changed.
     DraftChanged(String),
     /// "Add" was pressed, or Return in the field.
     Add,
+    /// The "Paste" button was pressed.
+    Paste,
+    /// The clipboard was read: its text, if it holds any.
+    Pasted(Option<String>),
+    /// The "Copy" button of the item at this index was pressed.
+    Copy(usize),
     /// The "Remove" button of the item at this index was pressed.
     Remove(usize),
 }
@@ -71,10 +95,33 @@ pub enum Message {
 impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::SafeAreaChanged(safe_area) => {
+                self.safe_area = Some(safe_area);
+
+                Task::none()
+            }
             // The default theme follows the system already; the state keeps
             // the mode only to show it.
             Message::AppearanceChanged(appearance) => {
                 self.appearance = appearance;
+
+                Task::none()
+            }
+            // An app frees its caches here.
+            Message::LifecycleChanged(Lifecycle::MemoryWarning) => {
+                log::warn!("the system is short of memory");
+
+                Task::none()
+            }
+            // Only shown here. An app hides what is on screen on `Inactive`
+            // and locks on `Background`. What must outlive the app is saved
+            // in `iced::mobile::on_lifecycle` instead, which runs before the
+            // system acts: these messages come a moment later, and Android
+            // can end the app before `Background` arrives.
+            Message::LifecycleChanged(lifecycle) => {
+                log::info!("lifecycle: {lifecycle:?}");
+
+                self.lifecycle = Some(lifecycle);
 
                 Task::none()
             }
@@ -106,6 +153,30 @@ impl App {
                 // focus, so a phone's keyboard stays up for the next one.
                 operation::snap_to_end(LIST)
             }
+            // Read the clipboard only when the user asks: Android gives
+            // `None` to an app without the input focus, and iOS asks the
+            // user before an app reads what another app copied.
+            Message::Paste => iced::clipboard::read().map(Message::Pasted),
+            Message::Pasted(Some(text)) => {
+                // The field holds one line.
+                self.draft
+                    .push_str(&text.lines().collect::<Vec<_>>().join(" "));
+
+                Task::none()
+            }
+            Message::Pasted(None) => {
+                log::info!("nothing to paste");
+
+                Task::none()
+            }
+            Message::Copy(index) => match self.items.get(index) {
+                Some(item) => {
+                    log::info!("copied {item:?}");
+
+                    iced::clipboard::write(item.clone())
+                }
+                None => Task::none(),
+            },
             Message::Remove(index) => {
                 if index < self.items.len() {
                     let item = self.items.remove(index);
@@ -120,12 +191,15 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
-            iced::system::theme_changes().map(Message::AppearanceChanged)
+            iced::mobile::safe_area().map(Message::SafeAreaChanged),
+            iced::system::theme_changes().map(Message::AppearanceChanged),
+            iced::mobile::lifecycle().map(Message::LifecycleChanged),
         ])
     }
 
     fn view(&self) -> Element<'_, Message> {
-        // The root padding depends on the window's size (see `safe_area`).
+        // Until the platform reports the safe area, the root padding
+        // depends on the window's size (see `padding`).
         responsive(move |size| self.screen(size)).into()
     }
 
@@ -139,23 +213,41 @@ impl App {
         .spacing(12)
         .align_y(Center);
 
-        let appearance = text(match self.appearance {
-            theme::Mode::Light => "Appearance: light",
-            theme::Mode::Dark => "Appearance: dark",
-            // Headless runs have no platform to ask.
-            theme::Mode::None => "Appearance: not reported",
-        })
-        .size(14);
+        // What the platform reports; headless unit tests have no platform
+        // to ask.
+        let status = row![
+            text(match self.appearance {
+                theme::Mode::Light => "Appearance: light",
+                theme::Mode::Dark => "Appearance: dark",
+                theme::Mode::None => "Appearance: not reported",
+            })
+            .size(14)
+            .width(Fill),
+            text(match self.lifecycle {
+                Some(Lifecycle::Foreground) => "Lifecycle: foreground",
+                Some(Lifecycle::Active) => "Lifecycle: active",
+                Some(Lifecycle::Inactive) => "Lifecycle: inactive",
+                Some(Lifecycle::Background) => "Lifecycle: background",
+                _ => "Lifecycle: not reported",
+            })
+            .size(14),
+        ]
+        .spacing(8);
 
-        // At the top of the screen: the keyboard covers fields in the lower
-        // half, and the fixed root padding does not rise with it (see
-        // `safe_area`).
+        // Near the top: the keyboard covers the lower half of the screen.
+        // The root padding rises with it (`SafeArea::padding`), which keeps
+        // the end of the list above it.
         let form = row![
             text_input("New item", &self.draft)
                 .id(INPUT)
                 .on_input(Message::DraftChanged)
                 .on_submit(Message::Add)
                 .padding(12),
+            // Phones show no edit menu in text fields.
+            button("Paste")
+                .style(button::secondary)
+                .padding(TAP)
+                .on_press(Message::Paste),
             button("Add").padding(TAP).on_press_maybe(
                 (!self.draft.trim().is_empty()).then_some(Message::Add)
             ),
@@ -164,12 +256,16 @@ impl App {
         .align_y(Center);
 
         // On a touch screen, a drag that starts on a button does not scroll
-        // (iced-rs/iced#2004). The text fills each row and the button stays
+        // (iced-rs/iced#2004). The text fills each row and the buttons stay
         // small, so most of a row can start a scroll.
         let items = Column::with_children(self.items.iter().enumerate().map(
             |(index, item)| {
                 row![
                     text(item).width(Fill),
+                    button("Copy")
+                        .style(button::text)
+                        .padding(TAP)
+                        .on_press(Message::Copy(index)),
                     button("Remove")
                         .style(button::text)
                         .padding(TAP)
@@ -183,7 +279,7 @@ impl App {
 
         let content = column![
             counter,
-            appearance,
+            status,
             form,
             scrollable(items)
                 .id(LIST)
@@ -194,30 +290,43 @@ impl App {
         .spacing(16);
 
         container(content)
-            .padding(safe_area(size))
+            .padding(self.padding(size))
             .width(Fill)
             .height(Fill)
             .into()
+    }
+
+    /// The root padding: [`MARGIN`] beside what the system covers. Phones
+    /// draw under the status bar, the notch or Dynamic Island, the home
+    /// indicator or navigation bar (Android apps targeting SDK 35 or later
+    /// draw edge to edge) and the keyboard, and `iced::mobile::safe_area()`
+    /// reports how much of each edge they take; the desktop and the web
+    /// report nothing covered. Headless, `icm shot --headless`, `icm ui
+    /// --headless` and `.ice` flows report the device's own at a phone
+    /// preset's size (`iphone-17`, `pixel-9`, ...), so they lay out as the
+    /// phone does.
+    fn padding(&self, size: Size) -> Padding {
+        match self.safe_area {
+            Some(safe_area) => safe_area.padding(MARGIN),
+            None => fallback_padding(size),
+        }
     }
 }
 
 /// Windows narrower than this, in logical pixels, are laid out as a phone.
 const PHONE_WIDTH: f32 = 600.0;
 
-/// Room for the status bar, the notch or Dynamic Island, and the home
-/// indicator or navigation bar: a fixed padding on iOS and Android, where
-/// apps targeting SDK 35 or later draw edge to edge. A window narrower than
-/// a phone gets the same padding anywhere, so headless renders at phone
-/// viewports (`icm shot --headless`, `icm ui --headless`, `.ice` flows) lay
-/// out as the phone does. `iced::mobile::safe_area()` reports the device's
-/// own insets and the keyboard's height instead.
-fn safe_area(size: Size) -> Padding {
+/// The root padding until the safe area is reported (the first frames on
+/// a phone, unit tests, headless viewports of other sizes): room for a
+/// phone's bars on iOS and Android, and in any window narrower than a
+/// phone.
+fn fallback_padding(size: Size) -> Padding {
     if cfg!(any(target_os = "ios", target_os = "android"))
         || size.width < PHONE_WIDTH
     {
-        Padding::new(16.0).top(64.0).bottom(48.0)
+        Padding::new(MARGIN).top(64.0).bottom(48.0)
     } else {
-        Padding::new(16.0)
+        Padding::new(MARGIN)
     }
 }
 
@@ -228,7 +337,7 @@ pub fn application()
     iced::application(App::default, App::update, App::view)
         .title("App")
         // No `.theme(..)`: the default theme follows the system's light or
-        // dark mode.
+        // dark mode, as icm's Android window and bar icons do.
         .subscription(App::subscription)
         // Embedded by the `fira-sans` feature: every platform, the headless
         // renderer included, draws the same glyphs.
@@ -306,6 +415,61 @@ mod tests {
 
         touch(ui, position, pressed);
         touch(ui, position, lifted);
+    }
+
+    #[test]
+    fn the_root_is_padded_with_the_safe_area_once_reported() {
+        let mut app = App::default();
+        let phone = Size::new(402.0, 874.0);
+
+        // Before the platform reports it: the fixed padding.
+        assert_eq!(app.padding(phone), fallback_padding(phone));
+
+        let island = Padding::ZERO.top(62.0).bottom(34.0);
+        let _ = app.update(Message::SafeAreaChanged(SafeArea::new(island)));
+
+        assert_eq!(
+            app.padding(phone),
+            Padding::new(16.0).top(78.0).bottom(50.0)
+        );
+
+        // The bottom rises with the keyboard.
+        let _ = app.update(Message::SafeAreaChanged(
+            SafeArea::new(island).with_keyboard(336.0),
+        ));
+
+        assert_eq!(app.padding(phone).bottom, 352.0);
+    }
+
+    #[test]
+    fn the_lifecycle_is_shown() {
+        let mut app = App::default();
+
+        let _ = app.update(Message::LifecycleChanged(Lifecycle::Inactive));
+        let _ = app.update(Message::LifecycleChanged(Lifecycle::MemoryWarning));
+
+        let mut ui = simulator(app.view());
+
+        assert!(ui.find("Lifecycle: inactive").is_ok());
+    }
+
+    #[test]
+    fn copy_and_paste_go_through_the_clipboard() {
+        let mut app = App::default();
+        let mut ui = simulator(app.view());
+
+        // The first "Copy" is Item 1's.
+        tap(&mut ui, "Copy");
+        tap(&mut ui, "Paste");
+
+        let messages: Vec<_> = ui.into_messages().collect();
+
+        assert!(matches!(messages[..], [Message::Copy(0), Message::Paste]));
+
+        // A paste joins the clipboard's lines: the field holds one.
+        let _ = app.update(Message::Pasted(Some(String::from("Milk\nEggs"))));
+
+        assert_eq!(app.draft, "Milk Eggs");
     }
 
     #[test]

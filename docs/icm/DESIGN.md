@@ -795,8 +795,8 @@ impl App {
         ]
         .spacing(16);
 
-        // A fixed padding for status bar, notch and home indicator (targetSdk 36 is edge-to-edge), the same
-        // headless; iced::mobile::safe_area() reports the device's own insets and keyboard.
+        // Room for status bar, notch and home indicator (targetSdk 36 is edge-to-edge). As built (§8.5),
+        // the template pads with iced::mobile::safe_area() and keeps a fixed padding until it arrives.
         container(content).padding(48).width(Fill).height(Fill).into()
     }
 }
@@ -890,8 +890,8 @@ Input on a device: `icm input android tap X Y`, `icm input web tap X Y`, `icm in
 ## Rules that fail silently when broken
 - Keep every iced line on the same git URL and tag (`icm framework set tag:<t>` changes them all).
 - Never call `iced::exit()` or close the last window on Android or iOS.
-- Keep the root padding (Android targetSdk 36 is edge-to-edge): it lays headless renders out as on the phone;
-  `iced::mobile::safe_area()` reports the device's own insets and keyboard (headless, a device preset's insets).
+- Keep padding the root with `iced::mobile::safe_area()` (Android targetSdk 36 is edge-to-edge); a fixed padding
+  stands in until it arrives. Headless, a phone preset's viewport gets that phone's insets.
 - .ice `click` and host tests use a mouse; phones use touch. Confirm UI changes with `icm run` on
   ios-sim and android and look at the screenshot.
 - Keep `features = ["fira-sans"]`; text with no font renders as nothing.
@@ -922,6 +922,7 @@ The fork's own root `AGENTS.md` gets a `cli/` section:
 - `Cargo.toml` has no `[profile.*]` (Appendix C 4). Its `icm-agent = ["iced/agent"]` feature resolves against iced's empty `agent` feature (the F7 stub).
 - `tests/icm.rs` is the one line of §13.2: `iced_test::agent::main(app::application(), env!("CARGO_MANIFEST_DIR"))`. Besides protocol 1 (`ICM_HARNESS {"protocol":1}` first), every command ends with an `ICM_HARNESS_RESULT <json>` line, and the harness exits 0 (all passed), 1 (a flow failed) or 2 (usage, or a file it cannot read or write); `iced_test::agent` documents the fields.
 - `src/lib.rs` is a counter, a text field that submits on Return, and a scrollable list whose rows keep their buttons small (review A2). `safe_area()` pads 64 top, 48 bottom and 16 at the sides on Android and iOS, 16 elsewhere. Its unit tests send touch events, not mouse events.
+- Since the platform services landed, `src/lib.rs` also uses them: the root padding is `SafeArea::padding(16)` from `iced::mobile::safe_area()` (`App::padding`), with the 64/48 padding above as `fallback_padding` until the safe area arrives; no `.theme(..)`, so the default theme follows the system, and a status line shows the mode from `iced::system::theme_changes()` and the state from `iced::mobile::lifecycle()`; a Paste button beside the field and a Copy button on each row use `iced::clipboard`. `tests/flows/copy_paste.ice` copies, removes and pastes an item (`mode: Zen`).
 - `icm new` substitutes:
   - the package, library and binary name `app`: Cargo.toml, `app::` in `src/main.rs` and `tests/icm.rs`, and icm.toml `package`, `lib` and `bin`;
   - the display name `App`: icm.toml `name` and `.title("App")`;
@@ -2446,7 +2447,7 @@ Verified on 2026-10-07 with the template (`icm new demo --id dev.accept.demo`, a
 ### Harness, hooks and signatures (`cli/src/harness/`, `hooks.rs`, `signatures.rs`; §13.2, §13.4, §13.6)
 
 - **Harness driver** (§13.2). icm builds the harness once (`cargo test -p <pkg> --test icm --no-run`, so compiler errors are diagnostics and exit 5) and runs the built executable from the package directory with `ICED_TEST_BACKEND=tiny-skia` (an `ICED_TEST_BACKEND` in icm's environment wins) instead of one `cargo test … -- <command>` per render: no cargo freshness check per command, and up to four renders run at once. Answers: a protocol other than 1, or "unknown command/option" from the harness, is `harness.protocol_mismatch` (4); no `ICM_HARNESS` line (a libtest target, a missing `harness = false`) or no `icm` test target is `harness.missing` (3); exit 2 is `usage.bad_args` (an unknown `--preset`) or `tool.failed` (a file it cannot write); a panic is `run.app_panicked` (10) with the app's source line as evidence; any other crash `run.app_died` (10). The failure signatures are its likely causes.
-- **Phone layouts headless.** The harness runs on the host, so `cfg!(target_os)` there is the desktop's. The template's `safe_area` therefore picks the phone padding (64 top, 48 bottom) at run time: on iOS and Android, and in any window narrower than 600 logical pixels (a `responsive` root), so `shot --headless`, `ui` and `.ice` flows at phone viewports lay out as the phone does (`Increment` at y 86 at `iphone-17`, as on the emulator).
+- **Phone layouts headless.** The harness runs on the host, so `cfg!(target_os)` there is the desktop's. The template pads its root with the safe area, which the harness gives a viewport the size of a phone preset (§13.2), so `shot --headless`, `ui` and `.ice` flows at phone viewports lay out as that phone does: `Increment`'s centre at y 100.4 at `iphone-17` (its row 16 below the 62-point inset, as on the iPhone 17 simulator) and y 92.5 at `pixel-9` (16 below 54.1, as on icm's emulator). Until a safe area arrives (the first frames on a device, unit tests, other viewport sizes) the template's `fallback_padding` picks the phone padding (64 top, 48 bottom) at run time: on iOS and Android, and in any window narrower than 600 logical pixels (a `responsive` root).
 - **`shot --headless`.** Writes `target/icm/host/shots/<viewport>-<theme>[-<preset>].png` (or `--out`, `--out-dir`) and a `.preview.png` next to each. Without `--viewport` it renders the first of `[test] viewports`; `--all-viewports` adds all of them. One shot reports `artifacts.screenshot`/`preview` and `screen`; several report `screenshot.<label>`/`preview.<label>`. Every result has `shots[]` (label, paths, size, scale, `screen`, `blank`, `dominant`). A single-colour render is WARN `run.screen_blank` (FAIL under `--strict`). Previews and blank detection use `png` 0.18 (§16.1), in `raster.rs`.
 - **`ui`.** `icm ui tree|find|ice` is headless with or without `--headless` (the only mode until phase 6) and is a content command: human mode prints the answer on stdout. `--viewport` (a preset or `WxH[@scale]`, for `tree` and `find`; default the first of `[test] viewports`; `ice` takes the flow's own header) picks the size. `find` takes `#id` (or `id:`), else a text, matched exactly, then as a case-insensitive substring; each match carries `center` in logical pixels; no match is `ui.selector_not_found` (1). The tree and the `.ice` report are files in the run directory (`artifacts.tree`, `artifacts.report`).
 - **`test`.** `cargo test --no-run` (build), then `cargo test --no-fail-fast [-- <filter>]`, with the libtest output read back into suites: a `test.passed` check per suite that ran tests and per passing flow, a `test.failed` per failing test (its panic line as evidence) or flow (the `.ice` line), and for a binary that crashed. Flows in a `[test] flows` directory other than `tests/flows` run through `icm-ice`. Without a harness the unit tests still run and `harness.missing` is a WARN. A flow that does not parse (`test.ice_parse`, 3) blocks after everything else is reported. `--on` and `--lifecycle` are `usage.not_implemented` until phase 3.

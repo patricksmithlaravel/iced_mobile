@@ -16,10 +16,9 @@ this file in the commit that fixes or finds a limitation.
   `icm ui --headless` give a viewport the size of a device preset
   (`iphone-17`, `iphone-se`, `pixel-9`) that device's insets; other sizes
   and unit tests get none. So keep a padding of your own until a value
-  arrives. The template pads phones a fixed 64 top and 48 bottom
-  (`safe_area()` in `src/lib.rs`), which follows neither the device nor the
-  keyboard. On Android the keyboard's height can arrive a quarter of a
-  second after the keyboard. The desktop and the web report zero, a phone
+  arrives, as the template's `App::padding` in `src/lib.rs` does (64 top
+  and 48 bottom on phones). On Android the keyboard's height can arrive a
+  quarter of a second after the keyboard. The desktop and the web report zero, a phone
   browser's notch included. Keep controls away from the rounded corners.
 - **No edit menu on phones.** A long press in a text field shows no menu
   and no selection handles, and the Ctrl shortcuts of text fields fire
@@ -38,8 +37,9 @@ this file in the commit that fixes or finds a limitation.
     non-ASCII input on Android, and type into the app on a device.
   - The keyboard covers fields in the lower half of the screen unless the
     root is padded with `SafeArea::padding` from `iced::mobile::safe_area()`,
-    whose bottom rises with it. The template's fixed padding does not, so
-    its field is at the top.
+    whose bottom rises with it, as the template's is. On Android it rises
+    up to a quarter of a second late, so the template keeps its field near
+    the top.
   - If the user hides the keyboard while a field keeps the focus, tapping
     the field does not bring it back until the field has lost the focus
     once.

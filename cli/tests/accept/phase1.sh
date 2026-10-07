@@ -427,8 +427,8 @@ input_tap() {
 
 # One coordinate space (Appendix C item 25): tap "Increment" at its place
 # in points, read off the template's layout (right-aligned, about 106 pt
-# wide, its row TOP pt down), and see "Count: 0" become "Count: 1" in the
-# running app's screenshot.
+# wide, its row TOP pt down: 16 below the safe area's top inset), and see
+# "Count: 0" become "Count: 1" in the running app's screenshot.
 tap_increment() {
     local p=$1 top=$2 before after x y w scale
     cd "$DEMO"
@@ -801,7 +801,7 @@ main() {
     step shot-web shot_platform web
     step input-unsupported input_unsupported
     step input-android input_tap android 200 400
-    step input-android-increment tap_increment android 64
+    step input-android-increment tap_increment android 70
     step input-web input_tap web 100 100
     step input-web-increment tap_increment web 16
     step test host_test

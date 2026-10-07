@@ -60,8 +60,14 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
   expect "Count: 1"
   ```
   `click "<text>"` finds a widget by its exact text (a field by its placeholder, or its value once
-  typed into); `type "<text>"` types into the focused field; `type enter|tab|escape|backspace` presses
-  a key; `expect "<text>"` passes when some widget shows exactly that text.
+  typed into), the first one when several show it; `type "<text>"` types into the focused field;
+  `type enter|tab|escape|backspace` presses a key; `expect "<text>"` passes when some widget shows
+  exactly that text. `mode: Immediate` goes on at once; `mode: Zen` waits for every task an
+  instruction starts, as `tests/flows/copy_paste.ice` does for the clipboard.
+- Headless viewports the size of a phone preset (`402x874` is `iphone-17`, `412x915` is `pixel-9`)
+  get that phone's safe area, so they lay out as the phone does, and the headless clipboard starts
+  empty in each flow. `iced::system::theme_changes()` and `iced::mobile::lifecycle()` report nothing
+  headless (`icm shot --headless --theme dark` still draws the default theme dark).
 
 ## Rules that fail silently when broken
 - Keep every iced line on the same git URL and tag (or rev), character for character.
@@ -71,11 +77,20 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 - Android may end the app and start it over (Back at its root, or killing its process in the
   background to free memory): save what must survive on `Lifecycle::Suspended`
   (`iced::mobile::on_lifecycle`). To react in the UI (hide content, pause, lock), subscribe to
-  `iced::mobile::lifecycle()`: its messages come too late for saving.
-- Keep the root padding (`safe_area` in `src/lib.rs`): Android targetSdk 36 draws edge to edge, and
-  the fixed padding lays headless renders out as on the phone. `iced::mobile::safe_area()` reports
-  the device's own insets and the keyboard's height (headless, a device preset's insets; see
-  `iced::mobile`).
+  `iced::mobile::lifecycle()`, as `src/lib.rs` does: its messages come too late for saving. Hide
+  content on `Inactive`, lock on `Background`, never on `Inactive` (a Face ID prompt makes the app
+  inactive, and the unlock would loop).
+- Keep padding the root with the safe area (`App::padding` in `src/lib.rs`): phones draw under the
+  status bar, the notch, the home indicator or navigation bar (Android targetSdk 36 is edge to edge)
+  and the keyboard. `iced::mobile::safe_area()` reports them, once the window exists; the fixed
+  `fallback_padding` stands in until then.
+- Keep the theme following the system: no fixed `.theme(..)`, or a theme per mode from
+  `iced::system::theme_changes()`. icm's Android window and bar icons follow the system's mode, so a
+  light UI forced in dark mode loses its status bar there (white icons on white) unless the app
+  declares its own `IcmTheme` in `platform/android/res`.
+- Read the clipboard only when the user asks to paste (`Message::Paste`): Android gives `None` to an
+  app without the input focus, and iOS asks the user before an app reads what another app copied.
+  Text fields have no edit menu on phones, so keep Copy and Paste buttons where they matter.
 - `.ice` `click` and host tests use a mouse; phones use touch. Confirm UI changes with `icm run ios-sim`
   and `icm run android`, and look at the screenshot.
 - Keep `features = ["fira-sans"]` and the Fira Sans `default_font`: every platform and the headless
