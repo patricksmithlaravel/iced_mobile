@@ -178,13 +178,16 @@ fn canonical(path: &Path) -> PathBuf {
 }
 
 /// Runs `cargo metadata --no-deps` for the package or workspace in `dir`
-/// (its `Cargo.toml`, or the nearest one above it).
-pub fn metadata(dir: &Path, offline: bool) -> Result<Metadata, IcmError> {
+/// (its `Cargo.toml`, or the nearest one above it), within 120 s or
+/// `limit` (what is left of `--timeout`), whichever is shorter.
+pub fn metadata(dir: &Path, offline: bool, limit: Option<Duration>) -> Result<Metadata, IcmError> {
+    const OWN: Duration = Duration::from_secs(120);
+    let overall = limit.is_some_and(|limit| limit < OWN);
     let manifest = dir.join("Cargo.toml");
     let mut cmd = Cmd::tool("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .cwd(dir)
-        .timeout(Duration::from_secs(120));
+        .timeout(limit.map_or(OWN, |limit| limit.min(OWN)));
     if manifest.is_file() {
         cmd = cmd.arg("--manifest-path").arg(&manifest);
     }
@@ -198,6 +201,10 @@ pub fn metadata(dir: &Path, offline: bool) -> Result<Metadata, IcmError> {
             format!("cannot run cargo: {error}"),
         )
     })?;
+    // Killed at its limit or by a signal to icm: not a config problem.
+    if let Some(error) = crate::context::end_error("cargo.metadata", &cmd, &outcome, overall) {
+        return Err(error);
+    }
 
     if !outcome.success() {
         let stderr = outcome.stderr_text();

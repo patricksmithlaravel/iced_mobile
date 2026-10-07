@@ -464,6 +464,23 @@ impl Reporter {
         inner.finish()
     }
 
+    /// Finishes with `run.interrupted` for `signal`; the command's own error
+    /// (often a child it saw fail because icm killed it) follows in
+    /// `errors[]`.
+    pub fn finish_interrupted(&self, signal: i32, error: IcmError) -> Exit {
+        let mut inner = self.lock();
+        if let Some(exit) = inner.finished {
+            return exit;
+        }
+        let interrupted = interrupted(signal);
+        let same = error.id == interrupted.id;
+        inner.block(interrupted);
+        if !same {
+            inner.block(error);
+        }
+        inner.finish()
+    }
+
     /// Finishes with exit 70 for a panic.
     pub fn finish_panic(&self, message: &str) -> Exit {
         let error = IcmError::new(CheckId::InternalBug, format!("icm panicked: {message}")).fix(
@@ -480,11 +497,6 @@ impl Reporter {
         }
         inner.block(error);
         inner.finish()
-    }
-
-    /// Finishes with exit 130 after a signal.
-    pub fn finish_interrupted(&self, signal: i32) -> Exit {
-        self.finish(Err(interrupted(signal)))
     }
 
     /// The watchdog's finish: like [`Reporter::finish_interrupted`], but
@@ -941,6 +953,26 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("valid JSON line"))
             .collect()
+    }
+
+    #[test]
+    fn an_interrupted_command_exits_130_and_keeps_its_own_error() {
+        let (rep, out, _) = reporter(json_mode(), false);
+        let exit = rep.finish_interrupted(
+            libc::SIGTERM,
+            IcmError::new(CheckId::ConfigInvalid, "cargo metadata failed: "),
+        );
+        assert_eq!(exit, Exit::Interrupted);
+        let result = lines(&out).pop().unwrap();
+        assert_eq!(result["exit"], 130);
+        assert_eq!(result["errors"][0]["id"], "run.interrupted");
+        assert_eq!(result["errors"][1]["id"], "config.invalid");
+
+        let (rep, out, _) = reporter(json_mode(), false);
+        let exit = rep.finish_interrupted(libc::SIGINT, interrupted(libc::SIGINT));
+        assert_eq!(exit, Exit::Interrupted);
+        let result = lines(&out).pop().unwrap();
+        assert_eq!(result["errors"].as_array().unwrap().len(), 1);
     }
 
     #[test]

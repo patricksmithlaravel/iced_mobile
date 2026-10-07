@@ -165,6 +165,13 @@ fn run(cli: Cli, argv: Vec<String>) -> Exit {
     }));
 
     let exit = match outcome {
+        // A command that failed after a signal failed because of it (a
+        // child icm killed looks like a failed child): exit 130 whatever
+        // the command made of it. A command that ended well after one (a
+        // `--follow` ended with Ctrl-C) keeps its result.
+        Ok(Err(error)) if let Some(signal) = signals::pending() => {
+            rep.finish_interrupted(signal, error)
+        }
         Ok(result) => rep.finish(result),
         Err(_) => {
             let message = PANIC

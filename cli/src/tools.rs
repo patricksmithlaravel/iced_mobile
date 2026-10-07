@@ -735,15 +735,17 @@ pub fn xcode(env: &Env) -> Result<Xcode, IcmError> {
         .fix_commands(["sudo xcode-select -s /Applications/Xcode.app"]));
     }
 
-    let outcome = process::run(
-        &Cmd::tool("xcodebuild")
-            .arg("-version")
-            .env("DEVELOPER_DIR", &developer_dir)
-            .timeout(Duration::from_secs(60)),
-        None,
-        None,
-    )
-    .map_err(|error| IcmError::new(CheckId::EnvXcodeMissing, format!("xcodebuild: {error}")))?;
+    let version = Cmd::tool("xcodebuild")
+        .arg("-version")
+        .env("DEVELOPER_DIR", &developer_dir)
+        .timeout(Duration::from_secs(60));
+    let outcome = process::run(&version, None, None)
+        .map_err(|error| IcmError::new(CheckId::EnvXcodeMissing, format!("xcodebuild: {error}")))?;
+    // Killed at its limit or by a signal to icm: Xcode may be fine.
+    if let Some(error) = crate::context::end_error("xcodebuild.version", &version, &outcome, false)
+    {
+        return Err(error);
+    }
 
     let text = format!("{}{}", outcome.stdout_text(), outcome.stderr_text());
     if text.to_ascii_lowercase().contains("license") && !outcome.success() {

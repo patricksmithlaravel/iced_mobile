@@ -94,7 +94,12 @@ impl Ctx {
     pub fn project(&mut self) -> Result<&Project> {
         if self.project.is_none() {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            match resolve(self.global.config.as_deref(), &cwd, self.global.offline) {
+            match resolve(
+                self.global.config.as_deref(),
+                &cwd,
+                self.global.offline,
+                self.remaining(),
+            ) {
                 Ok(project) => {
                     let _ = self.rep.attach(&project.icm_dir);
                     self.rep.set("app", project.app_json());
@@ -116,7 +121,12 @@ impl Ctx {
     pub fn try_project(&mut self) -> Option<&Project> {
         if self.project.is_none() {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            if let Ok(project) = resolve(self.global.config.as_deref(), &cwd, self.global.offline) {
+            if let Ok(project) = resolve(
+                self.global.config.as_deref(),
+                &cwd,
+                self.global.offline,
+                self.remaining(),
+            ) {
                 self.project = Some(project);
             }
         }
@@ -197,27 +207,9 @@ impl Ctx {
     }
 
     fn judge_end(&self, name: &str, cmd: &Cmd, outcome: &Outcome, overall: bool) -> Result<()> {
-        match outcome.end {
-            End::TimedOut(limit) => {
-                let what = if overall {
-                    format!("the overall --timeout ran out during step {name}")
-                } else {
-                    format!(
-                        "step {name} exceeded its {} limit",
-                        crate::time::format_duration(limit)
-                    )
-                };
-                let mut error = IcmError::new(
-                    CheckId::StepTimeout,
-                    format!("{what}; its process group was killed ({})", cmd.display()),
-                );
-                if let Some(log) = &outcome.log {
-                    error = error.evidence(Evidence::file(log));
-                }
-                Err(error)
-            }
-            End::Interrupted(signal) => Err(output::interrupted(signal)),
-            End::Exited(_) | End::Signaled(_) => Ok(()),
+        match end_error(name, cmd, outcome, overall) {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 
@@ -407,11 +399,44 @@ pub struct ResolveFailure {
     pub root: Option<PathBuf>,
 }
 
+/// The error for a process that icm killed: at its time limit
+/// (`step.timeout`; `overall` when the limit was what was left of
+/// `--timeout`) or because icm got a signal (`run.interrupted`). `None` for
+/// a process that exited by itself, which the caller judges. Callers that
+/// run a process without [`Ctx::step`] or [`Ctx::probe`] check this before
+/// reading a failure as their own.
+pub fn end_error(name: &str, cmd: &Cmd, outcome: &Outcome, overall: bool) -> Option<IcmError> {
+    match outcome.end {
+        End::TimedOut(limit) => {
+            let what = if overall {
+                format!("the overall --timeout ran out during step {name}")
+            } else {
+                format!(
+                    "step {name} exceeded its {} limit",
+                    crate::time::format_duration(limit)
+                )
+            };
+            let mut error = IcmError::new(
+                CheckId::StepTimeout,
+                format!("{what}; its process group was killed ({})", cmd.display()),
+            );
+            if let Some(log) = &outcome.log {
+                error = error.evidence(Evidence::file(log));
+            }
+            Some(error)
+        }
+        End::Interrupted(signal) => Some(output::interrupted(signal)),
+        End::Exited(_) | End::Signaled(_) => None,
+    }
+}
+
 /// Resolves the project from `--config` or the current directory.
+/// `limit` is what is left of `--timeout`, if given.
 pub fn resolve(
     explicit: Option<&Path>,
     cwd: &Path,
     offline: bool,
+    limit: Option<Duration>,
 ) -> std::result::Result<Project, ResolveFailure> {
     let path = config::locate(explicit, cwd).map_err(|error| ResolveFailure {
         errors: vec![error],
@@ -433,7 +458,8 @@ pub fn resolve(
     };
 
     let loaded = config::load(&path).map_err(&fail)?;
-    let metadata = cargo::metadata(&loaded.dir, offline).map_err(|error| fail(vec![error]))?;
+    let metadata =
+        cargo::metadata(&loaded.dir, offline, limit).map_err(|error| fail(vec![error]))?;
 
     let package = match loaded.config.app.package.as_deref() {
         Some(name) => metadata.member(name).cloned().ok_or_else(|| {
