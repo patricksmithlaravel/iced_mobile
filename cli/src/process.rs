@@ -725,10 +725,16 @@ const PASSWORD_FLAGS: &[&str] = &[
     "--keystore-pass",
 ];
 
+/// Android's debug keystore password, which Android publishes: redacting
+/// it hides nothing and turns a printed keytool or apksigner command into
+/// one that makes a keystore the build cannot open.
+const PUBLIC_PASSWORD: &str = crate::android::DEBUG_KEYSTORE_PASS;
+
 /// Redacts passwords in an argv: `pass:<x>` values, the argument after a
 /// password flag (unless it is an `env:`/`file:` reference), `NAME=value`
 /// for secret names, and the values of secret variables in icm's own
-/// environment wherever they appear.
+/// environment wherever they appear. Android's public debug keystore
+/// password is left as it is.
 pub fn redact_argv(argv: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(argv.len());
     let mut redact_next = false;
@@ -736,6 +742,10 @@ pub fn redact_argv(argv: &[String]) -> Vec<String> {
     for arg in argv {
         if redact_next {
             redact_next = false;
+            if arg == PUBLIC_PASSWORD || arg.strip_prefix("pass:") == Some(PUBLIC_PASSWORD) {
+                out.push(arg.clone());
+                continue;
+            }
             if arg.starts_with("pass:") {
                 out.push(format!("pass:{REDACTED}"));
                 continue;
@@ -1011,7 +1021,7 @@ mod tests {
             "apksigner",
             "sign",
             "--ks-pass",
-            "pass:android",
+            "pass:hunter22",
             "--key-pass",
             "env:ICM_ANDROID_KEY_PASS",
             "keytool",
@@ -1032,6 +1042,19 @@ mod tests {
         assert_eq!(redacted[10], "NAME");
         assert_eq!(redacted[11], "ICM_TOKEN=<redacted>");
         assert_eq!(redacted[12], "--out=x");
+
+        // The debug keystore's public password stays readable.
+        let debug: Vec<String> = [
+            "keytool",
+            "-storepass",
+            "android",
+            "--ks-pass",
+            "pass:android",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(redact_argv(&debug), debug);
     }
 
     #[test]

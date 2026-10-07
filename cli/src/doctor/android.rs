@@ -423,8 +423,8 @@ fn avd(
             check.error = check
                 .error
                 .fix(
-                    "Set [android] avd in host.toml to an existing AVD (`emulator -list-avds`), or remove it to use icm's managed one.",
-                    &[],
+                    "Set [android] avd in host.toml to an existing AVD (`icm devices android` lists them), or remove it to use icm's managed one.",
+                    &["icm devices android --json -q"],
                 )
                 .by(By::Agent);
             check

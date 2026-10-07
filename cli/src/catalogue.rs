@@ -251,7 +251,7 @@ catalogue! {
         "Run `icm doctor android --fix`, which creates it with `avdmanager create avd`.";
     EnvDebugKeystoreMissing = "env.debug_keystore_missing", Environment, Fail, Doctor,
         "The Android debug keystore does not exist",
-        "Run `icm doctor android --fix`, which creates ~/.android/debug.keystore with keytool.";
+        "Run `icm doctor android --fix`, which creates the debug keystore next to host.toml (~/.config/icm/android/debug.keystore) with keytool; ~/.android is left alone.";
 
     // ---- review --------------------------------------------------------------------
     ReviewSnapshotStale = "review.snapshot_stale", CheckFailed, Fail, Agent,
