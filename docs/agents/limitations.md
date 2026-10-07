@@ -46,10 +46,17 @@ this file in the commit that fixes or finds a limitation.
 - **Hover sticks after a tap.** A touch moves iced's cursor and nothing moves
   it away, so the last widget tapped keeps its hovered style and tooltips
   stay open. Do not put anything essential in a tooltip.
-- **Dark mode is not detected on phones.** The system theme reads as unknown
-  and changes never arrive, so the app draws in iced's default theme. Set a
-  theme explicitly (`.theme(..)`), with an in-app switch if the app needs
-  dark mode.
+- **Dark mode reaches the app, not the system bars.** Phones report the
+  system's mode at launch and on every switch: without `.theme(..)` the app
+  follows it, and `iced::system::theme_changes()` reports it. On Android
+  the bars' icons are set when the app starts (icm's generated theme has
+  dark-mode values: white icons on `#2B2D31` for a light `[app]
+  background`); after a switch while the app runs they keep that colour
+  (dark on dark, or white on white) until the next launch. An app that
+  forces a light theme in dark mode declares its own `IcmTheme` style in
+  `platform/android/res` so the launch window and icons stay light. On
+  iOS the status bar always follows the system's mode, also when the app
+  forces the other one.
 - **Two lifecycle channels, with different timing.**
   `iced::mobile::lifecycle()` delivers `Foreground`, `Active`, `Inactive`,
   `Background` and `MemoryWarning` to `update`, the same on iOS and

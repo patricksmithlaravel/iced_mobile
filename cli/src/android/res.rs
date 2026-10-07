@@ -1,4 +1,5 @@
-//! The generated resource tree (design §9.4): the theme, the background
+//! The generated resource tree (design §9.4): the theme, the window's
+//! background and bar icons in light and dark mode, the icon's background
 //! colour, legacy launcher icons for every density, and adaptive icons
 //! whose foreground is the app icon inside the 66 % safe zone.
 //!
@@ -12,7 +13,7 @@ use crate::error::{Check, Evidence, IcmError};
 use std::path::{Path, PathBuf};
 
 /// Bump when the generated files change, so old stamps are invalidated.
-const GENERATOR: &str = "icm-android-res/2";
+const GENERATOR: &str = "icm-android-res/3";
 
 /// Densities and their scale against mdpi.
 pub const DENSITIES: &[(&str, f64)] = &[
@@ -129,9 +130,14 @@ pub fn generate(gen_dir: &Path, inputs: &Inputs) -> Result<Generated, IcmError> 
         std::fs::write(&path, bytes).map_err(|error| io_error(&path, &error))
     };
 
+    write("values/themes.xml", manifest::themes_xml().as_bytes())?;
     write(
-        "values/themes.xml",
-        manifest::themes_xml(background).as_bytes(),
+        "values/window.xml",
+        manifest::window_xml(background).as_bytes(),
+    )?;
+    write(
+        "values-night/window.xml",
+        manifest::window_xml(manifest::night_background(background)).as_bytes(),
     )?;
     write(
         "values/colors.xml",
@@ -244,6 +250,13 @@ mod tests {
         }
         let colors = std::fs::read_to_string(dir.join("values/colors.xml")).unwrap();
         assert!(colors.contains("#FF0000"));
+        // A light background: the window is dark in dark mode, with white
+        // bar icons.
+        let day = std::fs::read_to_string(dir.join("values/window.xml")).unwrap();
+        assert!(day.contains(">#FF0000<"), "{day}");
+        let night = std::fs::read_to_string(dir.join("values-night/window.xml")).unwrap();
+        assert!(night.contains(">#2B2D31<"), "{night}");
+        assert!(night.contains(">false<"), "{night}");
         assert!(
             dir.join("mipmap-anydpi-v26/ic_launcher_round.xml")
                 .is_file()

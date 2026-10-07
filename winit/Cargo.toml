@@ -47,13 +47,17 @@ winit.workspace = true
 sysinfo.workspace = true
 sysinfo.optional = true
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true
+ndk-context.workspace = true
+
 [target.'cfg(target_os = "ios")'.dependencies]
 block2.workspace = true
 objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-foundation.features = ["NSBundle", "NSDictionary", "NSNotification", "NSOperation", "NSString", "NSThread", "block2"]
 objc2-ui-kit.workspace = true
-objc2-ui-kit.features = ["UIResponder", "UIScene", "UISceneDefinitions", "UISceneSession", "UIView", "UIWindow", "UIWindowScene"]
+objc2-ui-kit.features = ["UIGeometry", "UIInterface", "UIPasteboard", "UIResponder", "UIScene", "UISceneDefinitions", "UISceneSession", "UIScreen", "UITraitCollection", "UIView", "UIWindow", "UIWindowScene"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys.workspace = true

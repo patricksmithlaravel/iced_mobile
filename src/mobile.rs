@@ -373,6 +373,87 @@
 //! iced cannot build the second event loop and the process ends. Android
 //! then starts the new Activity in a new process, or the next launch does.
 //!
+//! # Dark mode
+//!
+//! On Android and iOS the shell reads the system's light or dark mode when
+//! the application starts and whenever the user switches it, as the desktop
+//! does:
+//!
+//! - An application without `.theme(..)` draws iced's default theme for the
+//!   mode, `Theme::Light` or `Theme::Dark`, from its first frame, and
+//!   switches with the system while it runs.
+//! - [`system::theme`](crate::system::theme) answers the mode, and
+//!   [`system::theme_changes`](crate::system::theme_changes) reports it once
+//!   at start and again on every switch, for an application that picks its
+//!   own themes. A theme set with `.theme(..)` is drawn as it is, whatever
+//!   the system's mode:
+//!
+//! ```no_run,standalone_crate
+//! use iced::widget::text;
+//! use iced::{Element, Subscription, Theme, theme};
+//!
+//! #[derive(Default)]
+//! struct App {
+//!     mode: theme::Mode,
+//! }
+//!
+//! #[derive(Debug, Clone)]
+//! enum Message {
+//!     AppearanceChanged(theme::Mode),
+//! }
+//!
+//! impl App {
+//!     fn update(&mut self, message: Message) {
+//!         match message {
+//!             Message::AppearanceChanged(mode) => self.mode = mode,
+//!         }
+//!     }
+//!
+//!     fn view(&self) -> Element<'_, Message> {
+//!         text("Hello").into()
+//!     }
+//!
+//!     fn subscription(&self) -> Subscription<Message> {
+//!         iced::system::theme_changes().map(Message::AppearanceChanged)
+//!     }
+//!
+//!     fn theme(&self) -> Theme {
+//!         match self.mode {
+//!             theme::Mode::Dark => Theme::TokyoNight,
+//!             theme::Mode::Light | theme::Mode::None => Theme::Light,
+//!         }
+//!     }
+//! }
+//!
+//! pub fn run() -> iced::Result {
+//!     iced::application(App::default, App::update, App::view)
+//!         .subscription(App::subscription)
+//!         .theme(App::theme)
+//!         .run()
+//! }
+//! ```
+//!
+//! - Android reads the night bits of the `uiMode` in the Activity's
+//!   resources (through JNI; the copy android-activity keeps is not updated
+//!   when the Activity handles the change itself). Keep `uiMode` in the
+//!   manifest's `configChanges` (see [Android](#android)): without it, a
+//!   switch destroys the Activity and the application starts over.
+//! - iOS reads the style of the main screen's traits, which is the
+//!   system's: a window's override does not change it.
+//!
+//! The system bars belong to the platform:
+//!
+//! - Android takes the bars' icon colour from the Activity's theme
+//!   (`android:windowLightStatusBar` and `android:windowLightNavigationBar`)
+//!   when it creates the Activity. Give those a `values-night` variant (icm
+//!   generates one) and the icons suit the mode the application starts in.
+//!   A switch while it runs keeps them as they were (dark on dark, or white
+//!   on white) until the next launch: iced cannot change them without Java
+//!   code.
+//! - iOS colours the status bar for the system's mode. That suits the
+//!   default theme; an application that forces a light theme in dark mode
+//!   (or the reverse) gets a status bar in the other mode's colours.
+//!
 //! # winit
 //!
 //! iced builds against winit 0.30.13 vendored in this repository
@@ -433,8 +514,12 @@
 //!   fall back to Hiragino Sans, which lacks many simplified Chinese
 //!   characters (这, 们, ...); those show the missing-glyph box. Embed a font
 //!   for Chinese text.
-//! - **Not yet available on mobile:** safe-area insets (pad the root view),
-//!   the clipboard, and detecting dark mode.
+//! - **Not yet available on mobile:** safe-area insets (pad the root view)
+//!   and the clipboard.
+//! - **Dark mode and the system bars.** On Android a dark-mode switch while
+//!   the app runs leaves the bars' icons as the launch theme had them, and
+//!   on iOS the status bar follows the system's mode even when the app
+//!   forces a theme ([Dark mode](#dark-mode)).
 
 pub use crate::shell::{Lifecycle, lifecycle, on_lifecycle};
 

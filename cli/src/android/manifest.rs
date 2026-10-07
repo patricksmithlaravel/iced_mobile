@@ -332,30 +332,60 @@ pub fn manifest(inputs: &Inputs<'_>) -> Result<String, IcmError> {
 }
 
 /// `values/themes.xml`: a theme without an action bar whose window
-/// background is `[app] background` (`#RRGGBB` as RGB), so the first frame
-/// does not flash.
+/// background is `@color/icm_window_background`, so the first frame does
+/// not flash, and whose bar icons are dark when `@bool/icm_light_bars` is
+/// true.
 ///
 /// From targetSdk 35 the app draws behind transparent system bars, so the
 /// bars' icons sit on the app's own background. The parent is a dark
 /// theme, whose icons are white: on a light background they would vanish.
-/// The icons are dark when the background is light ([`is_light`]); the
-/// navigation bar's flag is API 27, and older devices ignore it.
-pub fn themes_xml(background: [u8; 3]) -> String {
-    let light = is_light(background);
+/// The navigation bar's flag is API 27, and older devices ignore it.
+///
+/// Both values are resources, so that `values-night/` can give them other
+/// values in dark mode ([`window_xml`]), while a style named `IcmTheme` in
+/// `[android] res` still replaces this one in both modes.
+pub fn themes_xml() -> String {
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n");
     xml.push_str(&format!(
         "    <style name=\"{THEME}\" parent=\"@android:style/Theme.Material.NoActionBar\">\n"
     ));
-    xml.push_str("        <item name=\"android:windowBackground\">@color/icm_background</item>\n");
-    xml.push_str("        <item name=\"android:colorBackground\">@color/icm_background</item>\n");
-    xml.push_str(&format!(
-        "        <item name=\"android:windowLightStatusBar\">{light}</item>\n"
-    ));
-    xml.push_str(&format!(
-        "        <item name=\"android:windowLightNavigationBar\">{light}</item>\n"
-    ));
+    for item in [
+        "android:windowBackground\">@color/icm_window_background",
+        "android:colorBackground\">@color/icm_window_background",
+        "android:windowLightStatusBar\">@bool/icm_light_bars",
+        "android:windowLightNavigationBar\">@bool/icm_light_bars",
+    ] {
+        xml.push_str(&format!("        <item name=\"{item}</item>\n"));
+    }
     xml.push_str("    </style>\n</resources>\n");
     xml
+}
+
+/// The window's background in dark mode when `[app] background` is light:
+/// the background of iced's built-in dark theme (`Theme::Dark`), which an
+/// app without a theme of its own draws in dark mode.
+pub const NIGHT_BACKGROUND: [u8; 3] = [0x2B, 0x2D, 0x31];
+
+/// The window's background in dark mode: `[app] background` when it is
+/// dark already, else [`NIGHT_BACKGROUND`].
+pub fn night_background(background: [u8; 3]) -> [u8; 3] {
+    if is_light(background) {
+        NIGHT_BACKGROUND
+    } else {
+        background
+    }
+}
+
+/// `values/window.xml`, and `values-night/window.xml` for
+/// [`night_background`]: the window's background (`icm_window_background`)
+/// and whether the bars' icons are dark on it (`icm_light_bars`,
+/// [`is_light`]), which the generated theme reads.
+pub fn window_xml(background: [u8; 3]) -> String {
+    let [red, green, blue] = background;
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n    <color name=\"icm_window_background\">#{red:02X}{green:02X}{blue:02X}</color>\n    <bool name=\"icm_light_bars\">{}</bool>\n</resources>\n",
+        is_light(background)
+    )
 }
 
 /// Whether dark icons read better than white ones on a colour: its WCAG
@@ -374,7 +404,8 @@ pub fn is_light([r, g, b]: [u8; 3]) -> bool {
     (luminance + 0.05) / 0.05 > 1.05 / (luminance + 0.05)
 }
 
-/// `values/colors.xml`.
+/// `values/colors.xml`: `icm_background`, the adaptive icon's background,
+/// the same in both modes.
 pub fn colors_xml(background: &str) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n    <color name=\"icm_background\">{}</color>\n</resources>\n",
@@ -515,15 +546,34 @@ mod tests {
 
     #[test]
     fn resources() {
-        let white = themes_xml([0xFF, 0xFF, 0xFF]);
-        assert!(white.contains("Theme.Material.NoActionBar"));
-        assert!(white.contains("<item name=\"android:windowLightStatusBar\">true</item>"));
-        assert!(white.contains("<item name=\"android:windowLightNavigationBar\">true</item>"));
-        let black = themes_xml([0x00, 0x00, 0x00]);
-        assert!(black.contains("<item name=\"android:windowLightStatusBar\">false</item>"));
-        assert!(black.contains("<item name=\"android:windowLightNavigationBar\">false</item>"));
+        let theme = themes_xml();
+        assert!(theme.contains("Theme.Material.NoActionBar"));
+        for item in [
+            "<item name=\"android:windowBackground\">@color/icm_window_background</item>",
+            "<item name=\"android:colorBackground\">@color/icm_window_background</item>",
+            "<item name=\"android:windowLightStatusBar\">@bool/icm_light_bars</item>",
+            "<item name=\"android:windowLightNavigationBar\">@bool/icm_light_bars</item>",
+        ] {
+            assert!(theme.contains(item), "{item}");
+        }
+        let white = window_xml([0xFF, 0xFF, 0xFF]);
+        assert!(white.contains("<color name=\"icm_window_background\">#FFFFFF</color>"));
+        assert!(white.contains("<bool name=\"icm_light_bars\">true</bool>"));
+        let black = window_xml([0x00, 0x00, 0x00]);
+        assert!(black.contains("<bool name=\"icm_light_bars\">false</bool>"));
         assert!(colors_xml("#FFFFFF").contains(">#FFFFFF<"));
         assert!(adaptive_icon_xml().contains("@mipmap/ic_launcher_foreground"));
+    }
+
+    #[test]
+    fn dark_mode_darkens_a_light_window_only() {
+        assert_eq!(night_background([0xFF; 3]), NIGHT_BACKGROUND);
+        assert_eq!(night_background([0xFF, 0xD6, 0x0A]), NIGHT_BACKGROUND);
+        assert_eq!(night_background([0x1C, 0x1C, 0x1E]), [0x1C, 0x1C, 0x1E]);
+        assert!(!is_light(NIGHT_BACKGROUND));
+        let night = window_xml(night_background([0xFF; 3]));
+        assert!(night.contains("<color name=\"icm_window_background\">#2B2D31</color>"));
+        assert!(night.contains("<bool name=\"icm_light_bars\">false</bool>"));
     }
 
     #[test]

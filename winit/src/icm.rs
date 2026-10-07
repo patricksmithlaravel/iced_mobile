@@ -28,6 +28,7 @@
 //! | `kind` | Fields | When |
 //! |---|---|---|
 //! | `start` | `protocol` (1), `framework` (the iced version), `pid` (`null` on the web), `platform` (`macos`, `linux`, `windows`, `ios`, `android`, `web`, ...), `bridge` (the agent bridge protocol, `null` when it is not compiled in) | the shell starts |
+//! | `theme` | `mode` (`light`, `dark`, `none` when the system does not say) | Android and iOS: the shell read the system's light or dark mode, once at start and again on every change |
 //! | `ready` | `ms` (since `start`), `window{size, physical, scale}` (logical and physical size, scale factor), `backend` (`wgpu`, `tiny-skia`), `adapter`, `api` (`Metal`, `Vulkan`, `Gl`, ...) | the shell's first frame was presented, once per `start` |
 //! | `lifecycle` | `state` (`suspended`, `resumed`) | winit reports the application suspended or resumed; see [`Lifecycle`](crate::Lifecycle) |
 //! | `app_state` | `state` (`foreground`, `active`, `inactive`, `background`, `memory_warning`) | the application's state changed, as [`lifecycle()`](crate::lifecycle()) delivers it to `update`; see [`Lifecycle`](crate::Lifecycle) |
@@ -227,6 +228,25 @@ pub(crate) fn ready(
             .str("adapter", &information.adapter)
             .str("api", &information.backend),
     );
+}
+
+/// Emits `theme`, with the system's light or dark mode as the shell read it.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) fn theme(mode: crate::core::theme::Mode) {
+    use crate::core::theme::Mode;
+
+    if !enabled() {
+        return;
+    }
+
+    emit(Event::new("theme").str(
+        "mode",
+        match mode {
+            Mode::Light => "light",
+            Mode::Dark => "dark",
+            Mode::None => "none",
+        },
+    ));
 }
 
 /// Emits `lifecycle`.

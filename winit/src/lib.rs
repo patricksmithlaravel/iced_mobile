@@ -66,6 +66,8 @@ use std::mem::ManuallyDrop;
 use std::slice;
 use std::sync::Arc;
 
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+mod appearance;
 #[cfg(any(target_os = "ios", test))]
 mod ios_sdk;
 #[cfg(target_os = "ios")]
@@ -286,6 +288,9 @@ where
         /// Android: the one native window is taken by an iced window.
         #[cfg(target_os = "android")]
         has_window: bool,
+        /// Android and iOS: the system's light or dark mode, last read.
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        appearance: appearance::Appearance,
     }
 
     let runner = Runner {
@@ -308,6 +313,8 @@ where
         held_window: None,
         #[cfg(target_os = "android")]
         has_window: false,
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        appearance: appearance::Appearance::default(),
     };
 
     boot_span.finish();
@@ -371,6 +378,9 @@ where
             event_loop: &winit::event_loop::ActiveEventLoop,
             cause: winit::event::StartCause,
         ) {
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            self.sync_theme(event_loop);
+
             self.process_event(
                 event_loop,
                 Event::EventLoopAwakened(winit::event::Event::NewEvents(cause)),
@@ -436,6 +446,9 @@ where
             &mut self,
             event_loop: &winit::event_loop::ActiveEventLoop,
         ) {
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            self.sync_theme(event_loop);
+
             self.process_event(
                 event_loop,
                 Event::EventLoopAwakened(winit::event::Event::AboutToWait),
@@ -742,6 +755,23 @@ where
             #[cfg(not(target_os = "android"))]
             try_next(&mut self.receiver)
         }
+
+        /// Android and iOS: winit reports no system theme there, so the
+        /// runner reads it whenever the event loop turns, and hands the
+        /// first mode and every change to the instance (see `appearance`).
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        fn sync_theme(
+            &mut self,
+            event_loop: &winit::event_loop::ActiveEventLoop,
+        ) {
+            if self.finished || event_loop.exiting() {
+                return;
+            }
+
+            if let Some(mode) = self.appearance.poll(event_loop) {
+                self.process_event(event_loop, Event::SystemTheme(mode));
+            }
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -808,6 +838,10 @@ enum Event<Message: 'static> {
     },
     EventLoopAwakened(winit::event::Event<Message>),
     Exit,
+    /// Android and iOS: the system's light or dark mode, read by the runner.
+    /// Not a user event, so it takes no slot of the proxy.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    SystemTheme(theme::Mode),
 }
 
 #[derive(Debug)]
@@ -1002,11 +1036,15 @@ async fn run_instance<P>(
                     }
                 }
 
+                // Android and iOS report no window theme: the runner reads
+                // the system's instead (`Event::SystemTheme`).
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 let window_theme = window
                     .theme()
                     .map(conversion::theme_mode)
                     .unwrap_or_default();
 
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 if system_theme != window_theme {
                     system_theme = window_theme;
 
@@ -1699,6 +1737,36 @@ async fn run_instance<P>(
                 }
             }
             Event::Exit => break,
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            Event::SystemTheme(mode) => {
+                log::info!("System theme: {mode:?}");
+                icm::theme(mode);
+
+                run_action(
+                    Action::System(system::Action::NotifyTheme(mode)),
+                    &program,
+                    &mut runtime,
+                    &mut compositor,
+                    &mut events,
+                    &mut messages,
+                    &mut clipboard,
+                    &mut control_sender,
+                    &mut user_interfaces,
+                    &mut window_manager,
+                    &mut ui_caches,
+                    &mut is_window_opening,
+                    &mut system_theme,
+                );
+
+                // iOS: the redraw it requested waits for the run loop to
+                // turn again when the mode was read in `AboutToWait`.
+                #[cfg(target_os = "ios")]
+                for (_id, window) in window_manager.iter_mut() {
+                    window.request_redraw(window::RedrawRequest::At(
+                        Instant::now(),
+                    ));
+                }
+            }
         }
     }
 
