@@ -90,7 +90,10 @@ this file in the commit that fixes or finds a limitation.
   `Inactive` does not reliably keep content out of Recents (set
   `FLAG_SECURE`); the focus can come and go more than once while a system
   window opens; Back can end the app before its `Background` message
-  arrives; and `MemoryWarning` is rare (`onLowMemory` only).
+  arrives; and `MemoryWarning` is rare with NativeActivity (the default:
+  `onLowMemory` only), but comes on every trip to the background with
+  GameActivity, which turns each `onTrimMemory` into one without its
+  level. Free only what is cheap to rebuild there.
 - **When Android destroys the activity, the app starts over.** Back at the
   app's root, a configuration change missing from `configChanges` and the
   "Don't keep activities" developer option destroy the Android activity: the

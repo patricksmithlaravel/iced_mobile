@@ -459,8 +459,13 @@
 //! - When Android destroys the Activity (Back), the application can end
 //!   before its `Background` message arrives: save in the hook, on
 //!   [`Lifecycle::Suspended`], which always comes first.
-//! - `MemoryWarning` comes from `onLowMemory`, which is rare; `onTrimMemory`
-//!   does not reach the app.
+//! - `MemoryWarning` depends on the Activity. With NativeActivity (the
+//!   default) it comes from `onLowMemory`, which is rare; `onTrimMemory`
+//!   does not reach the app. With GameActivity (`android-game-activity`)
+//!   every `onTrimMemory` arrives as `MemoryWarning`, without its level:
+//!   `TRIM_MEMORY_UI_HIDDEN` brings one each time the app goes to the
+//!   background, and it cannot be told from a real shortage. Free there
+//!   only what is cheap to build again.
 //!
 //! # Android: Activity destruction
 //!
@@ -678,6 +683,10 @@
 //!   moment after the event, and when Android destroys the Activity the
 //!   application can end before `Background` arrives: save in
 //!   [`on_lifecycle`] instead ([Lifecycle](#lifecycle)).
+//! - **`MemoryWarning` with GameActivity** comes each time the app goes to
+//!   the background: GameActivity turns every `onTrimMemory` into one,
+//!   without its level, so it cannot be told from a real shortage
+//!   ([Lifecycle](#lifecycle)).
 
 pub use crate::shell::{Lifecycle, lifecycle, on_lifecycle};
 

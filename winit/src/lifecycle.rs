@@ -31,7 +31,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 /// | `Active` | `didBecomeActive` | the window gained the focus while visible | with `Foreground` | once, at launch |
 /// | `Inactive` | `willResignActive`: Control Center, Notification Center, Face ID, calls, the app switcher, and before `Background` | the window lost the focus: the notification shade, system dialogs and permission prompts, Recents, split screen, and before `Background` | before `Background` | never |
 /// | `Background` | `didEnterBackground` | the native window is gone: Home, another app, the screen turned off, and before Android destroys the Activity | `pagehide` into the back-forward cache | never |
-/// | `MemoryWarning` | `didReceiveMemoryWarning` | `onLowMemory`, which is rare (`onTrimMemory` does not reach the app) | never | never |
+/// | `MemoryWarning` | `didReceiveMemoryWarning` | NativeActivity: `onLowMemory`, which is rare (`onTrimMemory` does not reach the app). GameActivity: every `onTrimMemory`, `TRIM_MEMORY_UI_HIDDEN` on each trip to the background included, without its level | never | never |
 ///
 /// The four states follow one another as `Background`, `Foreground`, then
 /// `Active` and `Inactive` in turn, then `Background`: `Foreground` always
@@ -63,7 +63,9 @@ pub enum Lifecycle {
     /// [`lifecycle()`] only. It is no longer visible.
     Background,
     /// [`lifecycle()`] only. The system is short of memory: free caches and
-    /// whatever can be built again.
+    /// whatever can be built again. On Android with GameActivity it also
+    /// comes each time the application goes to the background (see the
+    /// table).
     MemoryWarning,
 }
 
