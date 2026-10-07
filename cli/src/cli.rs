@@ -16,7 +16,7 @@ fn duration(value: &str) -> Result<Duration, String> {
     name = "icm",
     version = crate::buildinfo::VERSION_LINE,
     disable_help_subcommand = true,
-    after_help = "Examples:\n  icm run ios-sim --json -q        build, launch, screenshot; print only the result\n  icm explain config.unknown_key   what an error id means and how to fix it\n\nExit codes: 0 ok, 1 check failed, 2 usage, 3 config, 4 environment, 5 build, 6 tool,\n7 device, 8 timeout, 9 owner needed, 10 app died, 70 icm bug, 130 interrupted\n(`icm explain exit-codes`)."
+    after_help = "Examples:\n  icm run ios-sim --json -q        build, launch, screenshot; print only the result\n  icm explain config.unknown_key   what an error id means and how to fix it\n\nExit codes: 0 ok, 1 check failed, 2 usage, 3 config, 4 environment not ready (follow each\nerror's fix.by), 5 build, 6 tool, 7 device, 8 timeout, 9 owner needed, 10 app died,\n70 icm bug, 130 interrupted (`icm explain exit-codes`)."
 )]
 pub struct Cli {
     /// Flags every command takes.

@@ -36,7 +36,7 @@ None of this was pushed then: the remote had only `tawara/0.14-mobile`, and no `
 | Config | **`icm.toml`** next to the app crate. The marketing version stays in Cargo.toml `version`, and the build number is `[app] build`. Machine paths go in `~/.config/icm/host.toml` and never in the repo. |
 | Native files | **Generated only**, on every build, into `target/icm/gen/`, from icm.toml plus typed overlays. Existing hand-written files (Tawara's) are converted once by `icm init --adopt-*`. Reviewable snapshots are opt-in. |
 | Output | stdout carries `STEP` / `CHECK` / `ARTIFACT` / `READY` / `NEXT` / `RESULT` lines. With `--json` it carries NDJSON, and **the last line is always the result object**. Every invocation writes `events.ndjson` and `result.json` into a run directory. |
-| Exit codes | 0 ok · 1 check/test failed · 2 usage · 3 config · 4 environment · 5 build · 6 tool · 7 device · 8 timeout · **9 owner needed** · 10 app died or never drew · 70 icm bug · 130 interrupted |
+| Exit codes | 0 ok · 1 check/test failed · 2 usage · 3 config · 4 environment not ready (each error's `fix.by` says who acts) · 5 build · 6 tool · 7 device · 8 timeout · **9 owner needed** · 10 app died or never drew · 70 icm bug · 130 interrupted |
 | Dev loop | `icm run <desktop\|web\|ios-sim\|android>` builds, installs, launches, waits for the first frame, takes a screenshot and a preview, reads logs, and **returns** while the app keeps running. Readiness comes from the framework's `ICM_EVENT ready`, with platform probes as fallback. `icm logs` re-reads live sources. Web runs in a detached session. |
 | Seeing and acting | **Phase 1:** OS screenshots; a headless `iced_test` harness (`shot`, `tree`, `.ice`) that needs no device; adb input on Android; CDP input on web; AXe on ios-sim if installed. **Phase 6:** a debug-only in-app bridge (tree, find, tap, type, screenshot) on every platform except physical iOS. |
 | Release | `icm release <ios\|android\|web\|macos\|windows\|linux>` writes signed, store-gated artifacts plus `artifacts.json`, `UPLOAD.md` and `upload.sh` to `target/icm/dist/<version>+<build>/<target>/`. **icm never uploads and never notarizes.** Secrets are passed only as env-var names or keychain-profile names. |
@@ -312,7 +312,7 @@ On success, `artifacts` also has `screenshot` and `preview`. `preview` is a PNG 
 - The first *blocking* failure stops the pipeline and sets the exit code. Non-blocking gate FAILs collected on the way set exit 1 only if nothing blocking happened.
 - A panic (exit 70) overrides everything.
 - WARN never changes the exit code, except under `--strict`, where WARN becomes FAIL.
-- `doctor` is the one exception: it exits 4 if anything with `by: doctor|doctor-yes` remains, else 9 if only owner items remain, else 0.
+- `doctor` is the one exception: it exits 4 if anything with `by: doctor|doctor-yes` remains, else 9 if owner items remain, else the first remaining error's own exit (4 for an agent item such as `config.too_new`), else 0. Its `errors[]` can hold doctor, agent and owner items at once.
 - Within `/1`, fields are only added. A rename or removal bumps the schema to `/2`.
 - `icm print schema output` emits the JSON Schema.
 
@@ -324,7 +324,7 @@ On success, `artifacts` also has `screenshot` and `preview`. `preview` is a PNG 
 | 1 | CHECK_FAILED | the app or artifact failed a gate, test, hook or verify | fix what `errors[]` names |
 | 2 | USAGE | bad flags or an unsupported platform/command pair | `icm <cmd> --help` |
 | 3 | CONFIG | icm.toml or Cargo.toml invalid or inconsistent, or a bad lockfile shape | edit the field named at `file:line` |
-| 4 | ENVIRONMENT | a tool, target, SDK or package is missing, or versions are skewed | `icm doctor <p> --fix [--yes]` |
+| 4 | ENVIRONMENT | the environment is not ready: a tool, target, SDK or package is missing, or versions are skewed | follow each error's `fix.by`: `doctor`/`doctor-yes` run `fix.commands` (`icm doctor <p> --fix [--yes]`), `agent` acts (`config.too_new`, `harness.protocol_mismatch`), `owner` stops as for 9 (`env.chrome_missing`, `env.unsupported_host`) |
 | 5 | BUILD | rustc or the linker failed | read the `diagnostic` events |
 | 6 | TOOL | actool, aapt2, bundletool, wasm-bindgen, codesign, … failed unexpectedly | read the step's `log` |
 | 7 | DEVICE | no device, simulator, emulator or browser; boot or install failed; lock or port busy | `icm devices`, `--device`, `--wait-lock`, `--port` |
@@ -871,11 +871,12 @@ package it ONLY through `icm`, and read the last JSON line of every command.
 Input on a device: `icm input android tap X Y`, `icm input web tap X Y`, `icm input ios-sim tap X Y` (needs AXe).
 
 ## Results
-- Exit 0 ok · 1 check/test failed · 2 usage · 3 config · 4 environment (`icm doctor <p> --fix --yes`)
+- Exit 0 ok · 1 check/test failed · 2 usage · 3 config · 4 environment not ready (follow `fix.by`)
   · 5 build · 6 tool · 7 device · 8 timeout · 9 OWNER NEEDED · 10 app crashed / never drew · 70 icm bug.
 - Exit 9: STOP. Give the owner `errors[0].fix`. Do not work around it, do not guess credentials.
 - Every error has an id: `icm explain <id>`. Read the files in `errors[].evidence`.
-- `fix.by` says who acts: agent | doctor | doctor-yes | owner.
+- `fix.by` says who acts: `doctor` and `doctor-yes`: run `fix.commands` (`icm doctor <p> --fix`,
+  `--yes` to download); `agent`: you; `owner`: STOP as for exit 9. Exit 4 can need any of them.
 - Raw `simctl launch` / `adb install` exit codes prove nothing; `icm run` checks the app is alive and drew.
 
 ## Where things are

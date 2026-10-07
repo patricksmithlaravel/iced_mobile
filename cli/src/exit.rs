@@ -109,7 +109,7 @@ impl Exit {
                 "icm.toml or Cargo.toml invalid or inconsistent, or a bad lockfile shape"
             }
             Exit::Environment => {
-                "a tool, target, SDK or package is missing, or versions are skewed"
+                "the environment is not ready: a tool, target, SDK or package is missing, or versions are skewed"
             }
             Exit::Build => "rustc or the linker failed",
             Exit::Tool => {
@@ -139,7 +139,11 @@ impl Exit {
             Exit::CheckFailed => "fix what `errors[]` names",
             Exit::Usage => "`icm <cmd> --help`",
             Exit::Config => "edit the field named at `file:line`",
-            Exit::Environment => "`icm doctor <p> --fix [--yes]`",
+            // Not every exit-4 error is doctor's: `config.too_new` is the
+            // agent's, `env.chrome_missing` the owner's.
+            Exit::Environment => {
+                "follow each error's `fix.by`: `doctor`/`doctor-yes` run `fix.commands` (`icm doctor <p> --fix [--yes]`), `agent` acts, `owner` stops as for 9"
+            }
             Exit::Build => "read the `diagnostic` events (also in `errors[0].diagnostics`)",
             Exit::Tool => "read the step's `log`",
             Exit::Device => "`icm devices`, `--device`, `--wait-lock`, `--port`",

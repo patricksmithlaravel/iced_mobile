@@ -905,8 +905,10 @@ pub fn exit_codes_doc() -> String {
         ));
     }
     doc.push_str(
-        "\n`doctor` is the one exception: it exits 4 if anything fixable by `icm doctor --fix \
-         [--yes]` remains, else 9 if only owner items remain, else 0.\n",
+        "\n`doctor` is the one exception: it exits 4 if anything with `fix.by` `doctor` or \
+         `doctor-yes` remains, else 9 if owner items remain, else the first remaining error's own \
+         exit (4 for an agent item such as `config.too_new`), else 0. Its `errors[]` can hold \
+         doctor, agent and owner items at once, so follow each one's `fix.by`.\n",
     );
     doc
 }

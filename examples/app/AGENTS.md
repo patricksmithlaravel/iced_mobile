@@ -33,11 +33,13 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 `.ice` flows.
 
 ## Results
-- Exit 0 ok · 1 check/test failed · 2 usage · 3 config · 4 environment (`icm doctor <platform> --fix --yes`)
+- Exit 0 ok · 1 check/test failed · 2 usage · 3 config · 4 environment not ready (follow `fix.by`)
   · 5 build · 6 tool · 7 device · 8 timeout · 9 OWNER NEEDED · 10 app crashed or never drew · 70 icm bug.
 - Exit 9: STOP. Give the owner `errors[0].fix`. Do not work around it, and never guess credentials.
 - Every error has an id: `icm explain <id>`. Read the files in `errors[].evidence`.
-- `fix.by` says who acts: agent | doctor | doctor-yes | owner.
+- `fix.by` says who acts: `doctor` and `doctor-yes`: run `fix.commands` (`icm doctor <platform> --fix`,
+  `--yes` to download); `agent`: you; `owner`: STOP as for exit 9. Exit 4 can need any of them, so
+  read every entry of `errors[]`.
 - Raw `simctl launch` and `adb install` exit codes prove nothing; `icm run` checks the app is alive and drew.
 
 ## Where things are

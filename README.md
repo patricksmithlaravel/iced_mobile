@@ -55,8 +55,11 @@ icm stop --all --shutdown       # stop the apps and shut down icm's simulator an
 lists every command.
 
 - **doctor:** `icm doctor --fix` without `--yes` makes only local changes. In a new app it exits 4,
-  because creating `Cargo.lock` needs `--yes`. Exit 4 from doctor means `--fix --yes` has more to
-  install. For phone work only, name the platforms: `icm doctor ios-sim android --fix --yes`.
+  because creating `Cargo.lock` needs `--yes`. Exit 4 means the environment is not ready, and not
+  every cause is one `--fix --yes` can install: each entry of `errors[]` has a `fix.by` that says
+  who acts. `doctor` and `doctor-yes`: run its `fix.commands`. `agent`: do what its fix says (for
+  example, install the icm version the app asks for). `owner`: stop and hand it to a person. For
+  phone work only, name the platforms: `icm doctor ios-sim android --fix --yes`.
 - **Which Android device:** when icm's own emulator is not running and exactly one other device or
   emulator is online (your phone, or one of your own AVDs), `icm run android` installs onto that
   one. icm boots its emulator only when nothing else is online. Check `icm devices android` first,
@@ -170,9 +173,10 @@ crates keep upstream's version numbers.
   (`ok`, `exit`, `summary`, `errors[]`, `artifacts`, `next`). `-q` prints only that line. Each error
   has an `id`, `evidence`, and a `fix` whose `by` says who acts: `agent`, `doctor`, `doctor-yes` or
   `owner`. `--detach` returns at once, and `icm wait <run>` collects the result of a long build.
-- **Exit codes** are stable: 0 ok, 1 check failed, 2 usage, 3 config, 4 environment, 5 build,
-  6 tool, 7 device, 8 timeout, **9 owner needed** (stop and hand `errors[0].fix` to a person),
-  10 app died or never drew, 70 icm bug, 130 interrupted.
+- **Exit codes** are stable: 0 ok, 1 check failed, 2 usage, 3 config, 4 environment not ready
+  (follow each error's `fix.by`: doctor, agent or owner), 5 build, 6 tool, 7 device, 8 timeout,
+  **9 owner needed** (stop and hand `errors[0].fix` to a person), 10 app died or never drew,
+  70 icm bug, 130 interrupted.
 - **Explanations:** `icm explain <id>`, `icm explain exit-codes` and `icm explain --list`.
   `icm print commands --json` gives the whole command surface.
 - **icm never uploads, publishes or notarizes.** Release signing keys and their passwords stay with
