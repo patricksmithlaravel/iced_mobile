@@ -37,13 +37,13 @@
 //!   when it does not choose a theme itself (default `light`).
 //! - A viewport the size of a device preset gets the safe area that
 //!   device's shell reports, through `iced::mobile::safe_area()` (the
-//!   runtime's [`safe_area`](crate::runtime::safe_area)), before the
-//!   program boots: `iphone-17` 62 top and 34 bottom, `iphone-se` 20 top,
-//!   `pixel-9` 54.1 top and 24 bottom (icm's `pixel_9` emulator), and zero
-//!   at `web-mobile` and `desktop`, as the web and the desktop report. A
-//!   viewport of any other size gets none, and the program keeps whatever
-//!   padding it uses until one arrives. `.ice` flows follow the same rule
-//!   with their `viewport:` line.
+//!   runtime's `safe_area` module), before the program boots: `iphone-17`
+//!   62 top and 34 bottom, `iphone-se` 20 top, `pixel-9` 54.1 top and 24
+//!   bottom (icm's `pixel_9` emulator), and zero at `web-mobile` and
+//!   `desktop`, as the web and the desktop report. A viewport of any other
+//!   size gets none, and the program keeps whatever padding it uses until
+//!   one arrives. `.ice` flows follow the same rule with their `viewport:`
+//!   line.
 //! - `--preset` boots the program in one of its
 //!   [`Preset`](crate::program::Preset)s instead of its usual state.
 //! - `--wait-ms` lets the tasks the program starts at boot run for that

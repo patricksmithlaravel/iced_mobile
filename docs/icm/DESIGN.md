@@ -903,11 +903,12 @@ Input on a device: `icm input android tap X Y`, `icm input web tap X Y`, `icm in
 - No signing assets? `icm release <target> --sign none` checks everything else.
 
 ## Known limitations of iced_mobile {{framework_tag}}
-{{docs/agents/limitations.md of that tag: safe area only from a running app; no edit menu on mobile; Android IME
-is key events only (no composition, accents and CJK input unreliable); a drag starting on a button does not
-scroll; text_editor and rich-text links ignore touch; dark-mode switches keep Android's bar icons; Lifecycle::Suspended
-means "inactive" on iOS and "window lost" on Android, so don't lock on it alone; one window on Android;
-iPad unsupported; non-Latin text depends on system fonts (verify on device)}}
+{{docs/agents/limitations.md of that tag: the safe area arrives with the window (headless only at a device's
+size); no edit menu on mobile; Android IME is key events only (no composition, accents and CJK input
+unreliable); a drag starting on a button does not scroll; text_editor and rich-text links ignore touch;
+dark-mode switches keep Android's bar icons; lifecycle() messages come late, so save in on_lifecycle and lock
+on Background, never on Inactive; one window on Android; iPad unsupported; non-Latin text depends on system
+fonts (verify on device)}}
 ```
 The fork's own root `AGENTS.md` gets a `cli/` section:
 - Run `cargo test --manifest-path cli/Cargo.toml`.

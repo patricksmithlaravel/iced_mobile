@@ -16,19 +16,19 @@ this file in the commit that fixes or finds a limitation.
   `icm ui --headless` give a viewport the size of a device preset
   (`iphone-17`, `iphone-se`, `pixel-9`) that device's insets; other sizes
   and unit tests get none. So keep a padding of your own until a value
-  arrives, as the template's `App::padding` in `src/lib.rs` does (64 top
-  and 48 bottom on phones). On Android the keyboard's height can arrive a
-  quarter of a second after the keyboard. The desktop and the web report zero, a phone
-  browser's notch included. Keep controls away from the rounded corners.
-- **No edit menu on phones.** A long press in a text field shows no menu
-  and no selection handles, and the Ctrl shortcuts of text fields fire
-  only from a hardware keyboard on Android (iOS hardware keyboards send no
-  modifier keys). The clipboard itself works: `iced::clipboard::read` and
-  `write` use the system's, so give fields that need it Copy and Paste
-  buttons.
-  Read only when the user asks to paste: Android 10 and later give `None`
-  to an app without the input focus, and iOS 16 and later ask the user
-  ("Allow Paste") before an app reads what another app copied.
+  arrives, as the template's `App::padding` in `src/lib.rs` does (64 top and
+  48 bottom on phones). On Android the keyboard's height can arrive a
+  quarter of a second after the keyboard. The desktop and the web report
+  zero, a phone browser's notch included. Keep controls away from the
+  rounded corners.
+- **No edit menu on phones.** A long press in a text field shows no menu and
+  no selection handles, and the Ctrl shortcuts of text fields fire only from
+  a hardware keyboard on Android (iOS hardware keyboards send no modifier
+  keys). The clipboard itself works: `iced::clipboard::read` and `write` use
+  the system's, so give fields that need it Copy and Paste buttons. Read
+  only when the user asks to paste: Android 10 and later give `None` to an
+  app without the input focus, and iOS 16 and later ask the user ("Allow
+  Paste") before an app reads what another app copied.
 - **Limited text input** (iOS, Android).
   - Android (NativeActivity) receives key events only: no composition,
     autocorrect, swipe typing or suggestions, and characters outside the key

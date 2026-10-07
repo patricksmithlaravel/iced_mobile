@@ -668,6 +668,14 @@
 //!   the app runs leaves the bars' icons as the launch theme had them, and
 //!   on iOS the status bar follows the system's mode even when the app
 //!   forces a theme ([Dark mode](#dark-mode)).
+//! - **The keyboard's height on Android** arrives up to a quarter of a
+//!   second after the keyboard when the app draws edge to edge: the shell
+//!   reads it every 250 ms while a text input has the focus ([Safe
+//!   area](#safe-area)).
+//! - **Lifecycle messages come late.** [`lifecycle()`] delivers them a
+//!   moment after the event, and when Android destroys the Activity the
+//!   application can end before `Background` arrives: save in
+//!   [`on_lifecycle`] instead ([Lifecycle](#lifecycle)).
 
 pub use crate::shell::{Lifecycle, lifecycle, on_lifecycle};
 
