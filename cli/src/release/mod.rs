@@ -14,7 +14,8 @@
 //!      `[ios] team_id`, `uses_non_exempt_encryption`; `[android.signing]
 //!      upload`, its keystore and password variables, deferred so the
 //!      unsigned bundle is still built; `[desktop.windows] sign_command` and
-//!      `sign_env`);
+//!      `sign_env`; the Linux pipeline adds `[desktop.linux] maintainer`
+//!      for a `.deb`);
 //!    - `store.metadata_missing` (WARN): the listing URLs `[store]` lacks;
 //!    - the store policy table (`env.policy_stale`, `store.policy_upcoming`);
 //!    - the pipeline's own preconditions ([`Pipeline::preconditions`]);
