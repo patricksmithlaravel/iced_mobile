@@ -6,11 +6,12 @@
 //! drives it headless: the `.ice` flows in `tests/flows`, `icm shot
 //! --headless` and `icm ui --headless`.
 use iced::widget::{
-    Column, button, column, container, operation, row, scrollable, text,
-    text_input,
+    Column, button, column, container, operation, responsive, row, scrollable,
+    text, text_input,
 };
 use iced::{
-    Application, Center, Element, Fill, Font, Padding, Program, Task, Theme,
+    Application, Center, Element, Fill, Font, Padding, Program, Size, Task,
+    Theme,
 };
 
 /// The id of the text field: `operation::focus(INPUT)` focuses it, and a
@@ -104,6 +105,11 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        // The root padding depends on the window's size (see `safe_area`).
+        responsive(move |size| self.screen(size)).into()
+    }
+
+    fn screen(&self, size: Size) -> Element<'_, Message> {
         let counter = row![
             text(format!("Count: {}", self.count)).size(24).width(Fill),
             button("Increment")
@@ -158,19 +164,27 @@ impl App {
         .spacing(16);
 
         container(content)
-            .padding(safe_area())
+            .padding(safe_area(size))
             .width(Fill)
             .height(Fill)
             .into()
     }
 }
 
+/// Windows narrower than this, in logical pixels, are laid out as a phone.
+const PHONE_WIDTH: f32 = 600.0;
+
 /// Room for the status bar, the notch or Dynamic Island, and the home
 /// indicator or navigation bar. iced has no safe-area API yet, and Android
 /// apps targeting SDK 35 or later draw edge to edge, so the root view pads
-/// for them on phones.
-fn safe_area() -> Padding {
-    if cfg!(any(target_os = "ios", target_os = "android")) {
+/// for them on iOS and Android. A window narrower than a phone gets the
+/// same padding anywhere, so headless renders at phone viewports (`icm shot
+/// --headless`, `icm ui --headless`, `.ice` flows) lay out as the phone
+/// does.
+fn safe_area(size: Size) -> Padding {
+    if cfg!(any(target_os = "ios", target_os = "android"))
+        || size.width < PHONE_WIDTH
+    {
         Padding::new(16.0).top(64.0).bottom(48.0)
     } else {
         Padding::new(16.0)
