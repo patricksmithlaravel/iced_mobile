@@ -314,6 +314,12 @@
 //! `cargo tree -i winit --target all` must then list one winit, from the
 //! fork's git URL.
 //!
+//! The fork is a git source of its own, apart from iced's: a supply-chain
+//! check that allows only listed git sources, such as `[sources]
+//! allow-git` in cargo-deny's `deny.toml`, must list
+//! `https://github.com/patricksmithlaravel/winit` too, or it refuses winit
+//! and dpi.
+//!
 //! # Known limitations
 //!
 //! - **Exiting.** `iced::exit` and closing the last window are ignored on
