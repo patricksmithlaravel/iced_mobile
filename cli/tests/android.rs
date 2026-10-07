@@ -323,6 +323,59 @@ fn log_files_keep_no_secret() {
     assert_eq!(second["msg"], "{\"token\":\"<redacted>\"}");
 }
 
+/// The app's records are those its processes wrote while they were its
+/// own, whatever their tags: another iced_mobile app writes `ICM_EVENT` and
+/// `iced` lines too (the events opt-in is a system property), and a pid the
+/// app had before can belong to another process now.
+#[test]
+fn logs_are_the_apps_processes() {
+    let sandbox = Sandbox::new();
+    let state = sandbox.root.path();
+    // The app is not running now: no pid to start from.
+    std::fs::write(state.join("pidof"), "").unwrap();
+    // pid 4321 was the app's from 3500 to 3600, then another app's; pid
+    // 7777 is another iced_mobile app.
+    std::fs::write(
+        state.join("events.txt"),
+        "1791333500.000   600   610 I am_proc_start: [0,4321,10123,com.acme.fixture,next-top-activity,{com.acme.fixture/android.app.NativeActivity}]
+1791333600.000   600   610 I am_proc_died: [0,4321,com.acme.fixture,900,19]
+1791333700.000   600   610 I am_proc_start: [0,4321,10200,com.other.app,activity,{com.other.app/.Main}]
+1791333710.000   600   610 I am_proc_start: [0,7777,10201,com.other.iced,activity,{com.other.iced/android.app.NativeActivity}]
+",
+    )
+    .unwrap();
+    std::fs::write(
+        state.join("logcat.txt"),
+        "--------- beginning of main
+1791333500.500  4321  4321 I ICM_EVENT: {\"v\":1,\"kind\":\"start\",\"protocol\":1,\"pid\":4321,\"platform\":\"android\"}
+1791333501.000  4321  4350 I iced: the app's own line
+1791333501.200  4321  4350 I ICM_EVENT: {\"v\":1,\"kind\":\"ready\",\"ms\":700}
+1791333701.000  4321  4321 I iced: another app's process with the old pid
+1791333711.000  7777  7777 I ICM_EVENT: {\"v\":1,\"kind\":\"ready\",\"ms\":90}
+1791333711.100  7777  7790 W iced: another iced_mobile app
+1791333711.200  7777  7790 E RustStdoutStderr: thread 'main' panicked at other/src/lib.rs:1:1:
+",
+    )
+    .unwrap();
+
+    let result = sandbox.result(&["logs", "android", "--since", "15m"]);
+    assert_eq!(result["exit"], 0, "{result}");
+    let records = result["records"].as_array().unwrap();
+    let messages: Vec<&str> = records
+        .iter()
+        .map(|record| record["msg"].as_str().unwrap())
+        .collect();
+    assert_eq!(records.len(), 3, "{messages:?}");
+    assert!(
+        records.iter().all(|record| record["pid"] == 4321),
+        "{messages:?}"
+    );
+    assert!(messages.contains(&"the app's own line"), "{messages:?}");
+    let app_log = sandbox.artifact(&result, "app_log");
+    assert!(!app_log.contains("another"), "{app_log}");
+    assert_eq!(sandbox.artifact(&result, "logs").lines().count(), 3);
+}
+
 #[test]
 fn run_fails_before_building_when_the_sdk_lacks_pieces() {
     let sandbox = Sandbox::new();

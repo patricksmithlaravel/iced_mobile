@@ -367,12 +367,12 @@ impl<'a> Suite<'a> {
             .getprop("ro.build.version.sdk")
             .and_then(|text| text.trim().parse().ok())
             .unwrap_or(0);
-        let speaks = !pipeline::events_since(&launched.adb, &launched.mark)
+        let processes = pipeline::processes(&launched.adb, &launched.app_id, &launched.pids);
+        let speaks = pipeline::events_since(&launched.adb, &launched.mark)
             .iter()
+            .filter(|record| processes.owns(record))
             .filter_map(logcat::event)
-            .filter(|event| logcat::kind(event) == "start")
-            .collect::<Vec<_>>()
-            .is_empty();
+            .any(|event| logcat::kind(&event) == "start");
         let settings = Settings::read(&launched.adb, api);
         Suite {
             ctx,
@@ -649,9 +649,13 @@ impl<'a> Suite<'a> {
             evidence.push(line_of(record));
         }
 
-        // The app's own events and its logs: panics, crashes, ANRs.
-        let icm_events: Vec<(logcat::Record, Value)> = pipeline::events_since(&adb, mark)
+        // The app's own events (not another iced_mobile app's) and its
+        // logs: panics, crashes, ANRs.
+        let icm_records = pipeline::events_since(&adb, mark);
+        let processes = pipeline::processes(&adb, &app_id, &before.into_iter().collect());
+        let icm_events: Vec<(logcat::Record, Value)> = icm_records
             .into_iter()
+            .filter(|record| processes.owns(record))
             .filter_map(|record| logcat::event(&record).map(|event| (record, event)))
             .collect();
         let starts = icm_events

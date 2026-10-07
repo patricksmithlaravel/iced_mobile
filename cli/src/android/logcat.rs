@@ -5,15 +5,15 @@
 //!
 //! The log is never cleared (`logcat -c` would destroy other apps'
 //! evidence); every query starts at the launch mark (`-T <epoch>`).
+//!
+//! A record is the app's when its process was the app's at the time
+//! ([`Processes`]). Its tag says nothing: `debug.icm.events` is a system
+//! property, so every iced_mobile app on the device writes `ICM_EVENT`
+//! lines, and any app may log under `iced` or `RustStdoutStderr`.
 
 use crate::cli::Level;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
-
-/// The tags that belong to the app whatever their pid: the framework's
-/// events and logger, Rust's redirected stdout/stderr, Java crashes and
-/// native crash dumps.
-pub const APP_TAGS: &[&str] = &["ICM_EVENT", "iced", "RustStdoutStderr"];
+use std::collections::{BTreeMap, BTreeSet};
 
 /// System tags kept when they concern the app.
 pub const SYSTEM_TAGS: &[&str] = &["AndroidRuntime", "DEBUG", "ActivityManager", "libc"];
@@ -127,10 +127,141 @@ pub fn parse(text: &str) -> Vec<Record> {
     text.lines().filter_map(parse_line).collect()
 }
 
+/// The events-buffer tags Android writes when it starts an app's process
+/// (`am_proc_start: [user,pid,uid,process,type,component]`) and when it
+/// learns that one died (`am_proc_died: [user,pid,process,...]`).
+pub const PROCESS_TAGS: &[&str] = &["am_proc_start", "am_proc_died"];
+
+/// How long before Android logs `am_proc_start` a new process may already
+/// write its first lines: the child runs while the system server is still
+/// recording the start.
+const START_SLACK: f64 = 1.0;
+
+/// One start or death of a process, from the events buffer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Change {
+    /// Epoch seconds.
+    at: f64,
+    /// A start; else a death.
+    start: bool,
+    /// The process was the app's (its name is the app id, or `<id>:<name>`).
+    app: bool,
+}
+
+/// Which process was the app's when: the starts and deaths Android logged
+/// for each pid, and the pids known to be the app's now (`pidof`) or from
+/// an earlier look. A pid outlives its process and is handed out again, so
+/// a record counts as the app's only while its pid was the app's.
+#[derive(Clone, Debug, Default)]
+pub struct Processes {
+    changes: BTreeMap<u32, Vec<Change>>,
+    known: BTreeSet<u32>,
+    /// The app's pids now, from `pidof`.
+    pub now: Vec<u32>,
+}
+
+impl Processes {
+    /// Only pids known to be the app's, with no starts or deaths to place
+    /// them in time.
+    pub fn of(known: impl IntoIterator<Item = u32>) -> Processes {
+        Processes {
+            known: known.into_iter().collect(),
+            ..Processes::default()
+        }
+    }
+
+    /// The app's processes from `pidof`'s pids now and the
+    /// [`PROCESS_TAGS`] records of the events buffer.
+    pub fn read(app_id: &str, now: Vec<u32>, events: &[Record]) -> Processes {
+        let mut changes: BTreeMap<u32, Vec<Change>> = BTreeMap::new();
+        for record in events {
+            let start = match record.tag.as_str() {
+                "am_proc_start" => true,
+                "am_proc_died" => false,
+                _ => continue,
+            };
+            let fields: Vec<&str> = record
+                .msg
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .map(str::trim)
+                .collect();
+            let name = if start { fields.get(3) } else { fields.get(2) };
+            let (Some(pid), Some(name)) = (fields.get(1).and_then(|pid| pid.parse().ok()), name)
+            else {
+                continue;
+            };
+            let app = *name == app_id
+                || name
+                    .strip_prefix(app_id)
+                    .is_some_and(|rest| rest.starts_with(':'));
+            let at = record.seconds() - if start && app { START_SLACK } else { 0.0 };
+            changes
+                .entry(pid)
+                .or_default()
+                .push(Change { at, start, app });
+        }
+        for list in changes.values_mut() {
+            list.sort_by(|a, b| a.at.total_cmp(&b.at));
+        }
+        Processes {
+            changes,
+            known: now.iter().copied().collect(),
+            now,
+        }
+    }
+
+    /// Adds pids known to be the app's (seen earlier in this run, or the
+    /// session's).
+    pub fn knowing(mut self, pids: impl IntoIterator<Item = u32>) -> Processes {
+        self.known.extend(pids);
+        self
+    }
+
+    /// Whether `pid` was the app's at `at` (epoch seconds).
+    pub fn owned(&self, pid: u32, at: f64) -> bool {
+        let Some(changes) = self.changes.get(&pid) else {
+            return self.known.contains(&pid);
+        };
+        let before = changes.iter().rev().find(|change| change.at <= at);
+        let after = changes.iter().find(|change| change.at > at);
+        match (before, after) {
+            // The app's process, started before `at`.
+            (Some(change), _) if change.start && change.app => true,
+            // After another process's start or a death, the pid is not the
+            // app's, unless `pidof` names the app now and the buffer missed
+            // its start.
+            (Some(_), None) => self.now.contains(&pid),
+            (Some(_), Some(_)) => false,
+            // A process the buffer only saw die had the pid until then.
+            (None, Some(change)) => !change.start && change.app,
+            (None, None) => self.known.contains(&pid),
+        }
+    }
+
+    /// Whether a record was written by the app's process.
+    pub fn owns(&self, record: &Record) -> bool {
+        self.owned(record.pid, record.seconds())
+    }
+
+    /// The pids the app had at some time, as far as these records say.
+    pub fn pids(&self) -> BTreeSet<u32> {
+        let mut pids = self.known.clone();
+        for (pid, changes) in &self.changes {
+            if changes.iter().any(|change| change.app) {
+                let _ = pids.insert(*pid);
+            }
+        }
+        pids
+    }
+}
+
 /// Where a record belongs, or `None` when it is not the app's business.
 /// Stateless: see [`select`] for native crash dumps.
-pub fn classify(record: &Record, app_id: &str, pids: &BTreeSet<u32>) -> Option<&'static str> {
-    if pids.contains(&record.pid) || APP_TAGS.contains(&record.tag.as_str()) {
+pub fn classify(record: &Record, app_id: &str, processes: &Processes) -> Option<&'static str> {
+    if processes.owns(record) {
         return Some("app");
     }
     if record.tag == "DEBUG" && record.msg.contains(app_id) {
@@ -148,12 +279,12 @@ pub fn classify(record: &Record, app_id: &str, pids: &BTreeSet<u32>) -> Option<&
 pub fn select<'a>(
     records: &'a [Record],
     app_id: &str,
-    pids: &BTreeSet<u32>,
+    processes: &Processes,
 ) -> Vec<(&'static str, &'a Record)> {
     let mut dumpers: BTreeSet<u32> = BTreeSet::new();
     let mut out = Vec::new();
     for record in records {
-        let source = match classify(record, app_id, pids) {
+        let source = match classify(record, app_id, processes) {
             Some("crash") => {
                 let _ = dumpers.insert(record.pid);
                 Some("crash")
@@ -182,10 +313,11 @@ pub fn kind(event: &Value) -> &str {
     event.get("kind").and_then(Value::as_str).unwrap_or("")
 }
 
-/// A panic message from the app's records: an `ICM_EVENT` panic, or a
-/// `panicked at` line from the logger or redirected stderr.
-pub fn panic_of(records: &[Record], pids: &BTreeSet<u32>) -> Option<(String, Option<String>)> {
-    for record in records {
+/// A panic message from the records the app's processes wrote: an
+/// `ICM_EVENT` panic, or a `panicked at` line from the logger or
+/// redirected stderr.
+pub fn panic_of(records: &[Record], processes: &Processes) -> Option<(String, Option<String>)> {
+    for record in records.iter().filter(|record| processes.owns(record)) {
         if let Some(event) = event(record)
             && kind(&event) == "panic"
         {
@@ -203,7 +335,7 @@ pub fn panic_of(records: &[Record], pids: &BTreeSet<u32>) -> Option<(String, Opt
     }
     records
         .iter()
-        .filter(|r| pids.contains(&r.pid) || APP_TAGS.contains(&r.tag.as_str()))
+        .filter(|r| processes.owns(r))
         .find(|r| r.msg.contains("panicked at"))
         .map(|r| {
             let location = r.msg.split("panicked at ").nth(1).map(|rest| {
@@ -387,10 +519,10 @@ mod tests {
     #[test]
     fn classifies_the_apps_records() {
         let records = parse(SAMPLE);
-        let pids: BTreeSet<u32> = [4321].into();
+        let processes = Processes::of([4321]);
         let sources: Vec<Option<&str>> = records
             .iter()
-            .map(|r| classify(r, "com.example.app", &pids))
+            .map(|r| classify(r, "com.example.app", &processes))
             .collect();
         assert_eq!(
             sources,
@@ -405,16 +537,86 @@ mod tests {
         );
     }
 
+    /// Another iced_mobile app on the device writes the same tags (the
+    /// `ICM_EVENT` opt-in is a system property): its lines are not the
+    /// app's, and neither is anything when no pid of the app is known.
+    #[test]
+    fn another_apps_tags_are_not_the_apps() {
+        let other = "1728245000.300  7777  7777 I ICM_EVENT: {\"v\":1,\"kind\":\"ready\",\"ms\":90}
+1728245000.310  7777  7790 I iced: another app's logger
+1728245000.320  7777  7791 E RustStdoutStderr: thread 'main' panicked at other/src/lib.rs:1:1:
+1728245000.330  7777  7777 I ICM_EVENT: {\"v\":1,\"kind\":\"panic\",\"message\":\"not ours\",\"location\":\"other/src/lib.rs:1:1\"}
+";
+        let records = parse(&format!("{SAMPLE}{other}"));
+        let processes = Processes::of([4321]);
+        let selected = select(&records, "com.example.app", &processes);
+        assert!(selected.iter().all(|(_, record)| record.pid != 7777));
+        let (message, _) = panic_of(&records, &processes).unwrap();
+        assert!(message.contains("src/lib.rs:41:9"), "{message}");
+
+        let theirs = parse(other);
+        assert!(panic_of(&theirs, &processes).is_none());
+        let nobody = Processes::default();
+        assert!(
+            select(&records, "com.example.app", &nobody)
+                .iter()
+                .all(|(source, _)| *source != "app")
+        );
+    }
+
+    /// `am_proc_start` and `am_proc_died` place each pid in time: a pid the
+    /// app had before counts only while the app had it.
+    #[test]
+    fn processes_place_pids_in_time() {
+        let events = parse(
+            "100.000   600   610 I am_proc_start: [0,4321,10123,com.example.app,next-top-activity,{com.example.app/android.app.NativeActivity}]
+200.000   600   610 I am_proc_died: [0,4321,com.example.app,900,19]
+300.000   600   610 I am_proc_start: [0,4321,10200,com.other.app,activity,{com.other.app/.Main}]
+400.000   600   610 I am_proc_start: [0,5000,10123,com.example.app:remote,service,{com.example.app/.Sync}]
+450.000   600   610 I am_proc_start: [0,6000,10124,com.example.application,activity,{com.example.application/.Main}]
+500.000   600   610 I am_proc_died: [0,5555,com.example.app,900,19]
+600.000   600   610 I am_proc_died: [0,6666,com.other.app]
+",
+        );
+        let processes = Processes::read("com.example.app", vec![7000], &events).knowing([8000]);
+        let owned = |pid, at| processes.owned(pid, at);
+        // The app's process, from its start (and the second before it,
+        // while Android logs the start) to its death.
+        assert!(owned(4321, 150.0));
+        assert!(owned(4321, 99.5));
+        assert!(!owned(4321, 98.0));
+        assert!(!owned(4321, 250.0));
+        // Then another app's process with the same pid.
+        assert!(!owned(4321, 350.0));
+        // The app's other processes, but not an app whose id starts alike.
+        assert!(owned(5000, 401.0));
+        assert!(!owned(6000, 451.0));
+        // A process the buffer only saw die had the pid until then.
+        assert!(owned(5555, 450.0));
+        assert!(!owned(5555, 550.0));
+        assert!(!owned(6666, 550.0));
+        // Pids the buffer says nothing about: `pidof`'s and those seen
+        // before are the app's, others not.
+        assert!(owned(7000, 650.0));
+        assert!(owned(8000, 650.0));
+        assert!(!owned(9000, 650.0));
+        assert_eq!(processes.now, vec![7000]);
+        assert_eq!(
+            processes.pids(),
+            [4321, 5000, 5555, 7000, 8000].into_iter().collect()
+        );
+    }
+
     #[test]
     fn finds_panics_and_causes() {
         let records = parse(SAMPLE);
-        let pids: BTreeSet<u32> = [4321].into();
-        let (message, location) = panic_of(&records, &pids).unwrap();
+        let processes = Processes::of([4321]);
+        let (message, location) = panic_of(&records, &processes).unwrap();
         assert!(message.contains("panicked at src/lib.rs:41:9"));
         assert_eq!(location.as_deref(), Some("src/lib.rs:41:9"));
 
-        let event = "1.0 1 1 I ICM_EVENT: {\"v\":1,\"kind\":\"panic\",\"message\":\"boom\",\"location\":\"src/lib.rs:3:5\",\"thread\":\"main\"}";
-        let (message, location) = panic_of(&parse(event), &pids).unwrap();
+        let event = "1.0 4321 1 I ICM_EVENT: {\"v\":1,\"kind\":\"panic\",\"message\":\"boom\",\"location\":\"src/lib.rs:3:5\",\"thread\":\"main\"}";
+        let (message, location) = panic_of(&parse(event), &processes).unwrap();
         assert_eq!(message, "boom");
         assert_eq!(location.as_deref(), Some("src/lib.rs:3:5"));
 

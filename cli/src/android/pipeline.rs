@@ -528,7 +528,10 @@ pub(crate) fn launch_app(ctx: &mut Ctx, args: &RunArgs) -> Result<Launched> {
         Ok(ready) => ready.pids.clone(),
         Err(_) => adb.pids(&app_id).into_iter().collect(),
     };
-    session.pid = pids.iter().next().copied();
+    session.pid = match &outcome {
+        Ok(ready) => ready.pid.or_else(|| pids.iter().next().copied()),
+        Err(_) => pids.iter().next().copied(),
+    };
 
     let mut result = outcome.and_then(|ready| {
         let readiness = report_ready(ctx, &project, &ready, launched);
@@ -551,7 +554,7 @@ pub(crate) fn launch_app(ctx: &mut Ctx, args: &RunArgs) -> Result<Launched> {
         ctx.rep.set(
             "process",
             json!({
-                "pid": ready.pids.iter().next(),
+                "pid": ready.pid,
                 "alive": true,
                 "ready": {"source": ready.source, "ms": ready.ms},
             }),
@@ -833,6 +836,9 @@ pub(super) struct Ready {
     pub(super) source: &'static str,
     pub(super) ms: Option<u64>,
     pub(super) window: Option<Value>,
+    /// The process that drew: the `ready` event's, or the probed one.
+    pub(super) pid: Option<u32>,
+    /// Every pid the app had since the launch.
     pub(super) pids: BTreeSet<u32>,
 }
 
@@ -846,10 +852,12 @@ pub(super) struct Ready {
 const RELAUNCH_GRACE: Duration = Duration::from_secs(10);
 
 /// Waits for `ICM_EVENT ready` in logcat (the framework emits it after
-/// the first presented frame). An app that never speaks the protocol (no
-/// `start` event) is ready by probe: alive and the top resumed activity on
-/// three polls in a row. A death or panic fails at once; so does an
-/// activity Android relaunched that does not draw within
+/// the first presented frame) from one of the app's processes
+/// ([`processes`]): every iced_mobile app on the device writes these
+/// events, so another one's never counts. An app that never speaks the
+/// protocol (no `start` event) is ready by probe: alive and the top resumed
+/// activity on three polls in a row. A death or panic fails at once; so
+/// does an activity Android relaunched that does not draw within
 /// [`RELAUNCH_GRACE`], which the probe cannot tell from a live one.
 pub(super) fn wait_ready(
     ctx: &Ctx,
@@ -874,42 +882,17 @@ pub(super) fn wait_ready(
         if let Some(signal) = crate::signals::pending() {
             return Err(crate::output::interrupted(signal));
         }
-        let records = events_since(adb, mark);
-        for record in &records {
-            let Some(event) = logcat::event(record) else {
-                continue;
-            };
-            let _ = pids.insert(record.pid);
-            match logcat::kind(&event) {
-                "start" => start_seen = true,
-                "ready" => {
-                    return Ok(Ready {
-                        source: "icm_event",
-                        ms: event.get("ms").and_then(Value::as_u64),
-                        window: event.get("window").cloned(),
-                        pids,
-                    });
-                }
-                "panic" => {
-                    let message = event
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let location = event
-                        .get("location")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown location");
-                    return Err(IcmError::new(
-                        CheckId::RunAppPanicked,
-                        format!("panicked at {location}: {message}"),
-                    ));
-                }
-                _ => {}
-            }
+        // The processes first: a process that starts after this look
+        // writes events this poll skips and the next one reads.
+        let processes = processes(adb, app_id, &pids);
+        let alive = processes.now.clone();
+        match hear(&events_since(adb, mark), &processes, &mut pids) {
+            Heard::Ready(ready) => return Ok(ready),
+            Heard::Panicked(error) => return Err(error),
+            Heard::Started => start_seen = true,
+            Heard::Silent => {}
         }
 
-        let alive = adb.pids(app_id);
         if alive.is_empty() {
             gone_polls += 1;
             // Give a fresh launch a moment to appear; a vanished process
@@ -925,7 +908,7 @@ pub(super) fn wait_ready(
             }
         } else {
             gone_polls = 0;
-            pids.extend(alive);
+            pids.extend(alive.iter().copied());
         }
 
         if relaunched.is_none() && !relaunches_since(adb, mark, app_id).is_empty() {
@@ -955,6 +938,7 @@ pub(super) fn wait_ready(
                         source: "probe",
                         ms: None,
                         window: None,
+                        pid: alive.first().copied(),
                         pids,
                     });
                 }
@@ -986,6 +970,61 @@ pub(super) fn wait_ready(
     }
 }
 
+/// What the app's `ICM_EVENT` records say so far.
+#[derive(Debug)]
+enum Heard {
+    /// No event of the app's.
+    Silent,
+    /// A `start`, and neither `ready` nor `panic` yet.
+    Started,
+    /// The first `ready`.
+    Ready(Ready),
+    /// A `panic` before any `ready`.
+    Panicked(IcmError),
+}
+
+/// Reads the events in `records` that the app's processes wrote, adding
+/// their pids to `pids`, up to the first `ready` or `panic`. Other
+/// processes' events are skipped, however they look.
+fn hear(records: &[Record], processes: &logcat::Processes, pids: &mut BTreeSet<u32>) -> Heard {
+    let mut started = false;
+    for record in records.iter().filter(|record| processes.owns(record)) {
+        let Some(event) = logcat::event(record) else {
+            continue;
+        };
+        let _ = pids.insert(record.pid);
+        match logcat::kind(&event) {
+            "start" => started = true,
+            "ready" => {
+                return Heard::Ready(Ready {
+                    source: "icm_event",
+                    ms: event.get("ms").and_then(Value::as_u64),
+                    window: event.get("window").cloned(),
+                    pid: Some(record.pid),
+                    pids: pids.clone(),
+                });
+            }
+            "panic" => {
+                let message = event.get("message").and_then(Value::as_str).unwrap_or("");
+                let location = event
+                    .get("location")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown location");
+                return Heard::Panicked(IcmError::new(
+                    CheckId::RunAppPanicked,
+                    format!("panicked at {location}: {message}"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    if started {
+        Heard::Started
+    } else {
+        Heard::Silent
+    }
+}
+
 pub(super) fn events_since(adb: &Adb, mark: &str) -> Vec<Record> {
     let cmd = adb.cmd([
         "logcat",
@@ -1000,6 +1039,32 @@ pub(super) fn events_since(adb: &Adb, mark: &str) -> Vec<Record> {
     adb::quick(cmd, Duration::from_secs(15))
         .map(|outcome| logcat::parse(&outcome.stdout_text()))
         .unwrap_or_default()
+}
+
+/// The app's processes: its pids now (`pidof`), the starts and deaths of
+/// processes the events buffer still holds, and `known`, pids seen as the
+/// app's earlier. Records are the app's only when one of these wrote them
+/// ([`logcat::Processes::owns`]).
+pub(super) fn processes(adb: &Adb, app_id: &str, known: &BTreeSet<u32>) -> logcat::Processes {
+    let now = adb.pids(app_id);
+    let mut args: Vec<String> = [
+        "logcat",
+        "-d",
+        "-b",
+        "events",
+        "-v",
+        "threadtime,epoch",
+        "-s",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    args.extend(logcat::PROCESS_TAGS.iter().map(|tag| format!("{tag}:I")));
+    let events = adb::quick(adb.cmd(&args), Duration::from_secs(15))
+        .filter(|outcome| outcome.success())
+        .map(|outcome| logcat::parse(&outcome.stdout_text()))
+        .unwrap_or_default();
+    logcat::Processes::read(app_id, now, &events).knowing(known.iter().copied())
 }
 
 /// The events buffer since `mark`, as logcat prints it (`tags` empty:
@@ -1377,6 +1442,8 @@ pub(super) struct Collected {
     records: Vec<Record>,
     selected: Vec<(String, Record)>,
     logs: Option<PathBuf>,
+    /// The app's processes the records were selected with.
+    processes: logcat::Processes,
 }
 
 pub(super) fn query(adb: &Adb, mark: &str, buffers: &[&str]) -> Option<String> {
@@ -1407,9 +1474,9 @@ pub(super) fn query(adb: &Adb, mark: &str, buffers: &[&str]) -> Option<String> {
     None
 }
 
-/// Writes `logcat.txt` (raw), `logs.ndjson` and `app.log` (the app's
-/// records) into the run directory, with the secret values icm knows
-/// redacted as on stdout.
+/// Writes `logcat.txt` (raw), `logs.ndjson` and `app.log` (the records of
+/// the app's processes: `pids`, and those [`processes`] finds) into the run
+/// directory, with the secret values icm knows redacted as on stdout.
 pub(super) fn collect_logs(
     ctx: &Ctx,
     adb: &Adb,
@@ -1424,14 +1491,8 @@ pub(super) fn collect_logs(
     let raw = dir.join("logcat.txt");
     let _ = crate::process::write_redacted(&raw, &text);
     let records = logcat::parse(&text);
-    let mut pids = pids.clone();
-    // ICM_EVENT start names the app's pid even when pidof missed it.
-    for record in &records {
-        if record.tag == "ICM_EVENT" {
-            let _ = pids.insert(record.pid);
-        }
-    }
-    let selected: Vec<(String, Record)> = logcat::select(&records, app_id, &pids)
+    let processes = processes(adb, app_id, pids);
+    let selected: Vec<(String, Record)> = logcat::select(&records, app_id, &processes)
         .into_iter()
         .map(|(source, record)| (source.to_string(), record.clone()))
         .collect();
@@ -1447,6 +1508,7 @@ pub(super) fn collect_logs(
         records,
         selected,
         logs,
+        processes,
     }
 }
 
@@ -1576,10 +1638,10 @@ fn recreation(
 }
 
 /// Whether the app sent an `ICM_EVENT start` after `after` (epoch seconds:
-/// the last relaunch), from one of `pids` or the app's process now. With
-/// `wait`, waits for it until [`RELAUNCH_GRACE`] after the relaunch, unless
-/// the app sent no `start` at all since the mark (it speaks no
-/// `ICM_EVENT`).
+/// the last relaunch), from one of its processes ([`processes`], knowing
+/// `pids`). With `wait`, waits for it until [`RELAUNCH_GRACE`] after the
+/// relaunch, unless the app sent no `start` at all since the mark (it
+/// speaks no `ICM_EVENT`).
 fn restarted(
     adb: &Adb,
     mark: &str,
@@ -1588,13 +1650,12 @@ fn restarted(
     pids: &BTreeSet<u32>,
     wait: bool,
 ) -> bool {
-    let mut pids = pids.clone();
     loop {
-        pids.extend(adb.pids(app_id));
+        let processes = processes(adb, app_id, pids);
         let starts: Vec<f64> = events_since(adb, mark)
             .iter()
             .filter(|record| {
-                pids.contains(&record.pid)
+                processes.owns(record)
                     && logcat::event(record).is_some_and(|event| logcat::kind(&event) == "start")
             })
             .map(Record::seconds)
@@ -1723,19 +1784,13 @@ fn describe_recreation(
 /// Adds the logs, a panic's location and the failure signatures to a run
 /// failure.
 pub(super) fn attach_evidence(error: &mut IcmError, collected: &Collected, project: &Project) {
-    let pids: BTreeSet<u32> = collected
-        .selected
-        .iter()
-        .filter(|(source, _)| source == "app")
-        .map(|(_, record)| record.pid)
-        .collect();
     let app_records: Vec<Record> = collected
         .selected
         .iter()
         .map(|(_, record)| record.clone())
         .collect();
 
-    let panic = logcat::panic_of(&collected.records, &pids);
+    let panic = logcat::panic_of(&collected.records, &collected.processes);
     let app_id = &project.config.config.app.id;
     if error.id == CheckId::RunNotReady.id()
         && let Some(anr) = app_records
@@ -1864,10 +1919,13 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     ctx.rep.set("device", json!({"serial": adb.serial}));
     ctx.rep.set("since", json!(mark));
 
-    let mut pids: BTreeSet<u32> = adb.pids(&app_id).into_iter().collect();
-    if let Some(pid) = session.as_ref().and_then(|s| s.pid) {
-        let _ = pids.insert(pid);
-    }
+    // The session's pid, when the session ran on this device.
+    let pids: BTreeSet<u32> = session
+        .as_ref()
+        .filter(|session| session.serial == adb.serial)
+        .and_then(|session| session.pid)
+        .into_iter()
+        .collect();
 
     let dir = run_dir(ctx, &project);
     let text = query(&adb, &mark, &["main", "system", "crash"]).ok_or_else(|| {
@@ -1891,11 +1949,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     }
 
     let records = logcat::parse(&text);
-    for record in &records {
-        if record.tag == "ICM_EVENT" {
-            let _ = pids.insert(record.pid);
-        }
-    }
+    let processes = processes(&adb, &app_id, &pids);
     let grep = crate::grep::Grep::new(args.grep.as_deref());
     let wanted = |source: &str, record: &Record| {
         source_matches(args.source.unwrap_or(LogSource::All), source)
@@ -1904,7 +1958,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
                 .as_ref()
                 .is_none_or(|grep| grep.matches(&[&record.tag, &record.msg]))
     };
-    let app_records = logcat::select(&records, &app_id, &pids);
+    let app_records = logcat::select(&records, &app_id, &processes);
     let considered = app_records.len();
     let mut selected: Vec<(String, Record)> = app_records
         .into_iter()
@@ -2010,9 +2064,13 @@ fn follow(
             return Ok(Followed::Ended);
         }
         std::thread::sleep(Duration::from_millis(1000));
-        let alive = adb.pids(app_id);
+        let text = query(adb, &since, &["main", "system", "crash"]);
+        // The processes after the records: every process that wrote one
+        // has started by now, and is in `pidof` or the events buffer.
+        let processes = processes(adb, app_id, &pids);
+        let alive = processes.now.clone();
         pids.extend(alive.iter().copied());
-        if let Some(text) = query(adb, &since, &["main", "system", "crash"]) {
+        if let Some(text) = text {
             let records = logcat::parse(&text);
             // `-T <since>` repeats the records at `since`; older keys are
             // no longer needed.
@@ -2022,11 +2080,11 @@ fn follow(
             stopped |= records
                 .iter()
                 .any(|record| record.msg.starts_with(&force_stop));
-            for (source, record) in logcat::select(&records, app_id, &pids) {
+            for (source, record) in logcat::select(&records, app_id, &processes) {
                 if !seen.insert(key(record)) {
                     continue;
                 }
-                if let Some(event) = logcat::event(record).filter(|_| pids.contains(&record.pid)) {
+                if let Some(event) = logcat::event(record).filter(|_| source == "app") {
                     match logcat::kind(&event) {
                         "exit" if event.get("destroyed").and_then(Value::as_bool) == Some(true) => {
                             destroyed = Some(Instant::now());
@@ -2617,6 +2675,60 @@ pub fn device_listing(ctx: &mut Ctx) -> Result<(String, Value)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Readiness comes from the app's own processes: another iced_mobile
+    /// app's `ready` or `panic` (every one writes `ICM_EVENT` once the
+    /// system property is set) is skipped, also before any pid of the app
+    /// is known.
+    #[test]
+    fn only_the_apps_events_make_it_ready() {
+        let other = logcat::parse(
+            "1791333711.000  7777  7777 I ICM_EVENT: {\"v\":1,\"kind\":\"start\",\"protocol\":1}
+1791333711.100  7777  7777 I ICM_EVENT: {\"v\":1,\"kind\":\"ready\",\"ms\":90}
+1791333711.200  7777  7777 I ICM_EVENT: {\"v\":1,\"kind\":\"panic\",\"message\":\"not ours\",\"location\":\"x.rs:1:1\"}
+",
+        );
+        let mut pids = BTreeSet::new();
+        let nobody = logcat::Processes::default();
+        assert!(matches!(hear(&other, &nobody, &mut pids), Heard::Silent));
+        assert!(pids.is_empty());
+
+        // The app's process started (in the events buffer) and is drawing.
+        let events = logcat::parse(
+            "1791333710.000   600   610 I am_proc_start: [0,4321,10123,com.example.app,next-top-activity,{com.example.app/android.app.NativeActivity}]
+1791333710.500   600   610 I am_proc_start: [0,7777,10124,com.other.iced,activity,{com.other.iced/android.app.NativeActivity}]
+",
+        );
+        let processes = logcat::Processes::read("com.example.app", Vec::new(), &events);
+        let mut records = logcat::parse(
+            "1791333710.900  4321  4321 I ICM_EVENT: {\"v\":1,\"kind\":\"start\",\"protocol\":1}\n",
+        );
+        records.extend(other.iter().cloned());
+        assert!(matches!(
+            hear(&records, &processes, &mut pids),
+            Heard::Started
+        ));
+        assert_eq!(pids, [4321].into_iter().collect());
+
+        records.extend(logcat::parse(
+            "1791333712.000  4321  4330 I ICM_EVENT: {\"v\":1,\"kind\":\"ready\",\"ms\":1100}\n",
+        ));
+        let Heard::Ready(ready) = hear(&records, &processes, &mut pids) else {
+            panic!("not ready");
+        };
+        assert_eq!(ready.pid, Some(4321));
+        assert_eq!(ready.ms, Some(1100));
+        assert_eq!(ready.pids, [4321].into_iter().collect());
+
+        // The app's own panic fails the wait.
+        let panicked = logcat::parse(
+            "1791333711.500  4321  4330 I ICM_EVENT: {\"v\":1,\"kind\":\"panic\",\"message\":\"boom\",\"location\":\"src/lib.rs:3:5\"}\n",
+        );
+        let Heard::Panicked(error) = hear(&panicked, &processes, &mut pids) else {
+            panic!("no panic");
+        };
+        assert_eq!(error.detail, "panicked at src/lib.rs:3:5: boom");
+    }
 
     fn relaunch(at: &str, mask: Option<u32>) -> logcat::Relaunch {
         logcat::Relaunch {

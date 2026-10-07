@@ -13,7 +13,7 @@
 //! | [`plan`] | what `--dry-run` prints for each command (nothing touches a device) |
 //! | [`lifecycle`] | `icm test --on android --lifecycle`: the lifecycle suite on a device |
 //! | [`session`] | `target/icm/sessions/android.json` |
-//! | [`logcat`] | `threadtime,epoch` records, `ICM_EVENT` lines, failure signatures |
+//! | [`logcat`] | `threadtime,epoch` records, which process was the app's when (`Processes`), `ICM_EVENT` lines, failure signatures |
 //! | [`manifest`], [`res`] | the generated `AndroidManifest.xml` and resources |
 //! | [`elf`], [`zip`], [`image`] | ELF facts, the stored ZIP writer, PNG work |
 //!
