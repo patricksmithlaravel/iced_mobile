@@ -360,9 +360,14 @@ fn render(ctx: &Ctx, harness: &Harness, job: &Job) -> Result<(harness::Reply, ra
 
 /// Runs `icm ui --headless …`.
 pub fn ui(ctx: &mut Ctx, args: &UiArgs) -> Result<()> {
+    let viewport = args.viewport.as_deref();
     match &args.action {
-        UiAction::Tree { viewport } => tree(ctx, viewport.as_deref(), None),
-        UiAction::Find { selector } => tree(ctx, None, Some(selector)),
+        UiAction::Tree => tree(ctx, viewport, None),
+        UiAction::Find { selector } => tree(ctx, viewport, Some(selector)),
+        UiAction::Ice { .. } if viewport.is_some() => Err(usage(
+            "`icm ui ice` takes its viewport from the flow's `viewport:` header, not --viewport"
+                .to_string(),
+        )),
         UiAction::Ice { file } => ice(ctx, file),
     }
 }

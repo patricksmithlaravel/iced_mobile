@@ -16,8 +16,9 @@ test it ONLY through `icm`, and read the last JSON line of every command: it is 
 5. `icm test --json -q`: unit tests and `tests/flows/*.ice` in a headless renderer.
 6. `icm shot --headless --all-viewports --json -q`: the layout at phone and desktop sizes, no device.
 7. `icm ui --headless tree --json`: the widget tree with bounds, for writing `.ice` flows.
-   `icm ui --headless find "<text>" --json` gives a widget's centre; `icm ui --headless ice <file>`
-   reruns one flow step by step.
+   `icm ui --headless find "<text>" --viewport pixel-9 --json` gives a widget's centre in points at
+   that viewport (for `icm input android tap X Y --space pt`); `icm ui --headless ice <file>` reruns
+   one flow step by step.
 8. `icm stop --all` when done.
 
 A first build can outlast your command timeout. Add `--detach`: `icm run android --detach --json -q`

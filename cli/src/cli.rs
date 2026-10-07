@@ -708,6 +708,10 @@ pub struct UiArgs {
     /// Use the app's headless harness (the only mode in phase 1)
     #[arg(long)]
     pub headless: bool,
+    /// The viewport for `tree` and `find`: a preset (iphone-17, pixel-9,
+    /// ...) or WxH[@scale]; default the first of `[test] viewports`
+    #[arg(long, global = true)]
+    pub viewport: Option<String>,
     /// The query
     #[command(subcommand)]
     pub action: UiAction,
@@ -717,11 +721,7 @@ pub struct UiArgs {
 #[derive(Debug, Subcommand)]
 pub enum UiAction {
     /// The widget tree with bounds
-    Tree {
-        /// The viewport: a preset or WxH[@scale]
-        #[arg(long)]
-        viewport: Option<String>,
-    },
+    Tree,
     /// Widgets matching a selector
     Find {
         /// The selector (text or id)
