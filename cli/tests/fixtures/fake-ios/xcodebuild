@@ -1,3 +1,11 @@
 #!/bin/sh
-# A fake `xcodebuild` for icm's ios-sim tests.
-printf 'Xcode 27.0\nBuild version 27A266a\n'
+# A fake `xcodebuild` for icm's iOS tests: the Xcode version (the build is
+# $ICM_FAKE_XCODE_BUILD, default 27A266a) and the iOS SDK's versions.
+case "$*" in
+*"-sdk iphoneos"*)
+  printf 'iPhoneOS27.0.sdk - iOS 27.0 (iphoneos27.0)\nSDKVersion: 27.0\nPath: /fake/iPhoneOS27.0.sdk\nPlatformVersion: 27.0\nProductBuildVersion: 24A430\n'
+  ;;
+*)
+  printf 'Xcode 27.0\nBuild version %s\n' "${ICM_FAKE_XCODE_BUILD:-27A266a}"
+  ;;
+esac

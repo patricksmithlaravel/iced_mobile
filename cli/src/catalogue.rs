@@ -466,6 +466,33 @@ catalogue! {
     IosExportComplianceDocumentation = "ios.export_compliance.documentation", NeedsOwner, Warn, Owner,
         "Export compliance documentation must be uploaded in App Store Connect",
         "The owner uploads it, or sets `[ios] export_compliance_code`.";
+    IosDsymUuid = "ios.dsym.uuid", CheckFailed, Fail, Agent,
+        "The dSYM's UUID differs from the executable's",
+        "Rerun `icm release ios`; the dSYM is made from the executable it ships with.";
+    IosDsymLineTables = "ios.dsym.line_tables", CheckFailed, Fail, Agent,
+        "The dSYM's line table names none of the app's source files",
+        "Build releases through icm, which keeps line tables (`profile.release.debug=\"line-tables-only\"`); do not strip the binary before dsymutil.";
+    IosDeviceAmbiguous = "ios.device.ambiguous", Device, Fail, Agent,
+        "More than one iOS device is connected",
+        "Pass `--device <udid|name>` (`xcrun devicectl list devices` lists them).";
+    IosDeviceInstallFailed = "ios.device.install_failed", Device, Fail, Agent,
+        "devicectl could not install the app on the device",
+        "Read the step log: an unlocked device, a trusted computer and a profile that lists the device are needed.";
+    IosDeviceLaunchFailed = "ios.device.launch_failed", Device, Fail, Agent,
+        "devicectl could not launch the app on the device",
+        "Unlock the device and read the step log; a first launch may need the developer trusted in Settings > General > VPN & Device Management.";
+    IosShotStoreSize = "ios.shot.store_size", Device, Fail, Agent,
+        "The simulator's screen is not a size App Store Connect takes for iPhone screenshots",
+        "Run the app on a 6.9-inch or 6.5-inch iPhone simulator: `icm run ios-sim --store`, then `icm shot ios-sim --store`.";
+    IosAscAuth = "ios.asc.auth", NeedsOwner, Fail, Owner,
+        "altool could not authenticate with App Store Connect",
+        "The owner checks the API key file (~/.appstoreconnect/private_keys/AuthKey_<id>.p8) and the key and issuer variables UPLOAD.md names.";
+    IosAscAppRecord = "ios.asc.app_record", NeedsOwner, Fail, Owner,
+        "App Store Connect has no app record for this bundle id",
+        "The owner creates the app record in App Store Connect (the API cannot) and sets `[ios] asc_app_id`.";
+    IosAscRejected = "ios.asc.rejected", CheckFailed, Fail, Agent,
+        "App Store Connect rejected the build for a reason icm does not map",
+        "Read the message in the detail; `icm verify ios` reruns every gate icm knows.";
 
     // ---- android -------------------------------------------------------------------
     AndroidDeviceNone = "android.device.none", Device, Fail, Agent,

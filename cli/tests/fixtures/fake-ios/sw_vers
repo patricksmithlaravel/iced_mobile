@@ -1,0 +1,3 @@
+#!/bin/sh
+# A fake `sw_vers` for icm's iOS tests.
+echo "26A434"

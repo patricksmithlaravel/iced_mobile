@@ -155,6 +155,18 @@ fn compile_assets(
     xcode: &Xcode,
     gen_dir: &Path,
 ) -> Result<(PathBuf, Option<Map<String, Value>>)> {
+    compile_assets_for(ctx, project, xcode, gen_dir, "iphonesimulator")
+}
+
+/// [`compile_assets`] for an actool platform: `iphonesimulator`, or
+/// `iphoneos` for device and App Store bundles (`crate::ios::bundle`).
+pub fn compile_assets_for(
+    ctx: &Ctx,
+    project: &Project,
+    xcode: &Xcode,
+    gen_dir: &Path,
+    platform: &str,
+) -> Result<(PathBuf, Option<Map<String, Value>>)> {
     let config = &project.config.config;
     let catalog = gen_dir.join("Assets.xcassets");
     let _ = std::fs::remove_dir_all(&catalog);
@@ -185,7 +197,7 @@ fn compile_assets(
     let partial = gen_dir.join("actool.plist");
     let stamp_path = gen_dir.join("actool.stamp");
     let stamp = format!(
-        "icon={} background={} min_os={} xcode={} platform=iphonesimulator\n",
+        "icon={} background={} min_os={} xcode={} platform={platform}\n",
         icon_hash.as_deref().unwrap_or("none"),
         config.app.background,
         config.ios.min_os,
@@ -208,11 +220,7 @@ fn compile_assets(
             .arg(&catalog)
             .arg("--compile")
             .arg(&out)
-            .args([
-                "--platform",
-                "iphonesimulator",
-                "--minimum-deployment-target",
-            ])
+            .args(["--platform", platform, "--minimum-deployment-target"])
             .arg(&config.ios.min_os);
         if icon_hash.is_some() {
             cmd = cmd.args(["--app-icon", APP_ICON]);

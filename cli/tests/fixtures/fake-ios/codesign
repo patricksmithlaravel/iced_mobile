@@ -1,0 +1,54 @@
+#!/bin/sh
+# A fake `codesign` for icm's iOS release and ios-device tests. Signing
+# records the identity and the entitlements in $ICM_FAKE_STATE; `-dvv` and
+# `-d --entitlements` report them back; `--verify` succeeds unless the
+# bundle has no _CodeSignature. ICM_FAKE_CODESIGN=hang makes signing wait
+# like a keychain dialog nobody answers.
+S="$ICM_FAKE_STATE"
+echo "codesign $*" >> "$S/codesign.log"
+for last in "$@"; do :; done
+case "$1" in
+--force)
+  identity=""
+  entitlements=""
+  prev=""
+  for arg in "$@"; do
+    case "$prev" in
+    --sign) identity="$arg" ;;
+    --entitlements) entitlements="$arg" ;;
+    esac
+    prev="$arg"
+  done
+  if [ "$ICM_FAKE_CODESIGN" = hang ]; then exec sleep 30; fi
+  mkdir -p "$last/_CodeSignature"
+  echo "$identity" > "$last/_CodeSignature/CodeResources"
+  echo "$identity" > "$S/signed-identity"
+  if [ -n "$entitlements" ]; then
+    cp "$entitlements" "$S/signed-entitlements.plist"
+  else
+    rm -f "$S/signed-entitlements.plist"
+  fi
+  ;;
+--verify)
+  if [ ! -f "$last/_CodeSignature/CodeResources" ]; then
+    echo "$last: code object is not signed at all" >&2
+    exit 1
+  fi
+  echo "$last: valid on disk" >&2
+  ;;
+-dvv)
+  identity=$(cat "$last/_CodeSignature/CodeResources" 2> /dev/null)
+  if [ "$identity" = "-" ]; then
+    printf 'Identifier=fake\nSignature=adhoc\nTeamIdentifier=not set\n' >&2
+  else
+    printf 'Identifier=fake\nAuthority=%s\nAuthority=Apple Worldwide Developer Relations Certification Authority\nTeamIdentifier=%s\n' "$ICM_FAKE_IDENTITY_NAME" "$ICM_FAKE_TEAM" >&2
+  fi
+  ;;
+-d)
+  if [ -f "$S/signed-entitlements.plist" ]; then cat "$S/signed-entitlements.plist"; fi
+  ;;
+*)
+  echo "fake codesign: unknown $*" >&2
+  exit 1
+  ;;
+esac

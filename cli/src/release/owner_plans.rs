@@ -108,7 +108,7 @@ pub fn ios(c: &Common<'_>, ipa: &str) -> OwnerPlan {
         "Fill in the listing in App Store Connect",
         &listing_note(
             c,
-            "Screenshots per device class (6.9-inch iPhone 1320x2868, or 6.5-inch), the description, the App Privacy answers and the age rating.",
+            "Screenshots per device class (6.9-inch iPhone 1320x2868, or 6.5-inch: `icm run ios-sim --store`, then `icm shot ios-sim --store` for each screen), the description, the App Privacy answers and the age rating.",
         ),
     ));
     if config.ios.uses_non_exempt_encryption == Some(true)
@@ -159,6 +159,11 @@ pub fn ios(c: &Common<'_>, ipa: &str) -> OwnerPlan {
         )
         .note("altool's exit code is not trusted: `icm diagnose altool` reads its JSON and prints the delivery id."),
     );
+    plan.push(OwnerStep::manual(
+        StepKind::Upload,
+        &format!("Or, instead of altool: Transporter (the Mac App Store app) uploads {ipa} by drag and drop, signed in with your Apple ID"),
+        "The build-status step below then confirms it the same way.",
+    ));
 
     let apple_id = match &config.ios.asc_app_id {
         Some(id) => lit(id),
@@ -191,7 +196,7 @@ pub fn ios(c: &Common<'_>, ipa: &str) -> OwnerPlan {
             "Confirm the build reached this app",
             cmd(status).tee("build-status.json").diagnose("altool"),
         )
-        .note("Checks the build landed in the app with this Apple ID (altool can pick the wrong app when bundle ids share a prefix)."),
+        .note("Checks the build landed in the app with this Apple ID (altool can pick the wrong app when bundle ids share a prefix), and waits while App Store Connect processes it; then it shows in TestFlight. `--delivery-id <id>` from the upload's JSON works too."),
     );
     plan.push(mark_uploaded(c));
     plan

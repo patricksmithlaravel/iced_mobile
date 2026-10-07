@@ -3,10 +3,16 @@
 # icm uses, with state in $ICM_FAKE_STATE. $ICM_FAKE_SCENARIO picks what the
 # launched "app" does: `ok` (draws), `panic` (panics and exits) or `silent`
 # (runs but sends no ICM_EVENT lines).
+#
+# For the iOS release and ios-device tests it also fakes dsymutil (the
+# dSYM's DWARF file is a copy of the executable, so its LC_UUID matches;
+# ICM_FAKE_DSYM=empty writes no line table), dwarfdump --debug-line,
+# strip, assetutil (ICM_FAKE_ICON=clear reports a transparent icon) and
+# devicectl (devices from $S/devicectl-devices.json).
 S="$ICM_FAKE_STATE"
 {
   echo "$*"
-  env | grep '^SIMCTL_CHILD_' | sort | sed 's/^/  env /'
+  env | grep '^SIMCTL_CHILD_\|^DEVICECTL_CHILD_' | sort | sed 's/^/  env /'
 } >> "$S/xcrun.log"
 
 tool="$1"
@@ -98,6 +104,76 @@ simctl)
     ;;
   *)
     echo "fake xcrun: unknown simctl $sub" >&2
+    exit 1
+    ;;
+  esac
+  ;;
+dsymutil)
+  exe="$1"
+  out="$3"
+  name=$(basename "$exe")
+  mkdir -p "$out/Contents/Resources/DWARF"
+  cp "$exe" "$out/Contents/Resources/DWARF/$name"
+  ;;
+dwarfdump)
+  # dwarfdump --debug-line <dSYM> -o <file>
+  out="$4"
+  if [ "$ICM_FAKE_DSYM" = empty ]; then
+    : > "$out"
+  else
+    printf 'debug_line[0x00000000]\nLine table prologue:\n    version: 4\ninclude_directories[  1] = "library/core/src"\ninclude_directories[  2] = "src"\nfile_names[  1]:\n           name: "option.rs"\n      dir_index: 1\nfile_names[  2]:\n           name: "lib.rs"\n      dir_index: 2\n' > "$out"
+  fi
+  ;;
+strip) ;;
+assetutil)
+  opaque=true
+  if [ "$ICM_FAKE_ICON" = clear ]; then opaque=false; fi
+  printf '[{"AssetStorageVersion":"fake"},{"AssetType":"Icon Image","Name":"AppIcon","PixelHeight":1024,"PixelWidth":1024,"Opaque":%s}]\n' "$opaque"
+  ;;
+devicectl)
+  json=""
+  dest=""
+  prev=""
+  for arg in "$@"; do
+    case "$prev" in
+    --json-output) json="$arg" ;;
+    --destination) dest="$arg" ;;
+    esac
+    prev="$arg"
+  done
+  case "$1 $2" in
+  "list devices") cp "$S/devicectl-devices.json" "$json" ;;
+  "device install") printf '{"info":{"outcome":"success"},"result":{"installedApplications":[{"bundleID":"com.acme.fixture"}]}}\n' > "$json" ;;
+  "device process")
+    case "$3" in
+    launch)
+      case "$ICM_FAKE_SCENARIO" in
+      panic)
+        printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":4242}\n\nthread '"'"'main'"'"' panicked at src/lib.rs:7:5:\nboom\n'
+        exit 0
+        ;;
+      *)
+        echo $$ > "$S/device-app.pid"
+        printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":4242}\nICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n'
+        exec sleep 30
+        ;;
+      esac
+      ;;
+    terminate)
+      if [ -f "$S/device-app.pid" ]; then kill "$(cat "$S/device-app.pid")" 2> /dev/null; rm -f "$S/device-app.pid"; fi
+      ;;
+    esac
+    ;;
+  "device info")
+    if [ -f "$S/device-app.pid" ] && kill -0 "$(cat "$S/device-app.pid")" 2> /dev/null; then
+      printf '{"result":{"runningProcesses":[{"executable":"file:///private/var/containers/Bundle/Application/X/Fixture.app/fixture-app","processIdentifier":4242}]}}\n' > "$json"
+    else
+      printf '{"result":{"runningProcesses":[]}}\n' > "$json"
+    fi
+    ;;
+  "device capture") cp "$S/screen.png" "$dest" ;;
+  *)
+    echo "fake xcrun: unknown devicectl $*" >&2
     exit 1
     ;;
   esac

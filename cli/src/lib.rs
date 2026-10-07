@@ -31,6 +31,7 @@ pub mod hash;
 pub mod hooks;
 pub mod host;
 pub mod image;
+pub mod ios;
 pub mod locks;
 pub mod managed;
 pub mod output;

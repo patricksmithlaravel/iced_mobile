@@ -179,7 +179,7 @@ fn ids(result: &Value, key: &str) -> Vec<String> {
 #[test]
 fn the_target_pipelines_are_stubs_that_say_so() {
     let app = App::new();
-    for target in ["ios", "android", "web", "macos", "windows", "linux"] {
+    for target in ["android", "web", "macos", "windows", "linux"] {
         let result = app.json(&["release", target, "--sign", "none", "--allow-dirty"]);
         assert_eq!(result["exit"], 2, "{target}: {result}");
         assert_eq!(
@@ -203,8 +203,9 @@ fn the_target_pipelines_are_stubs_that_say_so() {
         assert_eq!(verify["exit"], 2, "{target}: {verify}");
         assert_eq!(verify["errors"][0]["id"], "usage.not_implemented");
     }
+    // The iOS pipeline's parser reads altool's JSON; a Cargo.toml is not.
     let diagnose = app.json(&["diagnose", "altool", "Cargo.toml"]);
-    assert_eq!(diagnose["errors"][0]["id"], "usage.not_implemented");
+    assert_eq!(diagnose["errors"][0]["id"], "usage.bad_args");
 }
 
 #[test]

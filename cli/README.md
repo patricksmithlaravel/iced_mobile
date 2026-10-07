@@ -60,6 +60,7 @@ cargo test
 | `hooks.rs` | project hooks, `[checks] <platform>` scripts; every platform's `run` calls `hooks::run_for` once the app is up |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
 | `release/` | `release`, `verify`, `upload-commands`, `ledger`, `diagnose`: the core every target shares (`mod.rs`: preconditions, owner items, the `Pipeline` contract), `gates.rs` (`--sign none` and owner items), `dist.rs` and `manifest.rs` (`target/icm/dist/`, `artifacts.json`), `compile.rs` (release profiles by `--config`, `target/icm/release-target`, deployment-target stamps), `notices.rs` (THIRD_PARTY_NOTICES from `cargo metadata`, Fira Sans's OFL, the `release.notices` gate), `upload.rs` (`UPLOAD.md`, `upload.sh`), `owner_plans.rs` (the only file with upload or notarize argv), `ledger.rs`, `verify.rs`; one stub per target (`ios.rs`, `android.rs`, `web.rs`, `macos.rs`, `windows.rs`, `linux.rs`) and `fake.rs`, the stand-in pipeline of `icm __test release` |
+| `ios/` | iOS device builds, shared by `icm release ios` (`release/ios.rs`) and `ios-device`: the device bundle and its gates (`bundle.rs`), `DT*` keys (`dt.rs`), identities (`identity.rs`), provisioning profiles (`profile.rs`), entitlements, codesign with the keychain watchdog, Mach-O symbols and UUIDs (`macho.rs`), the privacy scan, the dSYM gates, the `.ipa` (`ipa.rs`), an XML plist reader and SHA-1 |
 | `pinned.rs` | the tools icm downloads itself (`tools.toml`, embedded: version, URL, size, sha256 per host): find, install with `--yes` (curl, sha256 check, unpack), doctor's WARN and `--fix --yes` |
 | `policy.rs` | the dated store policy table (`policy/stores.toml`, embedded): the floor in force on a day, `env.policy_stale`, upcoming floors; `icm print policy` |
 | `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices` for Android (`doctor android` is `doctor/`): APK pipeline, managed AVD, adb, logcat, session (`android/mod.rs` has the module map) |
@@ -133,6 +134,11 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   (path dependencies with licence files, a build and a dev dependency, a
   stand-in iced and iced_graphics with Fira Sans's licence), and the stub
   pipelines' exit 2.
+- `tests/ios_release.rs` runs `icm release ios`, `verify ios` and
+  `diagnose altool` against fake `cargo`, `xcrun`, `codesign`, `security`,
+  `xcodebuild` and `sw_vers` (`fixtures/fake-ios/`), a synthetic device
+  Mach-O and fake profiles, with the real `plutil`, `ditto`, `zip` and
+  `unzip` (macOS only).
 
 ## Environment
 
@@ -149,4 +155,7 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 | `ICM_BUILD_FRAMEWORK` | at build time: force the default framework pin (`tag:`/`rev:`/`path:`) |
 | `ICM_TOOLS_TOML` | a pinned-tools table to use instead of the embedded `tools.toml` (a mirror; the tests serve `file://` URLs) |
 | `ICM_TODAY` | `YYYY-MM-DD`: the day the store policy table is read for (icm's tests) |
+| `ICM_KEYCHAIN` | the keychain Apple signing searches (overrides host.toml `signing_keychain`) |
+| `ICM_PROVISIONING_PROFILES` | `:`-separated directories searched for provisioning profiles instead of Xcode's |
+| `ICM_CODESIGN_TIMEOUT` | seconds before a codesign that waits for a keychain dialog is stopped (default 60) |
 | `ICM_RUN_ID`, `ICM_RUN_DIR`, `ICM_RUN_ROOT`, `ICM_DETACHED` | internal: a detached child's run |

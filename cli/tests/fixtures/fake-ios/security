@@ -1,0 +1,16 @@
+#!/bin/sh
+# A fake `security` for icm's iOS release and ios-device tests:
+# `find-identity` prints $ICM_FAKE_STATE/identities.txt.
+S="$ICM_FAKE_STATE"
+echo "security $*" >> "$S/security.log"
+case "$1" in
+find-identity)
+  printf 'Policy: Code Signing\n  Matching identities\n'
+  cat "$S/identities.txt" 2> /dev/null
+  printf '\n  Valid identities only\n'
+  ;;
+*)
+  echo "fake security: unknown $1" >&2
+  exit 1
+  ;;
+esac
