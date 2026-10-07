@@ -163,6 +163,42 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     )?;
     ctx.rep
         .progress(format!("device: {} ({})", chosen.serial, chosen.reason));
+    // An emulator an earlier run booted is still icm's to shut down: a
+    // rerun on it must not forget that.
+    let booted_earlier = match &chosen.booting {
+        Some(booting) => {
+            session::write_booted(
+                &project,
+                &session::Booted {
+                    serial: booting.serial.clone(),
+                    avd: booting.avd.clone(),
+                    emulator_pid: Some(booting.pid),
+                    emulator_log: Some(booting.log.clone()),
+                },
+            );
+            None
+        }
+        None => {
+            // The record, else (files from before it) the last session's.
+            let previous = session::read(&project)
+                .filter(|previous| previous.booted_by_icm)
+                .map(|previous| session::Booted {
+                    serial: previous.serial,
+                    avd: previous.avd.unwrap_or_default(),
+                    emulator_pid: previous.emulator_pid,
+                    emulator_log: previous.emulator_log,
+                })
+                .filter(session::Booted::alive);
+            session::booted(&project)
+                .into_iter()
+                .chain(previous)
+                .find(|booted| {
+                    booted.serial == chosen.serial
+                        && chosen.avd.as_deref().is_none_or(|avd| avd == booted.avd)
+                })
+                .inspect(|booted| session::write_booted(&project, booted))
+        }
+    };
     let mut session = Session {
         schema: session::SCHEMA.to_string(),
         run: ctx.rep.run_id(),
@@ -170,9 +206,17 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         serial: chosen.serial.clone(),
         kind: chosen.kind().to_string(),
         avd: chosen.avd.clone(),
-        booted_by_icm: chosen.booting.is_some(),
-        emulator_pid: chosen.booting.as_ref().map(|b| b.pid),
-        emulator_log: chosen.booting.as_ref().map(|b| b.log.clone()),
+        booted_by_icm: chosen.booting.is_some() || booted_earlier.is_some(),
+        emulator_pid: chosen
+            .booting
+            .as_ref()
+            .map(|b| b.pid)
+            .or_else(|| booted_earlier.as_ref().and_then(|p| p.emulator_pid)),
+        emulator_log: chosen
+            .booting
+            .as_ref()
+            .map(|b| b.log.clone())
+            .or_else(|| booted_earlier.as_ref().and_then(|p| p.emulator_log.clone())),
         abi: chosen.abi.as_str().to_string(),
         app_id: app_id.clone(),
         started: crate::time::Utc::now().rfc3339(),
@@ -1642,9 +1686,31 @@ pub fn stop_session(
                 }
             }
         }
+        // Every emulator icm booted for this project, even after a plain
+        // `icm stop android` removed the session that named it.
+        for booted in session::booted(project) {
+            if online(&booted.serial) && !targets.iter().any(|(s, _)| *s == booted.serial) {
+                targets.push((booted.serial.clone(), booted.emulator_pid));
+            }
+        }
+        if let Some(session) = &session
+            && online(&session.serial)
+            && session.kind == "emulator"
+            && !targets.iter().any(|(serial, _)| *serial == session.serial)
+        {
+            ctx.rep.check(Check::info(
+                CheckId::RunNoSession,
+                format!(
+                    "{} ({}) left running: icm did not boot it and shuts down only its own AVDs (icm-*, never icm-test-*)",
+                    session.serial,
+                    session.avd.as_deref().unwrap_or("unknown AVD")
+                ),
+            ));
+        }
         for (serial, pid) in targets {
             ctx.rep.progress(format!("shutting down {serial}"));
             avd::shutdown(tools, &serial, pid)?;
+            session::remove_booted(project, &serial);
             stopped.push(json!({"platform": "android", "emulator": serial}));
         }
     }

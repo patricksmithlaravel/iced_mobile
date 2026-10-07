@@ -110,6 +110,62 @@ pub fn remove(project: &Project) {
     let _ = std::fs::remove_file(path(project));
 }
 
+/// An emulator icm booted for this project:
+/// `target/icm/sessions/android-booted/<serial>.json`. It outlives the
+/// session (`icm stop android` without `--shutdown` removes the session,
+/// not the emulator), so a later run on the same emulator, and a later
+/// `--shutdown`, still know icm started it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Booted {
+    /// The serial, `emulator-<port>`.
+    pub serial: String,
+    /// The AVD.
+    pub avd: String,
+    /// The emulator's pid on the host.
+    pub emulator_pid: Option<u32>,
+    /// Its log.
+    pub emulator_log: Option<PathBuf>,
+}
+
+impl Booted {
+    /// Whether this emulator still runs: its recorded process is alive,
+    /// so a port another emulator reuses is not taken for it.
+    pub fn alive(&self) -> bool {
+        self.emulator_pid
+            .is_some_and(|pid| i32::try_from(pid).is_ok_and(crate::signals::alive))
+    }
+}
+
+fn booted_dir(project: &Project) -> PathBuf {
+    project.sessions_dir().join("android-booted")
+}
+
+/// Records an emulator icm booted.
+pub fn write_booted(project: &Project, booted: &Booted) {
+    let path = booted_dir(project).join(format!("{}.json", booted.serial));
+    if let Ok(mut text) = serde_json::to_string_pretty(booted) {
+        text.push('\n');
+        let _ = crate::output::rundir::write_atomic(&path, text.as_bytes());
+    }
+}
+
+/// The emulators icm booted for this project that still run.
+pub fn booted(project: &Project) -> Vec<Booted> {
+    let Ok(read) = std::fs::read_dir(booted_dir(project)) else {
+        return Vec::new();
+    };
+    read.flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| serde_json::from_str::<Booted>(&text).ok())
+        .filter(Booted::alive)
+        .collect()
+}
+
+/// Forgets an emulator (it was shut down).
+pub fn remove_booted(project: &Project, serial: &str) {
+    let _ = std::fs::remove_file(booted_dir(project).join(format!("{serial}.json")));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
