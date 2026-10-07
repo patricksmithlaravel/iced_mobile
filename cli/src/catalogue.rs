@@ -477,6 +477,9 @@ catalogue! {
     AndroidEmulatorPortsBusy = "android.emulator.ports_busy", Device, Fail, Agent,
         "Every emulator port icm may use is busy",
         "Stop an emulator (`icm stop android --shutdown`) or set `android.emulator_ports` in host.toml.";
+    AndroidEmulatorShared = "android.emulator.shared", Device, Info, Agent,
+        "The emulator was booted for another project",
+        "When two projects run at once, give each its own emulator (`--avd <name>`, or host.toml android.avd); `icm stop --shutdown` in the project that booted it shuts it down.";
     AndroidEmulatorFailed = "android.emulator.failed", Device, Fail, Agent,
         "The emulator exited while booting",
         "Read the emulator log in the evidence (disk space, memory, a broken AVD), then rerun; `icm devices android` lists the AVDs.";

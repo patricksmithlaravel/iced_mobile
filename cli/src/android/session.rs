@@ -110,6 +110,24 @@ pub fn remove(project: &Project) {
     let _ = std::fs::remove_file(path(project));
 }
 
+/// The system property that names the project icm booted an emulator for,
+/// set once it has booted. A project's own records live in its target
+/// directory, where another project cannot see them; the property lives on
+/// the emulator, so every icm that reaches the emulator can tell whose it
+/// is, and `stop --shutdown` leaves another project's running.
+pub const OWNER_PROP: &str = "debug.icm.booted_by";
+
+/// This project's value for [`OWNER_PROP`]: the first 16 hex digits of the
+/// SHA-256 of its sessions directory. Projects that share a target
+/// directory share their sessions and booted records, and so this too.
+pub fn owner_tag(project: &Project) -> String {
+    tag_for(&project.sessions_dir())
+}
+
+fn tag_for(sessions_dir: &std::path::Path) -> String {
+    crate::hash::sha256_hex(sessions_dir.to_string_lossy().as_bytes())[..16].to_string()
+}
+
 /// An emulator icm booted for this project:
 /// `target/icm/sessions/android-booted/<serial>.json`. It outlives the
 /// session (`icm stop android` without `--shutdown` removes the session,
@@ -169,6 +187,19 @@ pub fn remove_booted(project: &Project, serial: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_tags_fit_a_property_and_tell_projects_apart() {
+        let a = tag_for(std::path::Path::new("/work/a/target/icm/sessions"));
+        let b = tag_for(std::path::Path::new("/work/b/target/icm/sessions"));
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+        assert_eq!(
+            a,
+            tag_for(std::path::Path::new("/work/a/target/icm/sessions"))
+        );
+    }
 
     #[test]
     fn geometry_round_trips_through_screen() {

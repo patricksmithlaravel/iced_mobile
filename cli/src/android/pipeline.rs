@@ -280,6 +280,21 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     if chosen.managed() {
         avd::prepare(&adb);
     }
+    // An emulator icm booted for this project, now or in an earlier run
+    // (whose build may have failed before the claim), says so.
+    let own = session::owner_tag(&project);
+    if session.booted_by_icm {
+        claim_emulator(&adb, &own);
+    } else if let Some(owner) = emulator_owner(&adb).filter(|owner| *owner != own) {
+        ctx.rep.check(Check::info(
+            CheckId::AndroidEmulatorShared,
+            format!(
+                "{} ({}) was booted by icm for another project (debug.icm.booted_by {owner}), which may still use it: its app and this one share the screen, and `icm stop --shutdown` here leaves the emulator running",
+                chosen.serial,
+                chosen.avd.as_deref().unwrap_or("unknown AVD")
+            ),
+        ));
+    }
     let device_json = device::to_json(&chosen, &adb);
     ctx.rep.set("device", device_json.clone());
     // "emulator-5580 (icm-api36, API 36)" for the summary.
@@ -834,6 +849,21 @@ fn no_activity(app_id: &str, serial: &str, pid: u32) -> String {
     format!(
         "{app_id} has no activity on {serial}: Android destroyed it (Back at the app's root, say) and the app ended, while its process (pid {pid}) lives on, cached, with no window"
     )
+}
+
+/// Records on an emulator icm booted that it did so for this project
+/// ([`session::OWNER_PROP`]).
+fn claim_emulator(adb: &Adb, own: &str) {
+    let line = format!("setprop {} {}", session::OWNER_PROP, adb::quote(own));
+    let _ = adb::quick(adb.shell(&line), Duration::from_secs(15));
+}
+
+/// The project an icm booted the emulator for ([`session::OWNER_PROP`]),
+/// if one did.
+fn emulator_owner(adb: &Adb) -> Option<String> {
+    adb.getprop(session::OWNER_PROP)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Reports `ready` and `run.ready`; returns how it got ready ("first frame
@@ -1963,8 +1993,10 @@ pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
 // ---- stop ----------------------------------------------------------------------
 
 /// `icm stop android [--shutdown]`: force-stops the app; with
-/// `--shutdown`, also the emulator icm booted for this project (never an
-/// AVD outside icm's `icm-` names, never one another project booted).
+/// `--shutdown`, also the emulator icm booted for this project, and a
+/// running one of icm's own AVDs that no other project claims (never an
+/// AVD outside icm's `icm-` names, never one icm booted for another
+/// project).
 pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     let (project, host, tools) = setup(ctx)?;
     let ctx: &Ctx = ctx;
@@ -2014,11 +2046,14 @@ pub fn stop_session(
         stopped.push(json!({"platform": "android", "app": app_id, "serial": session.serial}));
     }
 
-    // `--shutdown` stops the emulator icm booted for this session, and
+    // `--shutdown` stops the emulators icm booted for this project, and
     // otherwise only icm's own AVDs: never an `icm-test-` one a test run
-    // made and owns (crate::managed::is_managed), nor anyone else's.
+    // made and owns (crate::managed::is_managed), never anyone else's, and
+    // never one icm booted for another project (session::OWNER_PROP).
     if shutdown {
-        let mut targets: Vec<(String, Option<u32>)> = Vec::new();
+        // (serial, emulator pid, whether this project's records say icm
+        // booted it for this project)
+        let mut targets: Vec<(String, Option<u32>, bool)> = Vec::new();
         if let Some(session) = &session
             && online(&session.serial)
             && (session.booted_by_icm
@@ -2027,29 +2062,40 @@ pub fn stop_session(
                     .as_deref()
                     .is_some_and(crate::managed::is_managed))
         {
-            targets.push((session.serial.clone(), session.emulator_pid));
+            targets.push((
+                session.serial.clone(),
+                session.emulator_pid,
+                session.booted_by_icm,
+            ));
         }
         let default = device::default_avd(host, project.config.config.android.target_sdk);
         if crate::managed::is_managed(&default) {
             for (serial, name) in device::running_emulators(tools, &listed) {
                 if name.as_deref() == Some(default.as_str())
-                    && !targets.iter().any(|(s, _)| *s == serial)
+                    && !targets.iter().any(|(s, ..)| *s == serial)
                 {
-                    targets.push((serial, None));
+                    targets.push((serial, None, false));
                 }
             }
         }
         // Every emulator icm booted for this project, even after a plain
         // `icm stop android` removed the session that named it.
         for booted in session::booted(project) {
-            if online(&booted.serial) && !targets.iter().any(|(s, _)| *s == booted.serial) {
-                targets.push((booted.serial.clone(), booted.emulator_pid));
+            if !online(&booted.serial) {
+                continue;
+            }
+            match targets.iter_mut().find(|(s, ..)| *s == booted.serial) {
+                Some(target) => {
+                    target.1 = target.1.or(booted.emulator_pid);
+                    target.2 = true;
+                }
+                None => targets.push((booted.serial.clone(), booted.emulator_pid, true)),
             }
         }
         if let Some(session) = &session
             && online(&session.serial)
             && session.kind == "emulator"
-            && !targets.iter().any(|(serial, _)| *serial == session.serial)
+            && !targets.iter().any(|(serial, ..)| *serial == session.serial)
         {
             ctx.rep.check(Check::info(
                 CheckId::RunNoSession,
@@ -2060,7 +2106,23 @@ pub fn stop_session(
                 ),
             ));
         }
-        for (serial, pid) in targets {
+        let own = session::owner_tag(project);
+        for (serial, pid, ours) in targets {
+            if !ours {
+                let owner = Adb::new(tools, &serial)
+                    .ok()
+                    .and_then(|adb| emulator_owner(&adb))
+                    .filter(|owner| *owner != own);
+                if let Some(owner) = owner {
+                    ctx.rep.check(Check::info(
+                        CheckId::AndroidEmulatorShared,
+                        format!(
+                            "{serial} left running: icm booted it for another project (debug.icm.booted_by {owner}), which may still use it; `icm stop --shutdown` there shuts it down"
+                        ),
+                    ));
+                    continue;
+                }
+            }
             ctx.rep.progress(format!("shutting down {serial}"));
             avd::shutdown(tools, &serial, pid)?;
             session::remove_booted(project, &serial);
