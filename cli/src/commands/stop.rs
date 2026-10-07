@@ -374,7 +374,15 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
                             .map(str::to_string)
                     });
                 let mut line = format!("{}:", session.platform);
-                if alive.is_empty() && !session.all_pids().is_empty() {
+                // ios-sim keeps its record after `stop` (state `stopped`
+                // or `exited`) so `icm logs ios-sim` can still read it.
+                let state = session.extra.get("state").and_then(Value::as_str);
+                if alive.is_empty() && matches!(state, Some("stopped" | "exited")) {
+                    line.push_str(&format!(
+                        " {} (its logs stay readable)",
+                        state.unwrap_or_default()
+                    ));
+                } else if alive.is_empty() && !session.all_pids().is_empty() {
                     line.push_str(" stale (its processes are gone)");
                 } else {
                     line.push_str(" running");
