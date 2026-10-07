@@ -1,5 +1,7 @@
-//! Lockfile checks (design §2.4 item 4, §12.1): one iced, from the fork,
-//! pinned; one winit at or above the floors the fork needs.
+//! Dependency checks (design §2.4 item 4, §5, §12.1): from Cargo.lock, one
+//! iced, from the fork, pinned, and one winit at or above the floors the
+//! fork needs; from the Android build's resolved features (cargo tree), one
+//! Android activity backend.
 
 use crate::cargo::{GitRef, Lock, LockPackage, Source};
 use crate::catalogue::CheckId;
@@ -336,6 +338,181 @@ pub fn softbuffer_floor(lock: &Lock) -> Check {
     )
 }
 
+/// The crate whose features choose the Java activity an Android app runs
+/// in. winit depends on it on Android; iced's `android-native-activity` and
+/// `android-game-activity` features reach it through iced_winit and winit.
+pub const ANDROID_ACTIVITY: &str = "android-activity";
+
+/// android-activity's backends: its feature, the `[android] activity` value
+/// that runs it, and the iced feature that turns it on.
+const ACTIVITY_BACKENDS: &[(&str, &str, &str)] = &[
+    ("native-activity", "native", "android-native-activity"),
+    ("game-activity", "game", "android-game-activity"),
+];
+
+/// One android-activity crate in an Android build: `{p}` as cargo tree
+/// prints it (`android-activity v0.6.1`, plus the source when it is not
+/// crates.io) and its features.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityCrate {
+    /// The package, as cargo tree names it.
+    pub package: String,
+    /// Its enabled features.
+    pub features: Vec<String>,
+}
+
+impl ActivityCrate {
+    /// The backends among its features.
+    fn backends(&self) -> Vec<&'static str> {
+        ACTIVITY_BACKENDS
+            .iter()
+            .filter(|(feature, _, _)| self.features.iter().any(|f| f == feature))
+            .map(|(feature, _, _)| *feature)
+            .collect()
+    }
+}
+
+/// The android-activity crates in `cargo tree -f '{p}|{f}' --prefix none`
+/// output, each once (cargo marks repeats with ` (*)`).
+pub fn activity_crates(tree: &str) -> Vec<ActivityCrate> {
+    let mut crates: Vec<ActivityCrate> = Vec::new();
+    for line in tree.lines() {
+        let line = line.trim();
+        let line = line.strip_suffix("(*)").map_or(line, str::trim_end);
+        let Some((package, features)) = line.split_once('|') else {
+            continue;
+        };
+        if !package.starts_with(&format!("{ANDROID_ACTIVITY} v")) {
+            continue;
+        }
+        if crates.iter().any(|c| c.package == package) {
+            continue;
+        }
+        crates.push(ActivityCrate {
+            package: package.to_string(),
+            features: features
+                .split(',')
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .map(str::to_string)
+                .collect(),
+        });
+    }
+    crates
+}
+
+/// `deps.android_activity_backend`: the app's Android build turns on
+/// exactly one android-activity backend, the one `[android] activity`
+/// names (the generated manifest starts that activity). `crates` are the
+/// android-activity crates of `package`'s build for `triple`
+/// ([`activity_crates`]); `manifest` is the package's Cargo.toml.
+pub fn android_activity_backend(
+    crates: &[ActivityCrate],
+    activity: &str,
+    package: &str,
+    triple: &str,
+    manifest: &std::path::Path,
+) -> Check {
+    let tree =
+        format!("cargo tree -p {package} --target {triple} -e features -i {ANDROID_ACTIVITY}");
+    let evidence = crate::error::Evidence::file(manifest);
+    let wanted = ACTIVITY_BACKENDS
+        .iter()
+        .find(|(_, value, _)| *value == activity)
+        .copied()
+        .unwrap_or(ACTIVITY_BACKENDS[0]);
+    let (wanted_feature, _, wanted_iced) = wanted;
+
+    if crates.is_empty() {
+        return Check::fail(
+            CheckId::DepsAndroidActivityBackend,
+            format!(
+                "{package}'s Android build ({triple}) has no {ANDROID_ACTIVITY}, so it has no activity backend: nothing gives Android an `android_main` to start"
+            ),
+        )
+        .fix(
+            format!(
+                "Depend on iced with its default features, or list `{wanted_iced}` among them, so that winit (and android-activity) are built for Android."
+            ),
+            &[],
+        )
+        .evidence(evidence);
+    }
+
+    let found: Vec<(&ActivityCrate, &'static str)> = crates
+        .iter()
+        .flat_map(|c| c.backends().into_iter().map(move |b| (c, b)))
+        .collect();
+    match found.as_slice() {
+        [] => Check::fail(
+            CheckId::DepsAndroidActivityBackend,
+            format!(
+                "{} is built for {triple} with neither native-activity nor game-activity: iced's default `android-native-activity` feature is off (`default-features = false` on iced drops it), and android-activity refuses to build without a backend",
+                crates
+                    .iter()
+                    .map(|c| c.package.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .fix(
+            format!(
+                "Add \"{wanted_iced}\" to iced's features (or winit's `{wanted_iced}` when the app depends on winit directly)."
+            ),
+            &[],
+        )
+        .evidence(evidence),
+        [(c, backend)] if *backend == wanted_feature => Check::pass(
+            CheckId::DepsAndroidActivityBackend,
+            format!(
+                "{} is built for {triple} with {backend} alone, the backend [android] activity = \"{activity}\" runs",
+                c.package
+            ),
+        ),
+        [(c, backend)] => Check::fail(
+            CheckId::DepsAndroidActivityBackend,
+            format!(
+                "{} is built for {triple} with {backend}, but [android] activity = \"{activity}\" makes the manifest start the activity {wanted_feature} serves: the app would not start",
+                c.package
+            ),
+        )
+        .fix(
+            format!(
+                "Turn on iced's `{wanted_iced}` instead (the other backend's feature comes from the crate `{tree}` names)."
+            ),
+            &[tree.as_str()],
+        )
+        .evidence(evidence),
+        several => Check::fail(
+            CheckId::DepsAndroidActivityBackend,
+            if let [only] = crates {
+                format!(
+                    "{} is built for {triple} with both native-activity and game-activity (iced's `android-native-activity`, a default feature, and `android-game-activity` are both on), and android-activity refuses to build with both",
+                    only.package
+                )
+            } else {
+                format!(
+                    "{package}'s Android build ({triple}) holds {} android-activity crates with {} backends ({}): their activity entry points collide",
+                    crates.len(),
+                    several.len(),
+                    several
+                        .iter()
+                        .map(|(c, backend)| format!("{} with {backend}", c.package))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+        )
+        .fix(
+            format!(
+                "Keep only `{wanted_iced}`; the command below shows which crate turns on each backend. A GameActivity build needs `default-features = false` on every crate that depends on iced."
+            ),
+            &[tree.as_str()],
+        )
+        .evidence(evidence),
+    }
+}
+
 /// Every lockfile check, in order. The skew check needs this icm's rev and
 /// version; `android` adds the softbuffer floor.
 pub fn check_lock(lock: &Lock, android: bool) -> Vec<Check> {
@@ -518,6 +695,105 @@ mod tests {
         assert_eq!(softbuffer_floor(&old).status, Status::Fail);
         assert_eq!(winit_floor(&healthy()).status, Status::Pass);
         assert_eq!(softbuffer_floor(&lock(&[])).status, Status::Skip);
+    }
+
+    // `cargo tree -e normal,build -f '{p}|{f}' --prefix none` for Tawara's
+    // Android build (iced_winit without default features, winit with
+    // `android-native-activity`), trimmed.
+    const TAWARA_TREE: &str = "\
+tawara-mobile v0.1.0 (/src/tawara/crates/mobile)|
+iced_winit v0.14.1 (https://github.com/patricksmithlaravel/iced_mobile?rev=71f00e8#71f00e84)|linux-theme-detection,wayland,x11
+winit v0.30.13|ahash,android-native-activity,bytemuck,rwh_06
+android-activity v0.6.1|default,native-activity
+ndk v0.9.0|default,rwh_06
+winit v0.30.13|ahash,android-native-activity,bytemuck,rwh_06 (*)
+android-activity v0.6.1|default,native-activity (*)
+";
+
+    fn backend(tree: &str, activity: &str) -> Check {
+        android_activity_backend(
+            &activity_crates(tree),
+            activity,
+            "app",
+            "aarch64-linux-android",
+            Path::new("/app/Cargo.toml"),
+        )
+    }
+
+    #[test]
+    fn one_native_activity_passes() {
+        let crates = activity_crates(TAWARA_TREE);
+        assert_eq!(
+            crates,
+            vec![ActivityCrate {
+                package: "android-activity v0.6.1".to_string(),
+                features: vec!["default".to_string(), "native-activity".to_string()],
+            }]
+        );
+        let check = backend(TAWARA_TREE, "native");
+        assert_eq!(check.status, Status::Pass, "{}", check.error.detail);
+        assert!(check.error.detail.contains("native-activity alone"));
+    }
+
+    #[test]
+    fn no_backend_or_no_android_activity_fails() {
+        let none = backend(
+            "app v0.1.0 (/app)|\nandroid-activity v0.6.1|default\n",
+            "native",
+        );
+        assert_eq!(none.status, Status::Fail);
+        assert_eq!(none.error.exit, crate::exit::Exit::Config);
+        assert!(
+            none.error.detail.contains("neither"),
+            "{}",
+            none.error.detail
+        );
+        assert!(none.error.fix.summary.contains("android-native-activity"));
+
+        let absent = backend("app v0.1.0 (/app)|\niced v0.14.1 (/iced)|wgpu\n", "native");
+        assert_eq!(absent.status, Status::Fail);
+        assert!(absent.error.detail.contains("has no android-activity"));
+    }
+
+    #[test]
+    fn two_backends_fail() {
+        let both = backend(
+            "app v0.1.0 (/app)|\nandroid-activity v0.6.1|default,game-activity,native-activity\n",
+            "native",
+        );
+        assert_eq!(both.status, Status::Fail);
+        assert!(
+            both.error
+                .detail
+                .contains("with both native-activity and game-activity"),
+            "{}",
+            both.error.detail
+        );
+        assert!(
+            both.error.fix.commands[0].contains("-e features -i android-activity"),
+            "{:?}",
+            both.error.fix.commands
+        );
+
+        // Two copies of android-activity, one backend each.
+        let copies = backend(
+            "android-activity v0.5.2|native-activity\nandroid-activity v0.6.1|native-activity\n",
+            "native",
+        );
+        assert_eq!(copies.status, Status::Fail);
+        assert!(
+            copies.error.detail.contains("2 android-activity crates"),
+            "{}",
+            copies.error.detail
+        );
+    }
+
+    #[test]
+    fn the_backend_must_match_the_manifest() {
+        let game = "android-activity v0.6.1|default,game-activity\n";
+        assert_eq!(backend(game, "native").status, Status::Fail);
+        assert_eq!(backend(game, "game").status, Status::Pass);
+        assert_eq!(backend(TAWARA_TREE, "game").status, Status::Fail);
     }
 
     #[test]

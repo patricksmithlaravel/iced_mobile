@@ -10,7 +10,9 @@
 //!    (exit 4, `icm doctor <platform> --fix --yes`);
 //! 3. dependencies: `Cargo.lock` (resolved first with `cargo
 //!    generate-lockfile` when the app has none) and the lockfile checks:
-//!    one iced, from the fork, pinned; one winit at its floor (exit 3);
+//!    one iced, from the fork, pinned; one winit at its floor; and for
+//!    Android, one activity backend in the build's resolved features
+//!    (exit 3);
 //! 4. `cargo check` per platform (`cargo clippy` with `--clippy`): `--lib`
 //!    for Android, `--bin` elsewhere. Every platform is checked even when
 //!    one fails; each failure carries its first rustc errors (file, line,
@@ -84,16 +86,19 @@ pub fn run(ctx: &mut Ctx, args: &CheckArgs) -> Result<()> {
     if !lock_path.exists() {
         resolve_lock(ctx, &project)?;
     }
-    if let Some(lock) = project.lock()? {
-        let android = platforms.contains(&Platform::Android);
-        let checks = crate::deps::check_lock(&lock, android);
-        let first = checks.iter().find(|c| c.failed()).cloned();
-        for check in checks {
-            ctx.rep.check(check);
-        }
-        if let Some(failure) = first {
-            return Err(failure.into_error());
-        }
+    let mut checks = match project.lock()? {
+        Some(lock) => crate::deps::check_lock(&lock, platforms.contains(&Platform::Android)),
+        None => Vec::new(),
+    };
+    if let Some(build) = builds.iter().find(|b| b.platform == Platform::Android) {
+        checks.push(activity_backend(ctx, &project, build)?);
+    }
+    let first = checks.iter().find(|c| c.failed()).cloned();
+    for check in checks {
+        ctx.rep.check(check);
+    }
+    if let Some(failure) = first {
+        return Err(failure.into_error());
     }
 
     // 4. cargo check, every platform
@@ -506,6 +511,47 @@ fn resolve_lock(ctx: &Ctx, project: &Project) -> Result<()> {
     } else {
         Err(ctx.step_failure("cargo.lockfile", CheckId::BuildCargoFailed, &outcome))
     }
+}
+
+/// `deps.android_activity_backend` from the Android build's resolved
+/// features: `cargo tree` for the package and the Android triple, with the
+/// edges a library build uses (no dev-dependencies), so features that only
+/// another workspace member turns on do not count. A `cargo tree` that
+/// fails is a SKIP: `cargo check` runs next and reports why.
+fn activity_backend(ctx: &Ctx, project: &Project, build: &Build) -> Result<Check> {
+    let triple = build.label();
+    let mut cmd = crate::process::Cmd::tool("cargo")
+        .arg("tree")
+        .arg("--manifest-path")
+        .arg(&build.manifest)
+        .args(["-p", &build.package, "--target", &triple])
+        .args(["-e", "normal,build", "--prefix", "none", "-f", "{p}|{f}"])
+        .cwd(project.dir())
+        .timeout(std::time::Duration::from_secs(10 * 60));
+    if ctx.global.offline {
+        cmd = cmd.arg("--offline");
+    }
+    let outcome = ctx.step("cargo.tree.android", &cmd)?;
+    if !outcome.success() {
+        let mut check = Check::skip(
+            CheckId::DepsAndroidActivityBackend,
+            format!(
+                "cannot resolve the Android build's features: cargo tree failed ({})",
+                outcome.describe()
+            ),
+        );
+        if let Some(log) = &outcome.log {
+            check = check.evidence(Evidence::file(log));
+        }
+        return Ok(check);
+    }
+    Ok(crate::deps::android_activity_backend(
+        &crate::deps::activity_crates(&outcome.stdout_text()),
+        &project.config.config.android.activity,
+        &build.package,
+        &triple,
+        &build.manifest,
+    ))
 }
 
 /// A successful compile.
