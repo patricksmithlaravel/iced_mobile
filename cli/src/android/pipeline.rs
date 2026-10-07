@@ -860,6 +860,25 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
     }
     let app_id = project.config.config.app.id.clone();
     let screen = capture(ctx, &adb, &dir, &stem, &app_id, false)?;
+    let pids = adb.pids(&app_id);
+    ctx.rep.set(
+        "process",
+        json!({"pid": pids.first(), "alive": !pids.is_empty()}),
+    );
+    if pids.is_empty() {
+        ctx.rep.check(
+            Check::warn(
+                CheckId::RunAppDied,
+                format!(
+                    "{app_id} is not running on {}; the screenshot shows whatever is on screen instead (the launcher)",
+                    adb.serial
+                ),
+            )
+            .fix("Start the app, then take the screenshot again.", &[
+                "icm run android --json -q",
+            ]),
+        );
+    }
     if let Some(out) = &args.out {
         if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
@@ -1487,6 +1506,41 @@ pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
     let (adb, session) = session_device(ctx, &project, &host, &tools)?;
     let app_id = project.config.config.app.id.clone();
     ctx.rep.set("device", json!({"serial": adb.serial}));
+
+    // Touches and keys go to whatever is on screen: without the app they
+    // would drive the launcher.
+    if matches!(
+        args.action,
+        InputAction::Tap { .. }
+            | InputAction::Swipe { .. }
+            | InputAction::Text { .. }
+            | InputAction::Key { .. }
+    ) && adb.pids(&app_id).is_empty()
+    {
+        let (id, detail) = match &session {
+            Some(_) => (
+                CheckId::RunAppDied,
+                format!(
+                    "{app_id} is not running on {} (it exited or crashed); nothing was sent",
+                    adb.serial
+                ),
+            ),
+            None => (
+                CheckId::RunNoSession,
+                format!(
+                    "{app_id} is not running on {}; nothing was sent",
+                    adb.serial
+                ),
+            ),
+        };
+        return Err(IcmError::new(id, detail).fix(
+            "Start the app (and read why it stopped), then send the input again.",
+            &[
+                "icm logs android --level warn --json -q",
+                "icm run android --json -q",
+            ],
+        ));
+    }
 
     let point = |screen: &Screen, x: f64, y: f64| -> Result<(i64, i64)> {
         if !screen.contains(x, y, args.space) {
