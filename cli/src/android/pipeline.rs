@@ -442,6 +442,17 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
                 ctx.rep.clear_summary();
                 return Err(error);
             }
+            Followed::Destroyed => {
+                // As closing the last window on the desktop: the app ended
+                // normally.
+                ctx.rep.set(
+                    "process",
+                    json!({"pid": session.pid, "alive": true, "activity": false}),
+                );
+                ctx.rep.summary(format!(
+                    "{app_id} ended with its activity, which Android destroyed (Back at the app's root, say); its process lives on, cached, with no window"
+                ));
+            }
             Followed::Ended => {}
         }
     }
@@ -760,12 +771,69 @@ fn relaunches_since(adb: &Adb, mark: &str, app_id: &str) -> Vec<logcat::Relaunch
         .unwrap_or_default()
 }
 
+/// The app's activities, from `dumpsys activity activities` (`None` when
+/// the device does not answer, or lists no activity at all).
+fn activities(adb: &Adb, app_id: &str) -> Option<adb::Activities> {
+    adb.shell_text("dumpsys activity activities", Duration::from_secs(15))
+        .and_then(|text| adb::parse_activities(&text, app_id))
+}
+
 fn top_resumed(adb: &Adb, app_id: &str) -> bool {
-    adb.shell_text(
-        "dumpsys activity activities | grep -E 'topResumedActivity|ResumedActivity'",
-        Duration::from_secs(15),
+    activities(adb, app_id).is_some_and(|activities| activities.top)
+}
+
+/// Where the app is on the device. A live process alone does not mean the
+/// app is on screen: the framework ends the application with its activity,
+/// and after Back at the app's root Android destroys the activity but keeps
+/// the process, cached, with no window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Presence {
+    /// No process.
+    Gone,
+    /// A process without an activity: Android destroyed it, and the app
+    /// ended.
+    NoActivity { pid: u32 },
+    /// An activity, with another one in front (after Home, say).
+    Behind { pid: u32 },
+    /// The top resumed activity. Also what a device whose `dumpsys` says
+    /// nothing about activities gets, from its live process.
+    Front { pid: u32 },
+}
+
+impl Presence {
+    /// The result's `process` object.
+    fn to_json(self) -> Value {
+        match self {
+            Presence::Gone => json!({"pid": null, "alive": false, "activity": false}),
+            Presence::NoActivity { pid } => {
+                json!({"pid": pid, "alive": true, "activity": false})
+            }
+            Presence::Behind { pid } => {
+                json!({"pid": pid, "alive": true, "activity": true, "front": false})
+            }
+            Presence::Front { pid } => {
+                json!({"pid": pid, "alive": true, "activity": true, "front": true})
+            }
+        }
+    }
+}
+
+fn presence(adb: &Adb, app_id: &str) -> Presence {
+    let Some(&pid) = adb.pids(app_id).first() else {
+        return Presence::Gone;
+    };
+    match activities(adb, app_id) {
+        Some(adb::Activities { any: false, .. }) => Presence::NoActivity { pid },
+        Some(adb::Activities { top: false, .. }) => Presence::Behind { pid },
+        _ => Presence::Front { pid },
+    }
+}
+
+/// The detail for an app whose process outlived its activity.
+fn no_activity(app_id: &str, serial: &str, pid: u32) -> String {
+    format!(
+        "{app_id} has no activity on {serial}: Android destroyed it (Back at the app's root, say) and the app ended, while its process (pid {pid}) lives on, cached, with no window"
     )
-    .is_some_and(|text| text.contains(&format!("{app_id}/")))
 }
 
 /// Reports `ready` and `run.ready`; returns how it got ready ("first frame
@@ -912,23 +980,25 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
     }
     let app_id = project.config.config.app.id.clone();
     let screen = capture(ctx, &adb, &dir, &stem, &app_id, false)?;
-    let pids = adb.pids(&app_id);
-    ctx.rep.set(
-        "process",
-        json!({"pid": pids.first(), "alive": !pids.is_empty()}),
-    );
-    if pids.is_empty() {
+    let presence = presence(&adb, &app_id);
+    ctx.rep.set("process", presence.to_json());
+    let gone = match presence {
+        Presence::Gone => Some(format!("{app_id} is not running on {}", adb.serial)),
+        Presence::NoActivity { pid } => Some(no_activity(&app_id, &adb.serial, pid)),
+        Presence::Behind { .. } | Presence::Front { .. } => None,
+    };
+    if let Some(gone) = gone {
         ctx.rep.check(
             Check::warn(
                 CheckId::RunAppDied,
                 format!(
-                    "{app_id} is not running on {}; the screenshot shows whatever is on screen instead (the launcher)",
-                    adb.serial
+                    "{gone}; the screenshot shows whatever is on screen instead (the launcher)"
                 ),
             )
-            .fix("Start the app, then take the screenshot again.", &[
-                "icm run android --json -q",
-            ]),
+            .fix(
+                "Start the app, then take the screenshot again.",
+                &["icm run android --json -q"],
+            ),
         );
     }
     if let Some(out) = &args.out {
@@ -1450,7 +1520,17 @@ enum Followed {
     /// The app's process is gone (`until_exit`); `stopped` when it was
     /// `am force-stop` (`icm stop android`, or someone at the device).
     Gone { stopped: bool },
+    /// The app ended with its activity, which Android destroyed (Back at
+    /// its root), and no new activity started it again; the process lives
+    /// on, cached (`until_exit`).
+    Destroyed,
 }
+
+/// How long after an `ICM_EVENT exit` with `destroyed: true` [`follow`]
+/// waits for a new activity's `start` before it takes the app as ended: a
+/// relaunch (a configuration change the manifest does not list) starts it
+/// again within a second.
+const DESTROYED_GRACE: Duration = Duration::from_secs(3);
 
 /// Streams the app's new records until the app exits (`until_exit`),
 /// Ctrl-C or `--timeout`. In JSON mode each record is a `log` event.
@@ -1484,6 +1564,9 @@ fn follow(
     let deadline = ctx.deadline();
     let force_stop = format!("Force stopping {app_id} ");
     let mut stopped = false;
+    // When the app last ended with a destroyed activity, unless a new
+    // activity has started it since.
+    let mut destroyed: Option<Instant> = None;
     loop {
         if crate::signals::pending().is_some() || deadline.is_some_and(|d| Instant::now() >= d) {
             return Ok(Followed::Ended);
@@ -1502,7 +1585,19 @@ fn follow(
                 .iter()
                 .any(|record| record.msg.starts_with(&force_stop));
             for (source, record) in logcat::select(&records, app_id, &pids) {
-                if !seen.insert(key(record)) || !wanted(source, record) {
+                if !seen.insert(key(record)) {
+                    continue;
+                }
+                if let Some(event) = logcat::event(record).filter(|_| pids.contains(&record.pid)) {
+                    match logcat::kind(&event) {
+                        "exit" if event.get("destroyed").and_then(Value::as_bool) == Some(true) => {
+                            destroyed = Some(Instant::now());
+                        }
+                        "start" => destroyed = None,
+                        _ => {}
+                    }
+                }
+                if !wanted(source, record) {
                     continue;
                 }
                 let mut event = record.to_json(source);
@@ -1520,6 +1615,16 @@ fn follow(
         if until_exit && alive.is_empty() {
             ctx.rep.progress(format!("{app_id} exited"));
             return Ok(Followed::Gone { stopped });
+        }
+        // The process outlives a destroyed activity, so its pid says
+        // nothing then: the app has ended once no activity of it is left.
+        if until_exit && destroyed.is_some_and(|at| at.elapsed() >= DESTROYED_GRACE) {
+            if matches!(presence(adb, app_id), Presence::NoActivity { .. }) {
+                ctx.rep
+                    .progress(format!("{app_id} ended with its activity"));
+                return Ok(Followed::Destroyed);
+            }
+            destroyed = None;
         }
     }
 }
@@ -1582,38 +1687,48 @@ pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
     ctx.rep.set("device", json!({"serial": adb.serial}));
 
     // Touches and keys go to whatever is on screen: without the app they
-    // would drive the launcher.
+    // would drive the launcher. That includes a process that outlived its
+    // activity (Back at the app's root), which has no window to send to.
     if matches!(
         args.action,
         InputAction::Tap { .. }
             | InputAction::Swipe { .. }
             | InputAction::Text { .. }
             | InputAction::Key { .. }
-    ) && adb.pids(&app_id).is_empty()
-    {
-        let (id, detail) = match &session {
-            Some(_) => (
+    ) {
+        let refused = match presence(&adb, &app_id) {
+            Presence::Gone if session.is_some() => Some((
                 CheckId::RunAppDied,
                 format!(
                     "{app_id} is not running on {} (it exited or crashed); nothing was sent",
                     adb.serial
                 ),
-            ),
-            None => (
+            )),
+            Presence::Gone => Some((
                 CheckId::RunNoSession,
                 format!(
                     "{app_id} is not running on {}; nothing was sent",
                     adb.serial
                 ),
-            ),
+            )),
+            Presence::NoActivity { pid } => Some((
+                CheckId::RunAppDied,
+                format!(
+                    "{}; nothing was sent",
+                    no_activity(&app_id, &adb.serial, pid)
+                ),
+            )),
+            Presence::Behind { .. } | Presence::Front { .. } => None,
         };
-        return Err(IcmError::new(id, detail).fix(
-            "Start the app (and read why it stopped), then send the input again.",
-            &[
-                "icm logs android --level warn --json -q",
-                "icm run android --json -q",
-            ],
-        ));
+        if let Some((id, detail)) = refused {
+            return Err(IcmError::new(id, detail).fix(
+                "Start the app (and read why it stopped), then send the input again.",
+                &[
+                    "icm logs android --level warn --json -q",
+                    "icm run android --json -q",
+                ],
+            ));
+        }
     }
 
     let point = |screen: &Screen, x: f64, y: f64| -> Result<(i64, i64)> {
@@ -1872,10 +1987,13 @@ pub fn app_state(ctx: &mut Ctx, project: &Project) -> crate::session::AppState {
     let Ok(adb) = Adb::new(&tools, &session.serial) else {
         return AppState::Unknown;
     };
-    if adb.pids(&session.app_id).is_empty() {
-        AppState::Gone("the app is not running".to_string())
-    } else {
-        AppState::Running
+    match presence(&adb, &session.app_id) {
+        Presence::Gone => AppState::Gone("the app is not running".to_string()),
+        Presence::NoActivity { .. } => AppState::Gone(
+            "the app has no activity (Android destroyed it, and the app ended; its process lives on, cached)"
+                .to_string(),
+        ),
+        Presence::Behind { .. } | Presence::Front { .. } => AppState::Running,
     }
 }
 

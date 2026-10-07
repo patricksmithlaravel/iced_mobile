@@ -278,6 +278,45 @@ pub fn focused_window_is_secure(dumpsys: &str, app_id: &str) -> bool {
     false
 }
 
+/// What `dumpsys activity activities` says about an app's activities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Activities {
+    /// The app has an activity, in any state (resumed, paused, stopped).
+    /// Android removes it once it is destroyed, while the process may live
+    /// on, cached.
+    pub any: bool,
+    /// One of them is the top resumed activity: the app is in front.
+    pub top: bool,
+}
+
+/// Reads `dumpsys activity activities` for `app_id`: its activities are
+/// `ActivityRecord{<hash> u0 <app_id>/<class> t<task>}`, and the one in
+/// front is on the `topResumedActivity=` (`ResumedActivity:` before API
+/// 29) line. `None` when the text lists no activity at all: a device whose
+/// launcher runs always lists one, so such an answer (a device still
+/// booting, a `dumpsys` that failed) says nothing about the app.
+pub fn parse_activities(dumpsys: &str, app_id: &str) -> Option<Activities> {
+    if !dumpsys.contains("ActivityRecord{") {
+        return None;
+    }
+    let component = format!(" {app_id}/");
+    let mut activities = Activities {
+        any: false,
+        top: false,
+    };
+    for line in dumpsys.lines() {
+        if !line.contains("ActivityRecord{") || !line.contains(&component) {
+            continue;
+        }
+        activities.any = true;
+        let line = line.trim_start();
+        if line.starts_with("topResumedActivity=") || line.starts_with("ResumedActivity:") {
+            activities.top = true;
+        }
+    }
+    Some(activities)
+}
+
 /// The text form `adb shell input text` accepts: spaces as `%s`, quoted
 /// for the device shell. (`input text` cannot type a literal `%s`, and
 /// only ASCII.)
@@ -355,6 +394,46 @@ mod tests {
         let dumpsys = "  Window #3 Window{abc u0 com.example.app/android.app.NativeActivity}:\n    mAttrs={(0,0)(fillxfill) ty=BASE_APPLICATION fl=LAYOUT_IN_SCREEN SECURE HARDWARE_ACCELERATED}\n  Window #4 Window{def u0 StatusBar}:\n    mAttrs={fl=NOT_FOCUSABLE}\n";
         assert!(focused_window_is_secure(dumpsys, "com.example.app"));
         assert!(!focused_window_is_secure(dumpsys, "com.other"));
+    }
+
+    #[test]
+    fn activities_of_an_app() {
+        // API 36: the app in front, then after Home, then after Back (the
+        // activity destroyed, the process cached).
+        let front = "  * Task{89fff12 #8 type=standard A=10213:com.example.fixer U=0 visible=true}\n    topResumedActivity=ActivityRecord{253882921 u0 com.example.fixer/android.app.NativeActivity t8}\n    * Hist  #0: ActivityRecord{253882921 u0 com.example.fixer/android.app.NativeActivity t8}\n      mLastPausedActivity: ActivityRecord{266162751 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t6}\n  ResumedActivity: ActivityRecord{253882921 u0 com.example.fixer/android.app.NativeActivity t8}\n";
+        let home = "      topResumedActivity=ActivityRecord{266162751 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t6}\n  * Task{89fff12 #8 type=standard A=10213:com.example.fixer U=0 visible=false}\n    mLastPausedActivity: ActivityRecord{253882921 u0 com.example.fixer/android.app.NativeActivity t8}\n    * Hist  #0: ActivityRecord{253882921 u0 com.example.fixer/android.app.NativeActivity t8}\n  ResumedActivity: ActivityRecord{266162751 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t6}\n";
+        let back = "      topResumedActivity=ActivityRecord{266162751 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t6}\n  ResumedActivity: ActivityRecord{266162751 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t6}\n";
+        let app = "com.example.fixer";
+        assert_eq!(
+            parse_activities(front, app),
+            Some(Activities {
+                any: true,
+                top: true
+            })
+        );
+        assert_eq!(
+            parse_activities(home, app),
+            Some(Activities {
+                any: true,
+                top: false
+            })
+        );
+        assert_eq!(
+            parse_activities(back, app),
+            Some(Activities {
+                any: false,
+                top: false
+            })
+        );
+        // An id that another one starts with is not that one.
+        assert!(!parse_activities(front, "com.example.fix").unwrap().any);
+        assert!(!parse_activities(front, "example.fixer").unwrap().any);
+        // An answer that lists no activity at all says nothing.
+        assert_eq!(parse_activities("", app), None);
+        assert_eq!(
+            parse_activities("Can't find service: activity\n", app),
+            None
+        );
     }
 
     #[test]
