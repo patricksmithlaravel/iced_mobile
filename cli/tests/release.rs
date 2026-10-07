@@ -466,6 +466,22 @@ fn android_signing_problems_still_build_the_unsigned_bundle() {
     assert!(app.abs(&missing["artifacts"]["aab"]).is_file(), "{missing}");
     assert!(app.abs(&missing["artifacts"]["upload_md"]).is_file());
     assert_eq!(missing["release"]["uploadable"], false);
+    assert!(
+        missing["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("built Fixture 0.3.0 (build 7) for android"),
+        "{missing}"
+    );
+    // The owner's items, then the owner's plan.
+    let kinds: Vec<&str> = missing["owner_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds.first(), Some(&"fix"), "{kinds:?}");
+    assert!(kinds.contains(&"web"), "{kinds:?}");
 
     std::fs::write(app.path("up.jks"), b"keystore").unwrap();
     let unset = app.json(&["__test", "release", "android"]);

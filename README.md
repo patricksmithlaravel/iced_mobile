@@ -90,6 +90,10 @@ What the host needs (`icm doctor` checks each item and says how to fix it):
   `wasm-bindgen` CLI that matches the app's lockfile.
 - **Desktop screenshots on macOS** need Screen Recording permission for the app that runs icm.
   Without it, icm renders the view headlessly instead and warns.
+- **Release tools:** doctor warns while a tool the platform's releases need is missing, and
+  `--fix --yes` downloads it at the version, size and sha256 pinned in
+  [cli/tools.toml](cli/tools.toml): bundletool for Android, binaryen's `wasm-opt` for the web,
+  appimagetool and the AppImage runtime for Linux. The dev loop does not need them.
 
 icm runs on macOS and Linux hosts and is tested on macOS. Windows hosts are not supported yet.
 [cli/README.md](cli/README.md) describes the tool's internals.

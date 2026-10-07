@@ -353,7 +353,7 @@ pub fn run_with(ctx: &mut Ctx, args: &ReleaseArgs, pipeline: &dyn Pipeline) -> R
     }
     pipeline.preconditions(ctx, &mut rel)?;
     if let Err(error) = rel.gates.checkpoint() {
-        return Err(owner_exit(ctx, &rel, error));
+        return Err(owner_exit(ctx, &rel, error, false));
     }
     build_number(ctx, &mut rel)?;
     source(ctx, &mut rel)?;
@@ -364,7 +364,7 @@ pub fn run_with(ctx: &mut Ctx, args: &ReleaseArgs, pipeline: &dyn Pipeline) -> R
 
     match rel.gates.finish() {
         Ok(()) => Ok(()),
-        Err(error) => Err(owner_exit(ctx, &rel, error)),
+        Err(error) => Err(owner_exit(ctx, &rel, error, true)),
     }
 }
 
@@ -789,18 +789,32 @@ fn prepare_dist(dist: &Path, clean: bool) -> Result<()> {
     std::fs::create_dir_all(dist).map_err(|e| io("create", e))
 }
 
-/// The exit-9 end: `owner_steps` lists every owner item.
-fn owner_exit(ctx: &Ctx, rel: &Release, error: IcmError) -> IcmError {
+/// The exit-9 end. Before the build, `owner_steps` lists every owner item;
+/// after it (deferred items: the artifacts are written but unsigned),
+/// `owner_steps` keeps the owner items followed by the owner's plan.
+fn owner_exit(ctx: &Ctx, rel: &Release, error: IcmError, built: bool) -> IcmError {
     let steps = rel.gates.owner_steps();
-    ctx.rep.summary(format!(
-        "the owner must act before {} can be released on {}: {} item(s), the first {} ({})",
-        rel.app_label(),
-        rel.target.as_str(),
+    let first = format!(
+        "{} item(s), the first {} ({})",
         steps.len(),
         error.id,
         error.detail.lines().next().unwrap_or("")
-    ));
-    ctx.rep.set("owner_steps", Value::Array(steps));
+    );
+    if built {
+        ctx.rep.summary(format!(
+            "built {} for {} in {}, but it is not uploadable until the owner acts: {first}",
+            rel.app_label(),
+            rel.target.as_str(),
+            crate::paths::display(&rel.dist)
+        ));
+    } else {
+        ctx.rep.summary(format!(
+            "the owner must act before {} can be released on {}: {first}",
+            rel.app_label(),
+            rel.target.as_str()
+        ));
+        ctx.rep.set("owner_steps", Value::Array(steps));
+    }
     error
 }
 
