@@ -543,8 +543,19 @@ impl Pipeline for Android {
             }
         }
 
-        // A `--sign none` release's bundle is unsigned on purpose.
-        let unsigned_expected = verify.gates.mode == SignMode::None;
+        // A `--sign none` release's bundle is unsigned on purpose, and a
+        // `--sign auto` release that recorded `signed: false` wrote it
+        // unsigned because the owner's upload key was missing (its exit 9):
+        // either way the signature is the owner's to add, not the agent's.
+        let unsigned_expected = if verify.gates.mode == SignMode::None {
+            Some("as its release (--sign none) made it")
+        } else if verify.manifest.as_ref().is_some_and(|m| !m.signed) {
+            Some(
+                "as its release recorded (signed: false; the owner's upload key, keystore or password variable was missing)",
+            )
+        } else {
+            None
+        };
         let mut report = |check: Check| verify.check(ctx, check);
         validate(ctx, &bundletool, &aab, &mut report)?;
         signature_checks(
@@ -755,7 +766,7 @@ fn bundle_and_gate(
             tools,
             &aab,
             found.sha256.as_deref(),
-            false,
+            None,
             &mut |check| rel.check(ctx, check),
         )?;
     }
@@ -900,14 +911,15 @@ fn sign(
 /// unsigned`, which exits 0), and `keytool -printcert -jarfile` must show
 /// the upload key's certificate when it is known. A missing timestamp is
 /// INFO. An unsigned bundle is FAIL `android.aab.signed`, or WARN
-/// `android.aab.unsigned` when it is expected to be (`icm verify` of a
-/// `--sign none` release).
+/// `android.aab.unsigned` (the owner's) when it is expected to be, saying
+/// why (`icm verify` of a `--sign none` release, or of one that recorded
+/// `signed: false`).
 fn signature_checks(
     ctx: &Ctx,
     tools: &Toolset,
     aab: &Path,
     expected_sha256: Option<&str>,
-    unsigned_expected: bool,
+    unsigned_expected: Option<&str>,
     report: &mut dyn FnMut(Check),
 ) -> Result<()> {
     let shown = crate::paths::display(aab);
@@ -923,13 +935,21 @@ fn signature_checks(
         Some(log) => check.evidence(Evidence::file(log)),
         None => check,
     };
-    if verified.unsigned && unsigned_expected {
-        report(Check::warn(
-            CheckId::AndroidAabUnsigned,
-            format!(
-                "{shown} is unsigned, as its release (--sign none) made it; Google Play takes only a bundle signed with the upload key"
+    if verified.unsigned
+        && let Some(why) = unsigned_expected
+    {
+        report(
+            Check::warn(
+                CheckId::AndroidAabUnsigned,
+                format!(
+                    "{shown} is unsigned, {why}; Google Play takes only a bundle signed with the upload key"
+                ),
+            )
+            .fix(
+                "The owner signs it with the jarsigner line in UPLOAD.md, or releases again with [android.signing] upload and its password variables set.",
+                &["icm upload-commands android"],
             ),
-        ));
+        );
         return Ok(());
     }
     if !verified.verified {

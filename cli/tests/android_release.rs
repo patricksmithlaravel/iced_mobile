@@ -767,6 +767,35 @@ fn key_problems_are_the_owners_and_still_ship_the_unsigned_bundle() {
         "{first_run}"
     );
 
+    // The release's next step, `icm verify android`, keeps the unsigned
+    // bundle the owner's (a WARN with the owner's fix), not an exit 1 that
+    // would send the agent after the upload key.
+    assert!(
+        wrong["next"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|next| next["cmd"] == "icm verify android --json -q"),
+        "{wrong}"
+    );
+    sandbox.unset("FAKE_KEY_FAIL");
+    let verify = sandbox.json(&["verify", "android"]);
+    assert_eq!(verify["exit"], 0, "{verify}");
+    assert_eq!(verify["verify"]["sign"], "auto");
+    let found = checks(&sandbox, &verify);
+    assert!(has(&found, "android.aab.unsigned", "warn"), "{found:?}");
+    assert!(!has(&found, "android.aab.signed", "fail"), "{found:?}");
+    assert!(
+        verify["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["id"] == "android.aab.unsigned"
+                && w["fix"]["by"] == "owner"
+                && w["detail"].as_str().unwrap().contains("signed: false")),
+        "{verify}"
+    );
+
     // The variable unset: the core's owner item, and nothing is signed.
     sandbox.unset("FAKE_KEY_FAIL");
     sandbox.unset("ICM_TEST_STOREPASS");

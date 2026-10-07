@@ -15,8 +15,10 @@ the APKs it serves and does not need one.
 
 This check fails when the bundle is unsigned, does not verify, or is signed
 by another certificate than the upload key's. A `--sign none` release is
-unsigned on purpose: its bundle gets the WARN `android.aab.unsigned`
-instead.
+unsigned on purpose, and a `--sign auto` release whose upload key was
+missing writes its bundle unsigned and records `signed: false` in
+`artifacts.json` (exit 9, the owner's): `icm verify android` gives either
+bundle the WARN `android.aab.unsigned` (by the owner) instead.
 
 ## Fix
 

@@ -562,7 +562,7 @@ catalogue! {
         "The .aab is not signed with the upload key",
         "Check `[android.signing] upload`.";
     AndroidAabUnsigned = "android.aab.unsigned", CheckFailed, Warn, Owner,
-        "The .aab is unsigned (`--sign none`)",
+        "The .aab is unsigned (`--sign none`, or the owner's upload key was missing)",
         "The owner signs it, or releases with signing configured.";
     AndroidApkZipalign = "android.apk.zipalign", CheckFailed, Fail, Agent,
         "The APK is not zip-aligned",
