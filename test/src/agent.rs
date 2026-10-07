@@ -567,7 +567,7 @@ where
         let deadline = Instant::now() + duration;
 
         loop {
-            while let Ok(Some(event)) = self.receiver.try_next() {
+            while let Ok(Some(event)) = crate::try_next(&mut self.receiver) {
                 if let emulator::Event::Action(action) = event {
                     self.emulator.perform(program, action);
                 }
@@ -737,7 +737,7 @@ where
     let mut next = 0;
 
     loop {
-        let event = match receiver.try_next() {
+        let event = match crate::try_next(&mut receiver) {
             Ok(Some(event)) => event,
             Ok(None) => {
                 report.error = Some(String::from("the emulator stopped"));

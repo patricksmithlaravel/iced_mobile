@@ -270,7 +270,7 @@ pub fn screenshot_with_backend<P: program::Program + 'static>(
     let start = Instant::now();
 
     loop {
-        if let Some(event) = receiver.try_next().ok().flatten() {
+        if let Some(event) = try_next(&mut receiver).ok().flatten() {
             match event {
                 emulator::Event::Action(action) => {
                     emulator.perform(program, action);
@@ -317,4 +317,14 @@ fn preset<'a, P: program::Program>(
                 .map(str::to_owned)
                 .collect(),
         })
+}
+
+/// `Receiver::try_next`, which futures-channel 0.3.32 deprecates for
+/// `try_recv`. 0.3.31, which many lockfiles still hold, has no `try_recv`,
+/// so this keeps builds against either free of warnings.
+#[allow(deprecated)]
+pub(crate) fn try_next<T>(
+    receiver: &mut futures::futures::channel::mpsc::Receiver<T>,
+) -> Result<Option<T>, futures::futures::channel::mpsc::TryRecvError> {
+    receiver.try_next()
 }

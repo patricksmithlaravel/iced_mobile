@@ -670,7 +670,7 @@ where
                     return Ok(Some(control));
                 }
 
-                match self.receiver.try_next()? {
+                match try_next(&mut self.receiver)? {
                     Some(Control::CreateWindow { id, on_open, .. })
                         if self.has_window =>
                     {
@@ -699,7 +699,7 @@ where
             }
 
             #[cfg(not(target_os = "android"))]
-            self.receiver.try_next()
+            try_next(&mut self.receiver)
         }
     }
 
@@ -846,7 +846,7 @@ async fn run_instance<P>(
 
     'next_event: loop {
         // Empty the queue if possible
-        let event = if let Ok(event) = event_receiver.try_next() {
+        let event = if let Ok(event) = try_next(&mut event_receiver) {
             event
         } else {
             event_receiver.next().await
@@ -2309,4 +2309,14 @@ fn system_information(
         graphics_adapter: graphics.adapter,
         graphics_backend: graphics.backend,
     }
+}
+
+/// `UnboundedReceiver::try_next`, which futures-channel 0.3.32 deprecates
+/// for `try_recv`. 0.3.31, which many lockfiles still hold, has no
+/// `try_recv`, so this keeps builds against either free of warnings.
+#[allow(deprecated)]
+fn try_next<T>(
+    receiver: &mut mpsc::UnboundedReceiver<T>,
+) -> Result<Option<T>, mpsc::TryRecvError> {
+    receiver.try_next()
 }
