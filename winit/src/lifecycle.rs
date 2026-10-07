@@ -395,7 +395,7 @@ pub(crate) fn wake_up(event_loop: &winit::event_loop::ActiveEventLoop) {
         .next(now);
 
     if let Some(wakeup) = next
-        && let Some(flow) = wake_up_by(event_loop.control_flow(), wakeup, now)
+        && let Some(flow) = wake_up_by(event_loop.control_flow(), wakeup)
     {
         event_loop.set_control_flow(flow);
     }
@@ -445,17 +445,19 @@ impl Wakeups {
 
 /// The control flow that also wakes up at `wakeup`, or `None` when
 /// `current` already wakes up by then.
+///
+/// A deadline that has passed already is kept: winit turns the loop again at
+/// once for it, and it is a redraw or a timer that is due.
 #[cfg(any(target_os = "android", test))]
 fn wake_up_by(
     current: winit::event_loop::ControlFlow,
     wakeup: Instant,
-    now: Instant,
 ) -> Option<winit::event_loop::ControlFlow> {
     use winit::event_loop::ControlFlow;
 
     match current {
         ControlFlow::Poll => None,
-        ControlFlow::WaitUntil(at) if at > now && at <= wakeup => None,
+        ControlFlow::WaitUntil(at) if at <= wakeup => None,
         ControlFlow::Wait | ControlFlow::WaitUntil(_) => {
             Some(ControlFlow::WaitUntil(wakeup))
         }
@@ -755,21 +757,30 @@ mod tests {
         let wakeup = now + after(50);
 
         assert_eq!(
-            wake_up_by(ControlFlow::Wait, wakeup, now),
+            wake_up_by(ControlFlow::Wait, wakeup),
             Some(ControlFlow::WaitUntil(wakeup))
         );
-        assert_eq!(wake_up_by(ControlFlow::Poll, wakeup, now), None);
+        assert_eq!(wake_up_by(ControlFlow::Poll, wakeup), None);
         assert_eq!(
-            wake_up_by(ControlFlow::WaitUntil(now + after(16)), wakeup, now),
+            wake_up_by(ControlFlow::WaitUntil(now + after(16)), wakeup),
             None
         );
         assert_eq!(
-            wake_up_by(ControlFlow::WaitUntil(now + after(500)), wakeup, now),
+            wake_up_by(ControlFlow::WaitUntil(now + after(500)), wakeup),
             Some(ControlFlow::WaitUntil(wakeup))
         );
+
+        // A deadline that has passed is due now: a redraw or a timer that
+        // must not wait for the wake-up.
+        assert_eq!(wake_up_by(ControlFlow::WaitUntil(now), wakeup), None);
         assert_eq!(
-            wake_up_by(ControlFlow::WaitUntil(now), wakeup, now),
-            Some(ControlFlow::WaitUntil(wakeup))
+            wake_up_by(
+                ControlFlow::WaitUntil(
+                    now.checked_sub(after(5)).unwrap_or(now)
+                ),
+                wakeup
+            ),
+            None
         );
     }
 }
