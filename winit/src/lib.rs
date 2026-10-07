@@ -873,6 +873,7 @@ async fn run_instance<P>(
                         let display_handle = display_handle.clone();
                         let proxy = proxy.clone();
                         let default_fonts = default_fonts.clone();
+                        let default_font = graphics_settings.default_font;
                         let backend = backend_preference();
 
                         async move {
@@ -890,6 +891,28 @@ async fn run_instance<P>(
                             if let Ok(compositor) = &mut compositor {
                                 for font in default_fonts {
                                     compositor.load_font(font.clone());
+                                }
+
+                                // A named default font nothing loaded is
+                                // drawn with a fallback, or not at all where
+                                // there are no system fonts (the web).
+                                if let crate::core::font::Family::Name(name) =
+                                    default_font.family
+                                    && icm::enabled()
+                                    && !graphics::text::is_loaded(default_font)
+                                {
+                                    icm::warning(
+                                        "font.default_missing",
+                                        &format!(
+                                            "the default font \"{name}\" is \
+                                            not loaded: embed it (a font \
+                                            feature or Settings::fonts), or \
+                                            text in it falls back to another \
+                                            font, or is not drawn at all \
+                                            where there are no system fonts \
+                                            (the web)"
+                                        ),
+                                    );
                                 }
                             }
 

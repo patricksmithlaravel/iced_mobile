@@ -163,6 +163,24 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
     })
 }
 
+/// Whether the global [`FontSystem`] holds a face of `font`'s family. Only
+/// a named family can be missing (one the application neither embeds nor
+/// loads, and the system lacks); the generic families always resolve to
+/// some face or to the fallback.
+pub fn is_loaded(font: Font) -> bool {
+    let font::Family::Name(name) = font.family else {
+        return true;
+    };
+
+    let mut system = font_system().write().expect("Write font system");
+
+    system.raw().db().faces().any(|face| {
+        face.families
+            .iter()
+            .any(|(family, _)| family.eq_ignore_ascii_case(name))
+    })
+}
+
 /// A set of system fonts.
 pub struct FontSystem {
     raw: cosmic_text::FontSystem,

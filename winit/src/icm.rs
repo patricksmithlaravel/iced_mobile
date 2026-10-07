@@ -65,6 +65,9 @@ pub fn enabled() -> bool {
 
 /// Emits a `warning` event with a stable `code` (for example
 /// `font.default_missing`) and a `message` for people, if events are on.
+///
+/// The shell emits `font.default_missing` once its compositor exists, when
+/// the default font is a named family that no loaded face has.
 pub fn warning(code: &str, message: &str) {
     if !enabled() {
         return;
