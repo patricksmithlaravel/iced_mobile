@@ -12,7 +12,7 @@ use crate::error::{Check, Evidence, IcmError};
 use std::path::{Path, PathBuf};
 
 /// Bump when the generated files change, so old stamps are invalidated.
-const GENERATOR: &str = "icm-android-res/1";
+const GENERATOR: &str = "icm-android-res/2";
 
 /// Densities and their scale against mdpi.
 pub const DENSITIES: &[(&str, f64)] = &[
@@ -129,7 +129,10 @@ pub fn generate(gen_dir: &Path, inputs: &Inputs) -> Result<Generated, IcmError> 
         std::fs::write(&path, bytes).map_err(|error| io_error(&path, &error))
     };
 
-    write("values/themes.xml", manifest::themes_xml().as_bytes())?;
+    write(
+        "values/themes.xml",
+        manifest::themes_xml(background).as_bytes(),
+    )?;
     write(
         "values/colors.xml",
         manifest::colors_xml(&format!(

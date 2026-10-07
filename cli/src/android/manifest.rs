@@ -327,16 +327,46 @@ pub fn manifest(inputs: &Inputs<'_>) -> Result<String, IcmError> {
 }
 
 /// `values/themes.xml`: a theme without an action bar whose window
-/// background is `[app] background`, so the first frame does not flash.
-pub fn themes_xml() -> String {
+/// background is `[app] background` (`#RRGGBB` as RGB), so the first frame
+/// does not flash.
+///
+/// From targetSdk 35 the app draws behind transparent system bars, so the
+/// bars' icons sit on the app's own background. The parent is a dark
+/// theme, whose icons are white: on a light background they would vanish.
+/// The icons are dark when the background is light ([`is_light`]); the
+/// navigation bar's flag is API 27, and older devices ignore it.
+pub fn themes_xml(background: [u8; 3]) -> String {
+    let light = is_light(background);
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n");
     xml.push_str(&format!(
         "    <style name=\"{THEME}\" parent=\"@android:style/Theme.Material.NoActionBar\">\n"
     ));
     xml.push_str("        <item name=\"android:windowBackground\">@color/icm_background</item>\n");
     xml.push_str("        <item name=\"android:colorBackground\">@color/icm_background</item>\n");
+    xml.push_str(&format!(
+        "        <item name=\"android:windowLightStatusBar\">{light}</item>\n"
+    ));
+    xml.push_str(&format!(
+        "        <item name=\"android:windowLightNavigationBar\">{light}</item>\n"
+    ));
     xml.push_str("    </style>\n</resources>\n");
     xml
+}
+
+/// Whether dark icons read better than white ones on a colour: its WCAG
+/// contrast with black beats its contrast with white (relative luminance
+/// above about 0.18).
+pub fn is_light([r, g, b]: [u8; 3]) -> bool {
+    let linear = |channel: u8| {
+        let c = f64::from(channel) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    (luminance + 0.05) / 0.05 > 1.05 / (luminance + 0.05)
 }
 
 /// `values/colors.xml`.
@@ -479,8 +509,24 @@ mod tests {
 
     #[test]
     fn resources() {
-        assert!(themes_xml().contains("Theme.Material.NoActionBar"));
+        let white = themes_xml([0xFF, 0xFF, 0xFF]);
+        assert!(white.contains("Theme.Material.NoActionBar"));
+        assert!(white.contains("<item name=\"android:windowLightStatusBar\">true</item>"));
+        assert!(white.contains("<item name=\"android:windowLightNavigationBar\">true</item>"));
+        let black = themes_xml([0x00, 0x00, 0x00]);
+        assert!(black.contains("<item name=\"android:windowLightStatusBar\">false</item>"));
+        assert!(black.contains("<item name=\"android:windowLightNavigationBar\">false</item>"));
         assert!(colors_xml("#FFFFFF").contains(">#FFFFFF<"));
         assert!(adaptive_icon_xml().contains("@mipmap/ic_launcher_foreground"));
+    }
+
+    #[test]
+    fn light_backgrounds_get_dark_bar_icons() {
+        for light in [[0xFF; 3], [0xF2, 0xF2, 0xF7], [0xFF, 0xD6, 0x0A], [0x80; 3]] {
+            assert!(is_light(light), "{light:?}");
+        }
+        for dark in [[0x00; 3], [0x1C, 0x1C, 0x1E], [0x00, 0x33, 0x99], [0x60; 3]] {
+            assert!(!is_light(dark), "{dark:?}");
+        }
     }
 }
