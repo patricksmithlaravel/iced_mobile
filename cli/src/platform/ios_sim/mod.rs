@@ -1258,7 +1258,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    let _lock = ctx.lock_platform(PLATFORM)?;
+    let lock = ctx.lock_platform(PLATFORM)?;
     let target = choose_target(ctx, &project, &xcode, args)?;
     ctx.rep.set("device", target.json());
     // Boot while cargo builds.
@@ -1632,6 +1632,9 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     ctx.rep.next("icm stop ios-sim", "terminate the app");
 
     if args.attach {
+        // The run's work is done: `icm stop ios-sim` (which takes this
+        // lock) must work while --attach streams.
+        drop(lock);
         return follow(ctx, &session, &logs::Filter::default(), true);
     }
     Ok(())
