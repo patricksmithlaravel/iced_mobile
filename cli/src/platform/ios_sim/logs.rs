@@ -301,6 +301,26 @@ pub fn oslog_level(message_type: &str, subsystem: &str) -> &'static str {
     }
 }
 
+/// Apple frameworks log some routine messages in the app's process as
+/// errors: Metal's shader compiler reports a successful compile with
+/// warnings ("Warning: Compilation succeeded with: unused variable"), and
+/// CoreFoundation a data file it looked for and did not need. Rated by
+/// their text, so `--level warn` shows the app's problems. iced's own
+/// records keep their level.
+pub fn system_message_level(subsystem: &str, message: &str, level: &'static str) -> &'static str {
+    if subsystem == ICED_SUBSYSTEM || level != "error" {
+        return level;
+    }
+    let text = message.trim_start();
+    if text.contains("Compilation succeeded") || text.starts_with("fopen failed for data file") {
+        "debug"
+    } else if text.starts_with("Warning:") || text.starts_with("warning:") {
+        "warn"
+    } else {
+        level
+    }
+}
+
 /// A record for one `--style ndjson` line of `log stream`/`log show`; `None`
 /// for headers and non-log events.
 pub fn oslog_record(source: &str, line: &str) -> Option<Record> {
@@ -311,7 +331,11 @@ pub fn oslog_record(source: &str, line: &str) -> Option<Record> {
     let str_field = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("");
     let subsystem = str_field("subsystem");
     let category = str_field("category");
-    let level = oslog_level(str_field("messageType"), subsystem);
+    let level = system_message_level(
+        subsystem,
+        str_field("eventMessage"),
+        oslog_level(str_field("messageType"), subsystem),
+    );
 
     let mut record = Record::new(source, level, continued(str_field("eventMessage"))).at(value
         .get("timestamp")
@@ -471,8 +495,8 @@ pub fn source_group(source: &str) -> &'static str {
 pub struct Filter {
     /// The lowest level.
     pub level: Option<Level>,
-    /// `app`, `system`, `crash`, or `None` for all.
-    pub source: Option<&'static str>,
+    /// The source groups kept (`app`, `system`, `crash`); empty keeps all.
+    pub sources: &'static [&'static str],
     /// Alternatives separated by `|`, each a case-insensitive substring.
     pub grep: Option<String>,
     /// Records with a time before this are dropped.
@@ -489,9 +513,7 @@ impl Filter {
         {
             return false;
         }
-        if let Some(group) = self.source
-            && source_group(&record.source) != group
-        {
+        if !self.sources.is_empty() && !self.sources.contains(&source_group(&record.source)) {
             return false;
         }
         if let (Some(since), Some(ms)) = (self.since_unix_ms, record.unix_ms)
@@ -600,6 +622,31 @@ mod tests {
         assert_eq!(oslog_level("Info", "iced"), "debug");
         assert_eq!(oslog_level("Debug", "iced"), "trace");
         assert_eq!(oslog_level("Fault", "iced"), "error");
+        assert_eq!(
+            system_message_level(
+                "com.apple.Metal",
+                "Warning: Compilation succeeded with: \n\nprogram_source:4:8: warning: unused variable 'v'",
+                "error"
+            ),
+            "debug"
+        );
+        assert_eq!(
+            system_message_level(
+                "com.apple.CoreFoundation",
+                "Warning: no user defaults",
+                "error"
+            ),
+            "warn"
+        );
+        assert_eq!(
+            system_message_level("com.apple.UIKit", "scene creation failed", "error"),
+            "error"
+        );
+        // iced's records keep their level, whatever they say.
+        assert_eq!(
+            system_message_level("iced", "Warning: Compilation succeeded", "error"),
+            "error"
+        );
     }
 
     #[test]
@@ -629,7 +676,7 @@ mod tests {
         assert_eq!(grep.apply(records.clone()).len(), 2);
 
         let crash_only = Filter {
-            source: Some("crash"),
+            sources: &["crash"],
             ..Filter::default()
         };
         assert!(crash_only.apply(records.clone()).is_empty());

@@ -584,8 +584,10 @@ pub struct LogsArgs {
     #[arg(long, value_enum)]
     pub level: Option<Level>,
     /// Which sources
-    #[arg(long, value_enum, default_value_t = LogSource::All)]
-    pub source: LogSource,
+    /// (default: `all`; on ios-sim `app` and `crash`, because its system
+    /// log is mostly other processes' errors that mention the app)
+    #[arg(long, value_enum)]
+    pub source: Option<LogSource>,
     /// Only records whose tag or message contains one of these
     /// `|`-separated substrings, ignoring case (not a regular expression):
     /// `--grep 'panic|error'`

@@ -1651,7 +1651,10 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     }
 
     let (records, mut tails) = read_records(&session);
-    let wanted = matches!(args.source, LogSource::App | LogSource::All);
+    let wanted = matches!(
+        args.source.unwrap_or(LogSource::All),
+        LogSource::App | LogSource::All
+    );
     let kept: Vec<&Record> = if wanted {
         records
             .iter()

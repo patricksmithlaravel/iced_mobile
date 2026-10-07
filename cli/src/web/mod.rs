@@ -1254,7 +1254,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     let filter = console::Filter {
         since_ms: console::since(&args.since, console::now_ms()).map_err(bad_args)?,
         level: args.level,
-        source: Some(args.source),
+        source: Some(args.source.unwrap_or(crate::cli::LogSource::All)),
         grep: args.grep.clone(),
     };
     let all = console::read(&path);

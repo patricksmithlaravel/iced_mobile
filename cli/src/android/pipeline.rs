@@ -1386,7 +1386,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     }
     let grep = crate::grep::Grep::new(args.grep.as_deref());
     let wanted = |source: &str, record: &Record| {
-        source_matches(args.source, source)
+        source_matches(args.source.unwrap_or(LogSource::All), source)
             && logcat::at_least(record, args.level)
             && grep
                 .as_ref()

@@ -9,6 +9,8 @@ test it ONLY through `icm`, and read the last JSON line of every command: it is 
    frame, takes a screenshot and returns while the app keeps running. Then OPEN `artifacts.preview`
    and look at it. Every run, every time.
 3. `icm logs <platform> --level warn --json` when anything looks wrong (it re-reads the live logs).
+   Trust the `app` and `crash` records: the app's own output, panics and crash reports. On ios-sim,
+   `--source system` adds the system log, mostly other processes' errors that merely mention the app.
 4. `icm test --json -q`: unit tests and `tests/flows/*.ice` in a headless renderer.
 5. `icm shot --headless --all-viewports --json -q`: the layout at phone and desktop sizes, no device.
 6. `icm ui --headless tree --json`: the widget tree with bounds, for writing `.ice` flows.

@@ -1750,11 +1750,15 @@ fn filter_for(args: &LogsArgs) -> Result<logs::Filter> {
     };
     Ok(logs::Filter {
         level: args.level,
-        source: match args.source {
-            LogSource::App => Some("app"),
-            LogSource::System => Some("system"),
-            LogSource::Crash => Some("crash"),
-            LogSource::All => None,
+        sources: match args.source {
+            Some(LogSource::App) => &["app"],
+            Some(LogSource::System) => &["system"],
+            Some(LogSource::Crash) => &["crash"],
+            Some(LogSource::All) => &[],
+            // The system log is mostly other processes' errors about the
+            // app (runningboard, FrontBoard, preferences): noise unless
+            // asked for.
+            None => &["app", "crash"],
         },
         grep: args.grep.clone(),
         since_unix_ms,
@@ -1832,7 +1836,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
         return follow(ctx, &session, &filter, false).map(|_| ());
     }
 
-    let wants_system = matches!(args.source, LogSource::System | LogSource::All);
+    let wants_system = matches!(args.source, Some(LogSource::System | LogSource::All));
     let xcode = if wants_system {
         crate::tools::xcode(&ctx.env).ok()
     } else {
