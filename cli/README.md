@@ -185,7 +185,7 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 | `ICM_TODAY` | `YYYY-MM-DD`: the day the store policy table is read for (icm's tests) |
 | `ICM_KEYCHAIN` | the keychain Apple signing (iOS and macOS) searches instead of the user's search list (overrides host.toml `signing_keychain`) |
 | `ICM_PROVISIONING_PROFILES` | `:`-separated directories searched for provisioning profiles instead of Xcode's |
-| `ICM_CODESIGN_TIMEOUT` | seconds before a codesign that waits for a keychain dialog is stopped (default 60) |
+| `ICM_CODESIGN_TIMEOUT` | seconds before an iOS codesign that waits for a keychain dialog is stopped (default 60; macOS releases allow 120) |
 | `ICM_HOST_OS` | `macos`, `windows` or `linux`: the host the desktop release pipelines assume (icm's tests) |
 | `ICM_LINUX_LIB_DIRS` | `:`-separated directories the AppImage's bundled libraries are copied from (icm's tests; default: the host's library directories) |
 | `ICM_RUN_ID`, `ICM_RUN_DIR`, `ICM_RUN_ROOT`, `ICM_DETACHED` | internal: a detached child's run |
