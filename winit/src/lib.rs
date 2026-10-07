@@ -39,6 +39,9 @@ pub use clipboard::Clipboard;
 pub use error::Error;
 pub use proxy::Proxy;
 
+mod safe_area;
+pub use safe_area::{SafeArea, safe_area};
+
 use crate::core::mouse;
 use crate::core::renderer;
 use crate::core::theme;
@@ -166,6 +169,8 @@ where
                 or not at all (`cargo tree -d` lists both copies).",
             );
 
+        safe_area::set_android_app(app.clone());
+
         let _ = builder.with_android_app(app);
     }
 
@@ -238,6 +243,11 @@ where
     if let Some(stream) = runtime::task::into_stream(task) {
         runtime.run(stream);
     }
+
+    // Before the subscriptions start: `safe_area()` replays the latest safe
+    // area, which must not be the last application's (Android runs one per
+    // Activity in the same process).
+    safe_area::reset();
 
     runtime.track(subscription::into_recipes(
         runtime.enter(|| program.subscription().map(Action::Output)),
@@ -880,6 +890,7 @@ async fn run_instance<P>(
 
     let mut window_manager = WindowManager::new();
     let mut is_window_opening = !is_daemon;
+    let mut safe_area = safe_area::Shell::new();
 
     let mut compositor = None;
     let mut events = Vec::new();
@@ -1103,6 +1114,8 @@ async fn run_instance<P>(
                     }),
                 ));
 
+                safe_area.refresh(window);
+
                 if clipboard.window_id().is_none() {
                     clipboard = Clipboard::connect(window.raw.clone());
                 }
@@ -1141,6 +1154,9 @@ async fn run_instance<P>(
                                 Control::ChangeFlow(ControlFlow::Wait),
                             );
                         }
+
+                        safe_area
+                            .poll(&mut window_manager, &mut control_sender);
                     }
                     event::Event::UserEvent(action) => {
                         run_action(
@@ -1532,6 +1548,14 @@ async fn run_instance<P>(
                                 &mut system_theme,
                             );
                         } else {
+                            let resized = matches!(
+                                window_event,
+                                winit::event::WindowEvent::Resized(_)
+                                    | winit::event::WindowEvent::ScaleFactorChanged {
+                                        ..
+                                    }
+                            );
+
                             window.state.update(
                                 &program,
                                 &window.raw,
@@ -1545,6 +1569,10 @@ async fn run_instance<P>(
                             ) {
                                 events.push((id, event));
                             }
+
+                            if resized {
+                                safe_area.refresh(window);
+                            }
                         }
                     }
                     event::Event::AboutToWait => {
@@ -1552,6 +1580,10 @@ async fn run_instance<P>(
                             proxy.free_slots(actions);
                             actions = 0;
                         }
+
+                        // Before the idle check, which would skip it.
+                        safe_area
+                            .poll(&mut window_manager, &mut control_sender);
 
                         if events.is_empty()
                             && messages.is_empty()
@@ -1730,6 +1762,8 @@ async fn run_instance<P>(
                                     ));
 
                                 window.raw.request_redraw();
+
+                                safe_area.refresh(window);
                             }
                         }
                     }

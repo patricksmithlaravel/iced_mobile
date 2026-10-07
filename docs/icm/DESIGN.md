@@ -901,7 +901,7 @@ Input on a device: `icm input android tap X Y`, `icm input web tap X Y`, `icm in
 - No signing assets? `icm release <target> --sign none` checks everything else.
 
 ## Known limitations of iced_mobile {{framework_tag}}
-{{docs/agents/limitations.md of that tag: safe area (pad the root); clipboard stub on mobile; Android IME
+{{docs/agents/limitations.md of that tag: safe area only from a running app; clipboard stub on mobile; Android IME
 is key events only (no composition, accents and CJK input unreliable); a drag starting on a button does not
 scroll; text_editor and rich-text links ignore touch; dark-mode switches keep Android's bar icons; Lifecycle::Suspended
 means "inactive" on iOS and "window lost" on Android, so don't lock on it alone; one window on Android;
@@ -1591,9 +1591,10 @@ Each JSON object starts with `"v":1,"kind":"<kind>"`, for example `ICM_EVENT {"v
 | `app_state` | `state` (`foreground`, `active`, `inactive`, `background`, `memory_warning`), what `iced::mobile::lifecycle()` delivers to `update` |
 | `panic` | `message`, `location`, `thread` |
 | `warning` | `code` (e.g. `font.default_missing`, `compositor.fallback`) |
+| `safe_area` | `insets` (`[top, right, bottom, left]`), `keyboard`, in logical pixels |
 | `exit` | `code` |
 
-As built: `ready` also carries `window.physical`, `adapter` and `api` (`Metal`, `Vulkan`, `BrowserWebGpu` or `tiny-skia`), for example `{"v":1,"kind":"ready","ms":652,"window":{"size":[1024,768],"physical":[2048,1536],"scale":2},"backend":"wgpu","adapter":"Apple M4 Max","api":"Metal"}`. `start` has `pid: null` on the web and `bridge: null` until phase 6. The shell sends `warning` `font.default_missing` once its compositor exists, when the default font is a named family that no face in the font system has (not embedded, not in `Settings::fonts`, not a system font; `iced_graphics::text::is_loaded`); `compositor.fallback` is not sent yet (the `ready` event's `backend` shows which renderer runs). `exit` is never sent on iOS or the web, where winit's run does not return. On Android, where the process can outlive the shell, `exit` also carries `destroyed` (`true` when Android destroyed the Activity), and each new Activity of the process starts the shell again: its own `start` (same `pid`) and `ready`. A panic inside winit's callbacks on macOS cascades into more panics and an abort (134), so several `panic` events can arrive: report the first. On the web, the first `ready` gives the canvas attribute size, which can differ from the page's. On Android, the sysprop `debug.iced.backend` chooses the renderer when `ICED_BACKEND` is unset.
+As built: `ready` also carries `window.physical`, `adapter` and `api` (`Metal`, `Vulkan`, `BrowserWebGpu` or `tiny-skia`), for example `{"v":1,"kind":"ready","ms":652,"window":{"size":[1024,768],"physical":[2048,1536],"scale":2},"backend":"wgpu","adapter":"Apple M4 Max","api":"Metal"}`. `start` has `pid: null` on the web and `bridge: null` until phase 6. The shell sends `warning` `font.default_missing` once its compositor exists, when the default font is a named family that no face in the font system has (not embedded, not in `Settings::fonts`, not a system font; `iced_graphics::text::is_loaded`); `compositor.fallback` is not sent yet (the `ready` event's `backend` shows which renderer runs). `exit` is never sent on iOS or the web, where winit's run does not return. On Android, where the process can outlive the shell, `exit` also carries `destroyed` (`true` when Android destroyed the Activity), and each new Activity of the process starts the shell again: its own `start` (same `pid`) and `ready`. A panic inside winit's callbacks on macOS cascades into more panics and an abort (134), so several `panic` events can arrive: report the first. On the web, the first `ready` gives the canvas attribute size, which can differ from the page's. On Android, the sysprop `debug.iced.backend` chooses the renderer when `ICED_BACKEND` is unset. The shell sends `safe_area` when its first window opens (zeros on the desktop and the web) and then whenever the safe area changes on Android and iOS (rotation, a display cutout), with the values `iced::mobile::safe_area()` delivers, for example `{"v":1,"kind":"safe_area","insets":[62,0,34,0],"keyboard":0}` on an iPhone 17.
 
 If no event arrives, icm uses platform probes and reports `ready.source = "probe"`. This covers today's Tawara pin and release builds that have not opted in. If no ready signal arrives while the app is alive, the result is `run.not_ready` (10).
 
@@ -1681,7 +1682,7 @@ Hooks run with stdin closed and a 300 s timeout. Output lines of the form `CHECK
 | F3 | `ICM_EVENT` protocol v1 (§13.3); Android reads sysprops `debug.icm.events` and `debug.iced.backend` | to do | 0 |
 | F4 | `iced_test::agent::main` harness (§13.2) | to do (~200 lines on the public iced_test API) | 0 |
 | F5 | `iced_test` touch helpers (`Simulator::tap` as touch, `.ice tap`); template adds `tests/touch.rs` | to do | 6 |
-| F6 | `iced::mobile::safe_area` (fixed fallback insets first, then real ones); new types in `iced::mobile`, not new enum variants (review §6.8) | to do | 6 |
+| F6 | `iced::mobile::safe_area` (fixed fallback insets first, then real ones); new types in `iced::mobile`, not new enum variants (review §6.8) | **done**: `iced::mobile::safe_area() -> Subscription<SafeArea>` (insets on Android and iOS, zero elsewhere, nothing headless) and the `safe_area` event. The template keeps its fixed padding, so that headless layouts match the phone's until the harness can give each viewport its insets | 6 |
 | F7 | `agent` feature: bridge client, synthetic-event queue, tree operation, marker string. Phase 0 adds an **empty** `agent = []` feature to iced so the template's `icm-agent` feature resolves from the first tag | to do | 0 (stub), 6 |
 | F8 | Loud failure messages (RecreationAttempt text, iOS exit warning); partly done in `c6b2ebe16` | ongoing | — |
 

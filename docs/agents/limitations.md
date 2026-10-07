@@ -7,12 +7,17 @@ this file in the commit that fixes or finds a limitation.
 
 <!-- icm: AGENTS.md embeds everything below this line -->
 
-- **No safe-area insets** (iOS, Android). The app draws under the status
-  bar, the notch or Dynamic Island and the home indicator on iOS, and under
-  the status and navigation bars on Android, which draws edge to edge from
-  targetSdk 35. Pad the root view (the template's `safe_area()` in
-  `src/lib.rs` pads 64 top and 48 bottom on phones), and keep controls away
-  from the corners.
+- **The safe area comes from a running app only** (iOS, Android). The app
+  draws under the status bar, the notch or Dynamic Island and the home
+  indicator or navigation bar (Android draws edge to edge from targetSdk
+  35). `iced::mobile::safe_area()` reports what covers each edge; pad the
+  root with `SafeArea::padding`. Headless runs (`.ice` flows, `icm shot
+  --headless`, `icm ui --headless`, unit tests) report nothing, so keep a
+  padding of your own until a value arrives. The template pads phones a
+  fixed 64 top and 48 bottom (`safe_area()` in `src/lib.rs`), which keeps
+  its headless layouts the same as the phone's but does not follow the
+  device. The desktop and the web report zero, a phone browser's notch
+  included. Keep controls away from the rounded corners.
 - **No clipboard on phones.** Reads return nothing and writes only log a
   warning. There is no long-press edit menu, and the Cmd/Ctrl shortcuts of
   text fields never fire. Do not build a feature on copy and paste there.

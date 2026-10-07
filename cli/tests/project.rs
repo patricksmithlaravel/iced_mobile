@@ -280,7 +280,7 @@ fn new_creates_an_app_pinned_to_the_framework() {
         "{agents}"
     );
     assert!(!agents.contains("{{"));
-    assert!(agents.contains("No safe-area insets"));
+    assert!(agents.contains("One window on Android"));
 
     // A non-empty directory needs --force.
     let busy = sandbox.json(&["new", "notes", "--framework", "tag:v1"]);

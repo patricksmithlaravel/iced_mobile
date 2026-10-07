@@ -201,6 +201,81 @@
 //! Without it, iced prints this block to stderr and the log at launch; in a
 //! debug build linked with the iOS 27 SDK or later it also panics.
 //!
+//! # Safe area
+//!
+//! A phone application fills the screen: it draws under the status bar, the
+//! notch or Dynamic Island, and the home indicator or navigation bar.
+//! [`safe_area()`] reports what covers each edge, as a [`SafeArea`] in the
+//! same logical pixels as the layout, and [`SafeArea::padding`] turns it
+//! into the padding of the root container:
+//!
+//! ```no_run
+//! use iced::mobile::{self, SafeArea};
+//! use iced::widget::{container, text};
+//! use iced::{Element, Fill, Subscription};
+//!
+//! #[derive(Default)]
+//! struct App {
+//!     safe_area: SafeArea,
+//! }
+//!
+//! #[derive(Debug, Clone)]
+//! enum Message {
+//!     SafeAreaChanged(SafeArea),
+//! }
+//!
+//! impl App {
+//!     fn update(&mut self, message: Message) {
+//!         match message {
+//!             Message::SafeAreaChanged(safe_area) => self.safe_area = safe_area,
+//!         }
+//!     }
+//!
+//!     fn view(&self) -> Element<'_, Message> {
+//!         // 16 around the content, beside what the system covers.
+//!         container(text("Hello"))
+//!             .padding(self.safe_area.padding(16))
+//!             .width(Fill)
+//!             .height(Fill)
+//!             .into()
+//!     }
+//!
+//!     fn subscription(&self) -> Subscription<Message> {
+//!         mobile::safe_area().map(Message::SafeAreaChanged)
+//!     }
+//! }
+//!
+//! pub fn run() -> iced::Result {
+//!     iced::application(App::default, App::update, App::view)
+//!         .subscription(App::subscription)
+//!         .run()
+//! }
+//! ```
+//!
+//! - **iOS:** the window's safe-area insets (the status bar, the Dynamic
+//!   Island or notch, the home indicator).
+//! - **Android:** the system bars and the display cutout, from the root
+//!   view's `WindowInsets` (read through JNI). On Android 15 and later an
+//!   app that targets SDK 35 or later is drawn edge to edge, under both
+//!   bars.
+//! - **Desktop and web:** [`SafeArea::ZERO`], once. A mobile browser's
+//!   notch is not reported.
+//!
+//! The first value arrives when the window opens, then one per change:
+//! rotation, a new display cutout. On Android a change can take a few
+//! tenths of a second to settle: the shell reads again while the system
+//! bars settle. On iOS the window can report zero insets for a frame, under
+//! the launch screen, before it is in its scene. On phones every window
+//! fills the screen, so they share one safe area.
+//!
+//! [`SafeArea::keyboard`] is always 0 for now: the keyboard's height is not
+//! reported yet, and the keyboard covers the lower half of the screen.
+//!
+//! Headless runs (`iced_test`, and `icm`'s `.ice` flows, `shot --headless`
+//! and `ui --headless`) have no shell, and [`safe_area()`] reports nothing
+//! there: keep a padding of your own until a value arrives, or set one in a
+//! unit test with [`SafeArea::new`] and [`SafeArea::with_keyboard`].
+//!
 //! # Logs
 //!
 //! With [`init_logger`] (which [`android_main!`](crate::android_main) calls
@@ -514,8 +589,7 @@
 //!   fall back to Hiragino Sans, which lacks many simplified Chinese
 //!   characters (这, 们, ...); those show the missing-glyph box. Embed a font
 //!   for Chinese text.
-//! - **Not yet available on mobile:** safe-area insets (pad the root view)
-//!   and the clipboard.
+//! - **Not yet available on mobile:** the clipboard.
 //! - **Dark mode and the system bars.** On Android a dark-mode switch while
 //!   the app runs leaves the bars' icons as the launch theme had them, and
 //!   on iOS the status bar follows the system's mode even when the app
@@ -541,6 +615,8 @@ pub use crate::shell::set_android_app;
 #[cfg(target_os = "android")]
 #[cfg_attr(docsrs, doc(cfg(target_os = "android")))]
 pub use crate::shell::activity_destroyed;
+
+pub use crate::shell::{SafeArea, safe_area};
 
 /// The Android activity handle that android-activity gives `android_main`:
 /// winit's `platform::android::activity::AndroidApp`, re-exported.

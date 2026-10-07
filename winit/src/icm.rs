@@ -34,6 +34,7 @@
 //! | `app_state` | `state` (`foreground`, `active`, `inactive`, `background`, `memory_warning`) | the application's state changed, as [`lifecycle()`](crate::lifecycle()) delivers it to `update`; see [`Lifecycle`](crate::Lifecycle) |
 //! | `panic` | `message`, `location` (`file:line:column` or `null`), `thread` | a thread panics, once [`install_panic_hook`] ran |
 //! | `warning` | `code`, `message` | something degraded; see [`warning`] |
+//! | `safe_area` | `insets` (`[top, right, bottom, left]`), `keyboard` (the on-screen keyboard's height above the bottom edge, 0 while hidden), in logical pixels | the shell read a new [`SafeArea`](crate::SafeArea): when the first window opens (zeros on the desktop and the web), then on every change on Android and iOS |
 //! | `exit` | `code` (0, or 1 when the shell stopped with an error), `destroyed` (`true` when Android destroyed the Activity) | the shell stopped; iOS and the web never send it |
 //!
 //! For example:
@@ -56,8 +57,8 @@
 //!
 //! Fields may be added to a kind, and kinds may be added, within version 1.
 //! A reader must ignore what it does not know.
-use crate::core::Size;
 use crate::core::time::Instant;
+use crate::core::{Padding, Size};
 use crate::graphics::compositor;
 
 use std::fmt::Write as _;
@@ -280,6 +281,39 @@ pub(crate) fn exit(code: i32, destroyed: bool) {
             .number("code", code)
             .boolean("destroyed", destroyed),
     );
+}
+
+/// Emits `safe_area`: what covers the window's edges, in logical pixels.
+pub(crate) fn safe_area(insets: Padding, keyboard: f32) {
+    if !enabled() {
+        return;
+    }
+
+    emit(safe_area_event(insets, keyboard));
+}
+
+fn safe_area_event(insets: Padding, keyboard: f32) -> Event {
+    let mut edges = String::from("[");
+
+    for (i, inset) in [insets.top, insets.right, insets.bottom, insets.left]
+        .into_iter()
+        .enumerate()
+    {
+        if i > 0 {
+            edges.push(',');
+        }
+
+        push_float(&mut edges, inset);
+    }
+
+    edges.push(']');
+
+    let mut height = String::new();
+    push_float(&mut height, keyboard);
+
+    Event::new("safe_area")
+        .raw("insets", &edges)
+        .raw("keyboard", &height)
 }
 
 /// The name `start` gives the platform.
@@ -555,6 +589,25 @@ mod tests {
         push_float(&mut json, f32::NAN);
 
         assert_eq!(json, "402 2.625 null");
+    }
+
+    #[test]
+    fn safe_area_lists_the_edges_from_the_top_clockwise() {
+        let event = safe_area_event(
+            Padding {
+                top: 62.0,
+                right: 0.0,
+                bottom: 34.0,
+                left: 0.5,
+            },
+            336.0,
+        )
+        .finish();
+
+        assert_eq!(
+            event,
+            "{\"v\":1,\"kind\":\"safe_area\",\"insets\":[62,0,34,0.5],\"keyboard\":336}"
+        );
     }
 
     #[test]

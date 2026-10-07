@@ -949,7 +949,7 @@ mod tests {
             "# AGENTS.md — My Notes (com.example.my_notes) · iced_mobile v0.14.1-mobile.3 · icm {}",
             crate::buildinfo::VERSION
         )));
-        assert!(agents.contains("No safe-area insets"));
+        assert!(agents.contains("One window on Android"));
         assert!(!agents.contains("{{"));
     }
 
