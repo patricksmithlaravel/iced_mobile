@@ -665,12 +665,10 @@ fn app_env(values: &[String]) -> Result<Vec<(String, String)>> {
 /// Ends what the previous session left running: the collector, and the app
 /// when it ran on another simulator.
 fn end_previous(ctx: &Ctx, xcode: &Xcode, sessions_dir: &Path, udid: &str) {
-    let Some(previous) = Session::read(sessions_dir) else {
+    let Some(mut previous) = Session::read(sessions_dir) else {
         return;
     };
-    if let Some(pid) = previous.collector_pid {
-        crate::signals::kill_group(pid, libc::SIGTERM);
-    }
+    stop_collector(&mut previous);
     if previous.device.udid != udid && previous.app_alive() {
         let _ = ctx.probe(
             &simctl(xcode)
@@ -1639,10 +1637,22 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
+/// Stops the session's `log stream` collector (its process group), but
+/// only while the recorded pid still runs that collector: once it has died
+/// (the simulator shut down, a reboot) the pid may belong to anything.
 fn stop_collector(session: &mut Session) {
-    if let Some(pid) = session.collector_pid.take() {
+    if let Some(pid) = session.collector_pid.take()
+        && crate::sessions::command_line(pid)
+            .is_some_and(|line| is_collector(&line, &session.device.udid))
+    {
         crate::signals::kill_group(pid, libc::SIGTERM);
     }
+}
+
+/// Whether a command line is the collector [`start_collector`] starts for
+/// the simulator `udid` (`… simctl spawn <udid> log stream …`).
+fn is_collector(command_line: &str, udid: &str) -> bool {
+    command_line.contains(&format!("spawn {udid} log stream"))
 }
 
 // ---- logs ----------------------------------------------------------------------------------
@@ -1978,6 +1988,7 @@ pub fn stop_session(ctx: &mut Ctx, shutdown: bool) -> Result<Option<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::CommandExt;
 
     #[test]
     fn env_values_parse() {
@@ -1987,6 +1998,47 @@ mod tests {
         );
         assert!(app_env(&["nope".into()]).is_err());
         assert!(app_env(&["=1".into()]).is_err());
+    }
+
+    #[test]
+    fn a_reused_collector_pid_is_never_signalled() {
+        let udid = "00000000-AAAA-BBBB-CCCC-000000000000";
+        assert!(is_collector(
+            &format!(
+                "/usr/bin/xcrun simctl spawn {udid} log stream --level debug --style ndjson --predicate x"
+            ),
+            udid
+        ));
+        assert!(!is_collector("/bin/zsh -l", udid));
+        assert!(!is_collector(
+            "xcrun simctl spawn OTHER log stream --level debug",
+            udid
+        ));
+
+        // A process group leader that is not the collector survives.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut session: Session = serde_json::from_value(json!({
+            "schema": session::SCHEMA, "platform": "ios-sim", "run": "r", "run_dir": null,
+            "state": "running",
+            "device": {"udid": udid, "name": "icm-x", "os": "27.0", "type": "iPhone 17",
+                       "managed": true, "fresh": false, "data_path": null},
+            "app_id": "com.x", "exe": "app", "bundle": "/b/App.app", "pid": null,
+            "launch_unix_ms": 1,
+            "logs": {"stdout": "/o", "stderr": "/e", "oslog": "/l"},
+            "collector_pid": null
+        }))
+        .unwrap();
+        session.collector_pid = Some(child.id() as i32);
+        stop_collector(&mut session);
+        assert_eq!(session.collector_pid, None);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(child.try_wait().unwrap().is_none(), "sleep was signalled");
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]
