@@ -151,7 +151,13 @@ impl Ctx {
         let wait = self.global.wait_lock;
         let run = self.rep.run_id();
         let dir = self.project()?.locks_dir();
-        locks::acquire(&dir, platform, wait, &run)
+        locks::acquire(&dir, platform, wait, &run).inspect_err(|error| {
+            // A detached holder: its `icm wait` is the next step.
+            for command in &error.fix.commands {
+                self.rep
+                    .next(command.clone(), "wait for the run that holds the lock");
+            }
+        })
     }
 
     fn bounded(&self, cmd: &Cmd) -> (Cmd, bool) {
