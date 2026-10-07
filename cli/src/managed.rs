@@ -1,5 +1,6 @@
 //! The devices icm manages: their names, where Android keeps its per-user
-//! files, and which system image the managed emulator uses.
+//! files (AVDs), the debug keystore, and which system image the managed
+//! emulator uses.
 //!
 //! Every simulator and AVD icm creates has a name starting with `icm-`, and
 //! icm never modifies, boots or shuts down a device it did not create
@@ -105,9 +106,12 @@ pub fn avd_exists(env: &Env, name: &str) -> bool {
     avd_home(env).is_some_and(|home| home.join(format!("{name}.ini")).is_file())
 }
 
-/// The debug keystore every icm debug APK is signed with.
-pub fn debug_keystore(env: &Env) -> Option<PathBuf> {
-    android_user_home(env).map(|dir| dir.join("debug.keystore"))
+/// The debug keystore every icm debug APK is signed with:
+/// `<host.toml dir>/android/debug.keystore`, the one the Android build
+/// signs with ([`crate::android::debug_keystore`]). Android Studio's
+/// `~/.android/debug.keystore` is never touched.
+pub fn debug_keystore() -> PathBuf {
+    crate::android::debug_keystore()
 }
 
 #[cfg(test)]
@@ -143,10 +147,6 @@ mod tests {
         let env = Env::from_pairs(&[], Some(home));
         assert_eq!(android_user_home(&env), Some(home.join(".android")));
         assert_eq!(avd_home(&env), Some(home.join(".android/avd")));
-        assert_eq!(
-            debug_keystore(&env),
-            Some(home.join(".android/debug.keystore"))
-        );
 
         let env = Env::from_pairs(
             &[("ANDROID_USER_HOME", "/u"), ("ANDROID_AVD_HOME", "/avds")],

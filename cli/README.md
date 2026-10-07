@@ -129,7 +129,7 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 | `ICM_HOST_CONFIG` | the host.toml to read |
 | `ICM_TOOL_<NAME>` | the path of an external tool |
 | `ICM_CHROME` | the Chrome executable |
-| `ANDROID_USER_HOME`, `ANDROID_AVD_HOME` | where the debug keystore and AVDs live (default `~/.android`, `~/.android/avd`); tests point them at a temp dir |
+| `ANDROID_USER_HOME`, `ANDROID_AVD_HOME` | where AVDs live (default `~/.android`, `~/.android/avd`); tests point them at a temp dir. The debug keystore sits next to host.toml (`android/debug.keystore`) |
 | `ICED_TEST_BACKEND` | the backend the app's harness draws with (default `tiny-skia`) |
 | `ICM_BUILD_FRAMEWORK` | at build time: force the default framework pin (`tag:`/`rev:`/`path:`) |
 | `ICM_RUN_ID`, `ICM_RUN_DIR`, `ICM_RUN_ROOT`, `ICM_DETACHED` | internal: a detached child's run |

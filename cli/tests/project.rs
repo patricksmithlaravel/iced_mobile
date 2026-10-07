@@ -631,7 +631,10 @@ fn doctor_android_reports_and_fixes_with_fake_tools() {
     assert_eq!(local["exit"], 4, "{local}");
     assert_eq!(local["errors"][0]["id"], "env.android_package_missing");
     assert_eq!(local["errors"][0]["fix"]["by"], "doctor-yes");
-    assert!(android_home.join("debug.keystore").is_file());
+    // The keystore the Android build signs with, next to host.toml;
+    // ~/.android (here the sandbox's android-home) keeps no keystore.
+    assert!(sandbox.path("android/debug.keystore").is_file());
+    assert!(!android_home.join("debug.keystore").exists());
     assert!(android_home.join("avd/icm-api36.ini").is_file());
     let log = tool_log(&sandbox);
     assert!(!log.contains("sdkmanager"), "{log}");

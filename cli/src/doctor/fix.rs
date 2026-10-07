@@ -304,32 +304,42 @@ impl Fix {
                     (None, Err(_)) if display => PathBuf::from("keytool"),
                     (None, Err(error)) => return Err(error),
                 };
-                vec![step(
-                    "doctor.keytool",
-                    Cmd::new(keytool)
-                        .args(["-genkeypair", "-noprompt", "-keystore"])
-                        .arg(path)
-                        .args([
-                            "-storetype",
-                            "PKCS12",
-                            "-storepass",
-                            "android",
-                            "-alias",
-                            "androiddebugkey",
-                            "-keypass",
-                            "android",
-                            "-keyalg",
-                            "RSA",
-                            "-keysize",
-                            "2048",
-                            "-validity",
-                            "10000",
-                            "-dname",
-                            "CN=Android Debug,O=Android,C=US",
-                        ])
-                        .envs(java()?)
-                        .timeout(Duration::from_secs(120)),
-                )]
+                let dir = path.parent().unwrap_or(Path::new("."));
+                vec![
+                    step(
+                        "doctor.keystore_dir",
+                        Cmd::new("/bin/mkdir")
+                            .arg("-p")
+                            .arg(dir)
+                            .timeout(Duration::from_secs(30)),
+                    ),
+                    step(
+                        "doctor.keytool",
+                        Cmd::new(keytool)
+                            .args(["-genkeypair", "-noprompt", "-keystore"])
+                            .arg(path)
+                            .args([
+                                "-storetype",
+                                "PKCS12",
+                                "-storepass",
+                                "android",
+                                "-alias",
+                                "androiddebugkey",
+                                "-keypass",
+                                "android",
+                                "-keyalg",
+                                "RSA",
+                                "-keysize",
+                                "2048",
+                                "-validity",
+                                "10000",
+                                "-dname",
+                                "CN=Android Debug,O=Android,C=US",
+                            ])
+                            .envs(java()?)
+                            .timeout(Duration::from_secs(120)),
+                    ),
+                ]
             }
             Fix::AvdCreate {
                 avdmanager,

@@ -254,7 +254,8 @@ pub(super) fn gather(probe: &Probe<'_>) -> Vec<Requirement> {
 
     // The debug keystore every icm debug APK is signed with, so
     // `adb install -r` keeps working across runs.
-    if let Some(keystore) = managed::debug_keystore(probe.env) {
+    {
+        let keystore = managed::debug_keystore();
         if keystore.is_file() {
             out.push(Requirement::new(
                 "android.debug_keystore",
