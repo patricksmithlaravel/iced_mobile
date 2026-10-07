@@ -1328,6 +1328,29 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     Ok(())
 }
 
+/// Whether the page's app runs, for `icm ps` (the record's pid is the
+/// session host, which outlives a panicked app).
+pub fn app_state(project: &Project) -> crate::session::AppState {
+    use crate::session::AppState;
+    let Ok(session) = Session::find(&project.sessions_dir()) else {
+        return AppState::Unknown;
+    };
+    let Ok(status) = session.status(false) else {
+        return AppState::Unknown;
+    };
+    if status["panics"].as_array().is_some_and(|p| !p.is_empty()) {
+        AppState::Gone("the app panicked".to_string())
+    } else if status["crashed"].as_bool() == Some(true) {
+        AppState::Gone("the page's renderer crashed".to_string())
+    } else if status["chrome"]["alive"].as_bool() == Some(false) {
+        AppState::Gone("headless Chrome exited".to_string())
+    } else if !status["ready"].is_null() {
+        AppState::Running
+    } else {
+        AppState::Unknown
+    }
+}
+
 /// Stops this project's web session for `icm stop`; returns a JSON entry
 /// for the result, or `None` when none was running.
 pub fn stop(project: &Project) -> Option<Value> {

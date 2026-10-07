@@ -1719,6 +1719,38 @@ pub fn stop_session(
     Ok(stopped)
 }
 
+/// Whether this project's app runs on its session's device, for `icm ps`
+/// (an Android record has no host process to probe).
+pub fn app_state(ctx: &mut Ctx, project: &Project) -> crate::session::AppState {
+    use crate::session::AppState;
+    let Some(session) = session::read(project) else {
+        return AppState::Unknown;
+    };
+    let Ok(host) = ctx.host().cloned() else {
+        return AppState::Unknown;
+    };
+    let Ok(tools) = Toolset::discover(&host, &ctx.env) else {
+        return AppState::Unknown;
+    };
+    let Ok(listed) = adb::devices(&tools) else {
+        return AppState::Unknown;
+    };
+    if !listed
+        .iter()
+        .any(|device| device.serial == session.serial && device.online())
+    {
+        return AppState::Gone("the device is offline".to_string());
+    }
+    let Ok(adb) = Adb::new(&tools, &session.serial) else {
+        return AppState::Unknown;
+    };
+    if adb.pids(&session.app_id).is_empty() {
+        AppState::Gone("the app is not running".to_string())
+    } else {
+        AppState::Running
+    }
+}
+
 // ---- devices -------------------------------------------------------------------
 
 /// `icm devices android`: online devices and the AVDs.

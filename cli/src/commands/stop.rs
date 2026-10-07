@@ -22,7 +22,7 @@ use crate::context::{Ctx, Project};
 use crate::error::{Check, Evidence, IcmError, Result, Status};
 use crate::managed;
 use crate::process::Cmd;
-use crate::session::{self, Session};
+use crate::session::{self, AppState, Session};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
@@ -329,6 +329,15 @@ fn shutdown_simulator(ctx: &Ctx, project: &Project, host: &crate::host::HostConf
     done
 }
 
+/// Whether the run `run` of this project finished with `ok: false`.
+fn run_failed(project: &Project, run: &str) -> bool {
+    std::fs::read_to_string(project.runs_dir().join(run).join("result.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|result| result.get("ok").and_then(Value::as_bool))
+        == Some(false)
+}
+
 /// Runs `icm ps`: the sessions and whether their processes still run.
 pub fn ps(ctx: &mut Ctx) -> Result<()> {
     let Some(project) = ctx.try_project().cloned() else {
@@ -377,15 +386,61 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
                 // ios-sim keeps its record after `stop` (state `stopped`
                 // or `exited`) so `icm logs ios-sim` can still read it.
                 let state = session.extra.get("state").and_then(Value::as_str);
-                if alive.is_empty() && matches!(state, Some("stopped" | "exited")) {
+                let host_alive = !alive.is_empty();
+                let has_pids = !session.all_pids().is_empty();
+                // Android's app runs on a device and the web's in a page:
+                // their records' host pids (none, the session host) say
+                // nothing about the app, so they ask the platform.
+                let app = match session.platform.as_str() {
+                    _ if !host_alive && has_pids => AppState::Unknown,
+                    "android" => crate::android::pipeline::app_state(ctx, &project),
+                    "web" => crate::web::app_state(&project),
+                    _ => AppState::Unknown,
+                };
+                let asks_platform = matches!(session.platform.as_str(), "android" | "web");
+                let failed = if session
+                    .run
+                    .as_deref()
+                    .is_some_and(|run| run_failed(&project, run))
+                {
+                    " (its run failed)"
+                } else {
+                    ""
+                };
+                let is_running = if !host_alive && matches!(state, Some("stopped" | "exited")) {
                     line.push_str(&format!(
                         " {} (its logs stay readable)",
                         state.unwrap_or_default()
                     ));
-                } else if alive.is_empty() && !session.all_pids().is_empty() {
+                    false
+                } else if !host_alive && has_pids {
                     line.push_str(" stale (its processes are gone)");
+                    false
                 } else {
-                    line.push_str(" running");
+                    match &app {
+                        AppState::Running => {
+                            line.push_str(" running");
+                            true
+                        }
+                        AppState::Gone(why) => {
+                            line.push_str(&format!(" session open; {why}{failed}"));
+                            false
+                        }
+                        AppState::Unknown if asks_platform => {
+                            line.push_str(&format!(" session open (app state unknown){failed}"));
+                            false
+                        }
+                        AppState::Unknown if !failed.is_empty() => {
+                            line.push_str(" exited (its run failed)");
+                            false
+                        }
+                        AppState::Unknown => {
+                            line.push_str(" running");
+                            true
+                        }
+                    }
+                };
+                if is_running {
                     running += 1;
                 }
                 if let Some(url) = &session.url {
@@ -399,10 +454,10 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
                 }
                 text.push_str(&line);
                 text.push('\n');
-                let check = if alive.is_empty() && !session.all_pids().is_empty() {
-                    Check::info(CheckId::RunNoSession, line)
-                } else {
+                let check = if is_running {
                     Check::pass(CheckId::RunAlive, line)
+                } else {
+                    Check::info(CheckId::RunNoSession, line)
                 };
                 ctx.rep.check(check.evidence(Evidence::file(&path)));
                 sessions.push(json!({
@@ -411,7 +466,13 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
                     "started": session.started,
                     "pids": session.all_pids(),
                     "alive": alive,
-                    "running": !alive.is_empty() || session.all_pids().is_empty(),
+                    "running": is_running,
+                    "app_running": match &app {
+                        AppState::Running => json!(true),
+                        AppState::Gone(_) => json!(false),
+                        AppState::Unknown => Value::Null,
+                    },
+                    "run_failed": !failed.is_empty(),
                     "url": session.url,
                     "device": session.device,
                     "app": session.app,

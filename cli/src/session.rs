@@ -100,6 +100,20 @@ pub struct SessionDevice {
 }
 
 /// `<sessions>/<platform>.json`.
+/// What a platform knows about its app, beyond the session's host pids
+/// (`icm ps`): an Android app runs on a device, a web app in a page of the
+/// session's browser.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppState {
+    /// The app runs.
+    Running,
+    /// It does not, and why ("not running on emulator-5580").
+    Gone(String),
+    /// The platform cannot tell (no device to ask, no answer).
+    Unknown,
+}
+
+/// `<sessions>/<platform>.json`.
 pub fn path(sessions_dir: &Path, platform: &str) -> PathBuf {
     sessions_dir.join(format!("{platform}.json"))
 }
