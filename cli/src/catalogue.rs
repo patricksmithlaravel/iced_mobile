@@ -415,6 +415,9 @@ catalogue! {
     IosSimInstallFailed = "ios.sim.install_failed", Device, Fail, Agent,
         "simctl install failed",
         "Read the step log; rerun with `--fresh` if the simulator is in a bad state.";
+    IosSimNotFound = "ios.sim.not_found", Device, Fail, Agent,
+        "The simulator (or a device type for it) was not found",
+        "Pick one from `xcrun simctl list devices available`, or drop `--sim`/`--device` (and host.toml `simulator_udid`) to use icm's managed simulator.";
     IosDeviceNotFound = "ios.device.not_found", Device, Fail, Owner,
         "No paired iOS device was found",
         "Connect and trust the device, or pass `--device <udid>`.";

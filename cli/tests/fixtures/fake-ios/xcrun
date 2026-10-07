@@ -1,0 +1,109 @@
+#!/bin/sh
+# A fake `xcrun` for icm's ios-sim tests: actool and the simctl subcommands
+# icm uses, with state in $ICM_FAKE_STATE. $ICM_FAKE_SCENARIO picks what the
+# launched "app" does: `ok` (draws), `panic` (panics and exits) or `silent`
+# (runs but sends no ICM_EVENT lines).
+S="$ICM_FAKE_STATE"
+{
+  echo "$*"
+  env | grep '^SIMCTL_CHILD_' | sort | sed 's/^/  env /'
+} >> "$S/xcrun.log"
+
+tool="$1"
+shift
+case "$tool" in
+actool)
+  out=""
+  partial=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+    --compile) out="$2"; shift ;;
+    --output-partial-info-plist) partial="$2"; shift ;;
+    esac
+    shift
+  done
+  mkdir -p "$out" && : > "$out/Assets.car"
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIcons</key><dict/></dict></plist>\n' > "$partial"
+  ;;
+simctl)
+  sub="$1"
+  shift
+  case "$sub" in
+  list)
+    case "$2" in
+    runtimes) cat "$S/runtimes.json" ;;
+    devicetypes) cat "$S/devicetypes.json" ;;
+    devices)
+      if [ -f "$S/created" ]; then cat "$S/devices-created.json"; else cat "$S/devices.json"; fi
+      ;;
+    esac
+    ;;
+  create)
+    touch "$S/created"
+    echo "FAKE-UDID"
+    ;;
+  boot | bootstatus | install | uninstall | shutdown | delete | ui) ;;
+  spawn)
+    shift
+    case "$1" in
+    log)
+      if [ "$2" = stream ]; then
+        echo 'Filtering the log data using "fake"'
+        exec sleep 20
+      fi
+      ;;
+    launchctl)
+      if [ -f "$S/app.pid" ] && kill -0 "$(cat "$S/app.pid")" 2>/dev/null; then
+        printf '%s\t0\tUIKitApplication:com.acme.fixture[1a2b][rb-legacy]\n' "$(cat "$S/app.pid")"
+      fi
+      ;;
+    esac
+    ;;
+  launch)
+    for arg in "$@"; do
+      case "$arg" in
+      --stderr=*) err="${arg#--stderr=}" ;;
+      --stdout=*) out="${arg#--stdout=}" ;;
+      esac
+    done
+    mkdir -p "$(dirname "$err")"
+    : > "$out"
+    case "$ICM_FAKE_SCENARIO" in
+    panic)
+      sleep 1 > /dev/null 2>&1 &
+      pid=$!
+      printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":%s}\n\nthread '"'"'main'"'"' panicked at src/lib.rs:7:5:\nboom\n' "$pid" > "$err"
+      ;;
+    silent)
+      nohup sleep 30 > /dev/null 2>&1 &
+      pid=$!
+      ;;
+    *)
+      nohup sleep 30 > /dev/null 2>&1 &
+      pid=$!
+      printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":%s}\nICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n' "$pid" > "$err"
+      echo "hello from stdout" > "$out"
+      ;;
+    esac
+    echo "$pid" > "$S/app.pid"
+    echo "com.acme.fixture: $pid"
+    ;;
+  terminate)
+    if [ -f "$S/app.pid" ]; then kill "$(cat "$S/app.pid")" 2> /dev/null; fi
+    true
+    ;;
+  io)
+    for arg in "$@"; do last="$arg"; done
+    cp "$S/screen.png" "$last"
+    ;;
+  *)
+    echo "fake xcrun: unknown simctl $sub" >&2
+    exit 1
+    ;;
+  esac
+  ;;
+*)
+  echo "fake xcrun: unknown tool $tool" >&2
+  exit 1
+  ;;
+esac

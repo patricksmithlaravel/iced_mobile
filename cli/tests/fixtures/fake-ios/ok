@@ -1,0 +1,4 @@
+#!/bin/sh
+# A fake tool that succeeds (codesign and xattr in icm's ios-sim tests).
+echo "$0 $*" >> "$ICM_FAKE_STATE/ok.log"
+exit 0

@@ -1,0 +1,3 @@
+#!/bin/sh
+# A fake `xcodebuild` for icm's ios-sim tests.
+printf 'Xcode 27.0\nBuild version 27A266a\n'

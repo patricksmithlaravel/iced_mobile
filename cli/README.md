@@ -50,6 +50,7 @@ cargo test
 | `session.rs` | `target/icm/sessions/<platform>.json`, which `run` writes and `stop`/`ps` read |
 | `image.rs` | PNG decode/encode, previews, cropping, blank detection |
 | `platform/desktop/` | `build`/`run`/`shot`/`logs`/`stop desktop`: launch, readiness, window capture (`macos.rs` FFI, `linux.rs` X11), headless fallback (`headless.rs`), log records (`logs.rs`) |
+| `platform/ios_sim/` | `build`/`run`/`logs`/`shot`/`stop`/`input ios-sim`: simulator choice (`simctl.rs`), bundle and plists (`bundle.rs`, `plist.rs`), Mach-O gates (`macho.rs`), PNG preview and blank detection (`image.rs`), log normalization (`logs.rs`), the session file (`session.rs`); fake-tool tests in `tests/ios_sim.rs` |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
 
 ## Writing a command

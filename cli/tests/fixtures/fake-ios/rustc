@@ -1,0 +1,6 @@
+#!/bin/sh
+# A fake `rustc` for icm's ios-sim tests: a sysroot with the simulator target.
+case "$1" in
+--print) echo "$ICM_FAKE_STATE/sysroot" ;;
+--version) echo "rustc 1.98.0 (fake 2026-08-18)" ;;
+esac

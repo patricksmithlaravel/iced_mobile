@@ -1,0 +1,3 @@
+#!/bin/sh
+# A fake `rustup` for icm's ios-sim tests.
+echo "1.98.0-aarch64-apple-darwin (overridden by the test)"

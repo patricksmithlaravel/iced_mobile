@@ -1,0 +1,16 @@
+#!/bin/sh
+# A fake `cargo` for icm's ios-sim tests: `metadata` runs the real cargo;
+# `build` reports the synthetic simulator executable in $ICM_FAKE_STATE/exe.
+echo "$*" >> "$ICM_FAKE_STATE/cargo.log"
+case "$1" in
+metadata) exec "$ICM_REAL_CARGO" "$@" ;;
+build)
+  exe="$ICM_FAKE_STATE/exe"
+  printf '{"reason":"compiler-artifact","package_id":"fixture-app 0.3.0","target":{"name":"fixture-app","kind":["bin"]},"filenames":["%s"],"executable":"%s","fresh":false}\n{"reason":"build-finished","success":true}\n' "$exe" "$exe"
+  ;;
+clean) ;;
+*)
+  echo "fake cargo: unknown subcommand $1" >&2
+  exit 1
+  ;;
+esac

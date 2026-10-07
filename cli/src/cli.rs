@@ -429,6 +429,9 @@ pub struct RunArgs {
     /// Use a new simulator, deleted at `stop`
     #[arg(long)]
     pub fresh: bool,
+    /// iOS Simulator runtime: newest (default), min (the lowest at or above [ios] min_os) or a version such as 18.3
+    #[arg(long, value_name = "newest|min|X.Y")]
+    pub runtime: Option<String>,
     /// Show the simulator, emulator or browser window
     #[arg(long)]
     pub show: bool,

@@ -15,7 +15,7 @@ use crate::catalogue::CheckId;
 use crate::cli::{Command, LATER_COMMANDS, Platform};
 use crate::context::Ctx;
 use crate::error::{IcmError, Result};
-use crate::platform::desktop;
+use crate::platform::{desktop, ios_sim};
 
 /// Runs a command.
 pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
@@ -41,6 +41,21 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
         }
         Command::Logs(args) if args.platform == Platform::Desktop => desktop::logs(ctx, &args),
         Command::Input(args) if args.platform == Platform::Desktop => desktop::input(ctx, &args),
+        // ios-sim (design §10.3)
+        Command::Build(args) if args.platform == Some(Platform::IosSim) && !args.all => {
+            ios_sim::build(ctx, &args)
+        }
+        Command::Run(args) if args.platform == Platform::IosSim => ios_sim::run(ctx, &args),
+        Command::Logs(args) if args.platform == Platform::IosSim => ios_sim::logs(ctx, &args),
+        Command::Shot(args) if !args.headless && args.platform == Some(Platform::IosSim) => {
+            ios_sim::shot(ctx, &args)
+        }
+        Command::Stop(args) if args.platform == Some(Platform::IosSim) && !args.all => {
+            ios_sim::stop(ctx, &args)
+        }
+        Command::Input(args) if args.platform == Platform::IosSim => {
+            ios_sim::input::input(ctx, &args)
+        }
         Command::Build(_) => not_implemented("build"),
         Command::Run(_) => not_implemented("run"),
         Command::Stop(args) => stop::stop(ctx, &args),
