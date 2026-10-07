@@ -961,33 +961,66 @@ fn dmg_check(ctx: &Ctx, dmg: &Path) -> Result<Check> {
 
 // ---- the plan ----------------------------------------------------------------------
 
-fn plan_signer(rel: &Release) -> Signer {
+/// The keychain a real run searches (host.toml `signing_keychain`,
+/// `ICM_KEYCHAIN`), read without reporting host.toml's problems: the real
+/// run reports them.
+fn plan_keychain(ctx: &Ctx) -> Option<PathBuf> {
+    crate::host::load()
+        .ok()
+        .and_then(|host| host.config.signing_keychain(&ctx.env))
+}
+
+/// The signer the plan shows. `auto`, a SHA-1 or a Developer ID name
+/// stands for the Developer ID identity the real run finds, signed with a
+/// secure timestamp as notarization requires; another name (a test
+/// identity) signs without one, as the real run does.
+fn plan_signer(rel: &Release, keychain: Option<PathBuf>) -> Signer {
+    let configured = rel.config().desktop.macos.identity.trim().to_string();
     match rel.sign() {
         SignMode::None => Signer::ad_hoc(),
-        SignMode::Auto => Signer {
-            identity: Some(sign::Identity {
-                sha1: "<sha1 of the Developer ID Application identity>".to_string(),
-                name: rel.config().desktop.macos.identity.clone(),
-                valid: true,
-                problem: None,
-            }),
-            keychain: None,
-        },
+        SignMode::Auto => {
+            let sha1 = configured.len() == 40 && configured.chars().all(|c| c.is_ascii_hexdigit());
+            let developer_id = configured.is_empty()
+                || configured == "auto"
+                || sha1
+                || configured.starts_with(sign::DEVELOPER_ID);
+            let name = if developer_id && !configured.starts_with(sign::DEVELOPER_ID) {
+                format!(
+                    "{} <[desktop.macos] identity = \"{configured}\">",
+                    sign::DEVELOPER_ID
+                )
+            } else {
+                configured
+            };
+            Signer {
+                identity: Some(sign::Identity {
+                    sha1: format!("<sha1 of \"{name}\">"),
+                    name,
+                    valid: true,
+                    problem: None,
+                }),
+                keychain,
+            }
+        }
     }
 }
 
-fn plan(rel: &Release) -> Plan {
+fn plan(ctx: &Ctx, rel: &Release) -> Plan {
     let mut plan = Plan::new();
     let app = app_name(rel);
     let bundle = rel.dist.join(&app);
-    let signer = plan_signer(rel);
+    let keychain = plan_keychain(ctx);
+    let signer = plan_signer(rel, keychain.clone());
     plan.push(Step::internal(
         "macos.host",
         "a macOS host (else env.unsupported_host)",
     ));
     plan.push(
-        Step::exec("security.find-identity", sign::find_identity_cmd(None))
-            .gate(CheckId::MacosSignNoDeveloperId),
+        Step::exec(
+            "security.find-identity",
+            sign::find_identity_cmd(keychain.as_deref()),
+        )
+        .gate(CheckId::MacosSignNoDeveloperId),
     );
     if rel.args.dmg {
         plan.push(
@@ -1126,8 +1159,8 @@ fn plan(rel: &Release) -> Plan {
 // ---- the pipeline ------------------------------------------------------------------
 
 impl Pipeline for Macos {
-    fn plan(&self, _ctx: &Ctx, rel: &Release) -> Result<Plan> {
-        Ok(plan(rel))
+    fn plan(&self, ctx: &Ctx, rel: &Release) -> Result<Plan> {
+        Ok(plan(ctx, rel))
     }
 
     fn preconditions(&self, ctx: &mut Ctx, rel: &mut Release) -> Result<()> {

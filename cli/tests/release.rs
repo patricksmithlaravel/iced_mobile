@@ -596,6 +596,64 @@ fn dry_runs_print_the_plan_and_write_nothing() {
         ]
     );
     assert!(!app.dir().join("target/icm/dist").exists());
+
+    // macOS's plan shows what the real run does: a Developer ID signs with
+    // a secure timestamp and the keychain icm searches, and stage 2 keeps
+    // the dist directory that holds the stapled app.
+    let mut app = app;
+    app.set("ICM_KEYCHAIN", "/k/build.keychain-db");
+    let step = |result: &Value, name: &str| -> String {
+        result["plan"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {result}"))["display"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let stage1 = app.json(&["release", "macos", "--dry-run"]);
+    assert_eq!(stage1["exit"], 0, "{stage1}");
+    let codesign = step(&stage1, "codesign.app");
+    assert!(codesign.contains(" --timestamp "), "{codesign}");
+    assert!(
+        codesign.contains("--keychain /k/build.keychain-db"),
+        "{codesign}"
+    );
+    assert!(
+        step(&stage1, "security.find-identity").ends_with("/k/build.keychain-db"),
+        "{stage1}"
+    );
+    assert!(
+        step(&stage1, "release.dist").starts_with("(icm) empty "),
+        "{stage1}"
+    );
+    let stage2 = app.json(&["release", "macos", "--dmg", "--dry-run"]);
+    assert_eq!(stage2["exit"], 0, "{stage2}");
+    assert!(
+        step(&stage2, "release.dist").starts_with("(icm) keep "),
+        "{stage2}"
+    );
+    let codesign = step(&stage2, "codesign.dmg");
+    assert!(codesign.contains(" --timestamp "), "{codesign}");
+    assert!(
+        codesign.contains("--keychain /k/build.keychain-db"),
+        "{codesign}"
+    );
+    // A test identity named in icm.toml signs without a timestamp.
+    app.config("\n[desktop.macos]\nidentity = \"icm-test Code Signing\"\n");
+    let named = app.json(&["release", "macos", "--dry-run"]);
+    assert!(
+        step(&named, "codesign.app").contains("--timestamp=none"),
+        "{named}"
+    );
+    let unsigned = app.json(&["release", "macos", "--sign", "none", "--dry-run"]);
+    assert!(
+        step(&unsigned, "codesign.app").contains("--sign - "),
+        "{unsigned}"
+    );
+    assert!(!app.dir().join("target/icm/dist").exists());
 }
 
 #[test]

@@ -361,7 +361,7 @@ pub fn run_with(ctx: &mut Ctx, args: &ReleaseArgs, pipeline: &dyn Pipeline) -> R
     ctx.rep.set("release", rel.json());
 
     if ctx.dry_run() {
-        let mut plan = preconditions_plan(&rel);
+        let mut plan = preconditions_plan(&rel, pipeline.keeps_dist(&rel));
         plan.steps.extend(pipeline.plan(ctx, &rel)?.steps);
         plan.steps.extend(finish_plan(&rel).steps);
         plan.report(ctx);
@@ -847,7 +847,7 @@ fn owner_exit(ctx: &Ctx, rel: &Release, error: IcmError, built: bool) -> IcmErro
     error
 }
 
-fn preconditions_plan(rel: &Release) -> Plan {
+fn preconditions_plan(rel: &Release, keeps_dist: bool) -> Plan {
     let config = rel.config();
     let mut owner: Vec<String> = vec!["[app] id and icon are not placeholders".to_string()];
     match rel.target {
@@ -876,7 +876,14 @@ fn preconditions_plan(rel: &Release) -> Plan {
     ));
     plan.push(Step::internal(
         "release.dist",
-        &format!("empty {}", crate::paths::display(&rel.dist)),
+        &if keeps_dist {
+            format!(
+                "keep {} (this stage builds next to the files of the one before, such as macOS's stapled app)",
+                crate::paths::display(&rel.dist)
+            )
+        } else {
+            format!("empty {}", crate::paths::display(&rel.dist))
+        },
     ));
     plan
 }
