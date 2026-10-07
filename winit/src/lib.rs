@@ -77,10 +77,43 @@ static ANDROID_APP: std::sync::Mutex<
 
 /// Hands the `AndroidApp` received by `android_main` to the shell.
 ///
-/// Must be called before [`run`] (or `iced::application(..).run()`).
+/// Must be called before [`run`] (or `iced::application(..).run()`), each
+/// time `android_main` runs: Android calls `android_main` again, with a new
+/// `AndroidApp`, for every Activity it starts in the same process, and
+/// [`run`] takes the one it is given.
 #[cfg(target_os = "android")]
 pub fn set_android_app(app: winit::platform::android::activity::AndroidApp) {
     *ANDROID_APP.lock().expect("Lock AndroidApp") = Some(app);
+}
+
+#[cfg(target_os = "android")]
+std::thread_local! {
+    /// The event loop that last ran on this thread ended because Android
+    /// destroyed its Activity.
+    static ACTIVITY_DESTROYED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Whether the event loop that last ran on this thread, through [`run`],
+/// ended because Android destroyed its Activity.
+///
+/// Android destroys an Activity on Back, for a configuration change the
+/// manifest's `android:configChanges` does not list, or to reclaim memory,
+/// and may then start a new one in the same process, which calls
+/// `android_main` again. When the Activity is destroyed, [`run`] returns
+/// once the application is dropped, and `android_main` must return too: the
+/// Activity's `onDestroy` waits for it.
+///
+/// When this is `false` after [`run`] returned, the application stopped by
+/// itself (an error, such as no usable graphics backend), and its Activity
+/// is still on screen. android-activity finishes that Activity once
+/// `android_main` returns, but with android-activity 0.6.0 the Activity's
+/// `onPause` then waits for the stopped thread and the app stops responding
+/// (0.6.1 fixed it), so ending the process is the safe choice there.
+/// `iced::android_main!` does all this for you.
+#[cfg(target_os = "android")]
+pub fn activity_destroyed() -> bool {
+    ACTIVITY_DESTROYED.get()
 }
 
 /// What winit says of the application's life, for a shell that must act on
@@ -111,10 +144,17 @@ static LIFECYCLE: std::sync::OnceLock<fn(Lifecycle)> =
 /// Calls `hook` on the event loop's thread whenever winit reports the
 /// application suspended or resumed, before iced acts on it.
 ///
-/// Set it before [`run`]. There is one hook: only the first call sets it,
-/// and a later call is ignored with a warning in the log.
+/// Set it before [`run`]. There is one hook for the process: only the first
+/// call sets it. A later call with the same function does nothing, so an
+/// application can set it each time it starts (on Android, each time
+/// `android_main` runs for a new Activity). A later call with another
+/// function is ignored with a warning in the log.
 pub fn on_lifecycle(hook: fn(Lifecycle)) {
-    if LIFECYCLE.set(hook).is_err() {
+    if let Err(hook) = LIFECYCLE.set(hook)
+        && LIFECYCLE
+            .get()
+            .is_some_and(|current| !std::ptr::fn_addr_eq(*current, hook))
+    {
         log::warn!(
             "on_lifecycle: a hook is already set, and only the first one is \
             called; this one is ignored. Call the second from the first \
@@ -155,6 +195,8 @@ where
     {
         use winit::platform::android::EventLoopBuilderExtAndroid;
 
+        ACTIVITY_DESTROYED.set(false);
+
         let app = ANDROID_APP
             .lock()
             .expect("Lock AndroidApp")
@@ -163,12 +205,13 @@ where
                 "No AndroidApp: define the entry point with \
                 iced::android_main!(run), or call iced::mobile::set_android_app \
                 (iced_winit::set_android_app) with the AndroidApp that \
-                android_main receives before running the application. If \
-                that is done, the build holds two copies of iced_winit and \
-                the call filled the other one: depend on iced_winit from \
-                exactly the same source as iced (the same git URL and rev, \
-                character for character), or not at all (`cargo tree -d` lists \
-                both copies).",
+                android_main receives before running the application, every \
+                time android_main runs: each Activity brings its own, and an \
+                application runs once per AndroidApp. If that is done, the \
+                build holds two copies of iced_winit and the call filled the \
+                other one: depend on iced_winit from exactly the same source \
+                as iced (the same git URL and rev, character for character), \
+                or not at all (`cargo tree -d` lists both copies).",
             );
 
         let _ = builder.with_android_app(app);
@@ -182,30 +225,25 @@ where
     #[cfg(not(target_os = "android"))]
     let event_loop = builder.build().expect("Create event loop");
 
-    // winit allows one event loop per process, and Android keeps the process
-    // alive after `android_main` returns, so a second `android_main` cannot
-    // build one.
+    // winit runs one event loop at a time. On Android it ends the loop when
+    // the Activity is destroyed, and allows a new one once the old one is
+    // dropped, so the next Activity's `android_main` can build its own; it
+    // cannot while another Activity's loop still runs.
     #[cfg(target_os = "android")]
     let event_loop = builder.build().unwrap_or_else(|error| match error {
         winit::error::EventLoopError::RecreationAttempt => panic!(
-            "Create event loop: android_main ran a second time in this \
-            process, and winit allows one event loop per process. An earlier \
-            android_main returned and Android kept the process alive: its \
-            application stopped (an error such as no usable graphics \
-            backend, or a panic; the log above it says which), or its \
-            Activity was destroyed and the event loop ended with it. \
-            iced::android_main! ends the process when the application stops, \
-            so this comes from a hand-written android_main: call \
-            std::process::exit once `run` returns, and catch a panic from \
-            it (std::panic::catch_unwind) to do the same. To keep the \
-            Activity from being destroyed by a configuration change \
-            (rotation, dark mode, locale, font scale, ...), declare the full \
-            list on the activity in AndroidManifest.xml: \
-            android:configChanges=\"mcc|mnc|locale|touchscreen|keyboard|\
-            keyboardHidden|navigation|orientation|screenLayout|uiMode|\
-            screenSize|smallestScreenSize|density|layoutDirection|colorMode|\
-            grammaticalGender|fontScale|fontWeightAdjustment\", plus \
-            |assetsPaths when it is linked against API 36 or later."
+            "Create event loop: an event loop is already running in this \
+            process, and winit runs one at a time. Android started an \
+            Activity of this application, which runs android_main again, \
+            while another Activity of it still runs the application. Either \
+            the app was launched again before Android had destroyed the \
+            Activity it was finishing (a moment after Back), and a launch a \
+            moment later works; or the activity was started a second time, \
+            into another task (from another app or a notification) or in a \
+            second window. iced runs one Activity at a time: declare \
+            android:launchMode=\"singleTask\" on the activity in \
+            AndroidManifest.xml, so that Android hands such a launch to the \
+            running Activity instead."
         ),
         error => panic!("Create event loop: {error:?}"),
     });
@@ -448,6 +486,44 @@ where
                 event_loop,
                 Event::EventLoopAwakened(winit::event::Event::AboutToWait),
             );
+        }
+
+        /// Android: winit ends the event loop by itself only when the
+        /// Activity is destroyed (`Suspended` came first). The instance then
+        /// ends as on `iced::exit`, so that everything it holds (the
+        /// application's state, its windows, the renderer, the executor) is
+        /// dropped before `run` returns, and so before `android_main` does.
+        #[cfg(target_os = "android")]
+        fn exiting(
+            &mut self,
+            _event_loop: &winit::event_loop::ActiveEventLoop,
+        ) {
+            // iced ended the loop itself: the instance returned, or it
+            // cannot go on.
+            if self.finished || self.error.is_some() {
+                return;
+            }
+
+            ACTIVITY_DESTROYED.set(true);
+
+            log::info!(
+                "The Activity was destroyed: the application ends with its \
+                event loop"
+            );
+
+            // Dropped unfinished, the instance would leak the user
+            // interfaces it keeps in `ManuallyDrop`. It waits on nothing but
+            // its events, so one poll sees `Exit` and returns.
+            self.sender.start_send(Event::Exit).expect("Send event");
+
+            if self.instance.as_mut().poll(&mut self.context).is_pending() {
+                log::warn!(
+                    "The application did not end on exit; it is dropped \
+                    unfinished"
+                );
+            }
+
+            self.finished = true;
         }
     }
 
@@ -2221,15 +2297,17 @@ fn run_action<'a, P, C>(
                 end itself; the system ends it."
             );
 
-            // Until winit can build its event loop again in the same process.
+            // The Activity would stay on screen with no event loop behind it.
             #[cfg(target_os = "android")]
             log::warn!(
-                "iced::exit is ignored on Android: winit allows one event \
-                loop per process, and Android usually keeps the process alive \
-                after the loop exits, so the next launch would fail to create \
-                the event loop (RecreationAttempt). To leave the screen, move \
-                the task to the back (Activity.moveTaskToBack); to end the \
-                application, call std::process::exit."
+                "iced::exit is ignored on Android: Android, not the \
+                application, ends an Activity, and an event loop that ended \
+                on its own would leave the Activity on screen with nothing \
+                behind it. To leave the screen, finish the Activity \
+                (Activity.finish) or move its task to the back \
+                (Activity.moveTaskToBack) through JNI: once Android destroys \
+                the Activity, the event loop and the application end with it. \
+                To end the process, call std::process::exit."
             );
 
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
