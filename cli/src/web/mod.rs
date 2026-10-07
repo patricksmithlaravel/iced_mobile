@@ -1281,21 +1281,32 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
         }
     ));
 
-    if args.follow {
+    // Following needs a live session: an ended one writes nothing more.
+    if args.follow
+        && let Ok(session) = &live
+    {
         let mut seen = all.len();
-        while crate::signals::pending().is_none() {
+        let ended = loop {
+            if crate::signals::pending().is_some() {
+                break "stopped following; the session keeps running";
+            }
+            if ctx.remaining().is_some_and(|left| left.is_zero()) {
+                break "stopped following at --timeout; the session keeps running";
+            }
             std::thread::sleep(Duration::from_millis(250));
             let records = console::read(&path);
             for record in records.iter().skip(seen).filter(|r| filter.keeps(r)) {
                 emit_log(ctx, record);
             }
             seen = records.len();
-            if let Ok(session) = &live
-                && !crate::sessions::alive(&session.record)
-            {
-                break;
+            if !crate::sessions::alive(&session.record) {
+                break "followed the console until the web session ended";
             }
-        }
+        };
+        ctx.rep.summary(ended);
+    } else if args.follow {
+        ctx.rep
+            .progress("the web session has ended; nothing more to follow");
     }
     Ok(())
 }
