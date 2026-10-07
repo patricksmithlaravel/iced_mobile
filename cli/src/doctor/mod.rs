@@ -183,6 +183,9 @@ pub fn gather(probe: &Probe<'_>, platforms: &[Platform]) -> Vec<Requirement> {
                 }
             }
         }
+        for requirement in pinned_tools(probe, platform) {
+            push(requirement);
+        }
     }
 
     // The store policy table's age and the floors coming soon (§12.0).
@@ -332,6 +335,43 @@ fn rust_targets(probe: &Probe<'_>, toolchain: &Toolchain, platform: Platform) ->
                         )
                         .by(By::Owner);
                     Requirement::new(key, Some(platform), check)
+                }
+            }
+        })
+        .collect()
+}
+
+/// The pinned tools (icm's tools.toml) this platform's releases need: PASS
+/// when installed, else a WARN (the dev loop does not need them) that
+/// `--fix --yes` repairs by downloading the pinned, sha256-checked copy.
+fn pinned_tools(probe: &Probe<'_>, platform: Platform) -> Vec<Requirement> {
+    crate::pinned::for_doctor(platform.as_str())
+        .into_iter()
+        .map(|tool| {
+            let key = format!("pinned:{}", tool.name);
+            match crate::pinned::find(probe.env, &tool.name) {
+                Ok(found) => Requirement::new(
+                    key,
+                    Some(platform),
+                    Check::pass(
+                        CheckId::EnvToolMissing,
+                        format!(
+                            "{} {}: {} ({})",
+                            tool.name,
+                            found.version.as_deref().unwrap_or("(version not checked)"),
+                            crate::paths::display(&found.path),
+                            found.source
+                        ),
+                    ),
+                ),
+                Err(error) => {
+                    let check = Check::from_error(error, Status::Warn);
+                    Requirement::new(key, Some(platform), check).with_fixes(
+                        vec![Fix::Pinned {
+                            name: tool.name.clone(),
+                        }],
+                        probe.env,
+                    )
                 }
             }
         })

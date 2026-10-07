@@ -35,6 +35,7 @@ pub mod locks;
 pub mod managed;
 pub mod output;
 pub mod paths;
+pub mod pinned;
 pub mod plan;
 pub mod platform;
 pub mod policy;

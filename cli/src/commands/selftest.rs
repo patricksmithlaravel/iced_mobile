@@ -114,6 +114,18 @@ pub fn run(ctx: &mut Ctx, args: SelfTestArgs) -> Result<()> {
             }
             Ok(())
         }
+        Scenario::Pinned { name } => {
+            ensure_run_dir(ctx);
+            let found = crate::pinned::require(ctx, &name)?;
+            ctx.rep.artifact(&name, &found.path);
+            ctx.rep.set("tool", json!(found));
+            ctx.rep.summary(format!(
+                "{name}: {} ({})",
+                crate::paths::display(&found.path),
+                found.source
+            ));
+            Ok(())
+        }
         Scenario::Deployment { min_os } => {
             let project = ctx.project()?.clone();
             let package = project.package.name.clone();

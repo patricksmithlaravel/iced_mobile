@@ -292,6 +292,9 @@ catalogue! {
     EnvToolMissing = "env.tool_missing", Environment, Fail, DoctorYes,
         "An external tool icm needs was not found",
         "Run `icm doctor <platform> --fix --yes`, or point `ICM_TOOL_<NAME>` at the tool.";
+    EnvToolChecksum = "env.tool_checksum", Environment, Fail, DoctorYes,
+        "A pinned tool's download does not match its size and sha256",
+        "Rerun `icm doctor <platform> --fix --yes` (the download was deleted); if it keeps failing, the pin in icm's tools.toml is wrong: report it.";
     EnvChromeMissing = "env.chrome_missing", Environment, Fail, Owner,
         "Google Chrome (or Chromium) was not found",
         "Install Chrome, or set `chrome` in ~/.config/icm/host.toml or `ICM_CHROME`.";

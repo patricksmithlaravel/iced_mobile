@@ -897,6 +897,11 @@ pub enum Scenario {
         #[arg(value_enum)]
         platform: Platform,
     },
+    /// Find a pinned tool from tools.toml, installing it with --yes
+    Pinned {
+        /// The tool's name
+        name: String,
+    },
 }
 
 impl Scenario {
@@ -913,6 +918,7 @@ impl Scenario {
             Scenario::Deployment { .. } => "deployment",
             Scenario::Busy { .. } => "busy",
             Scenario::Hooks { .. } => "hooks",
+            Scenario::Pinned { .. } => "pinned",
         }
     }
 }

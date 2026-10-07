@@ -304,6 +304,31 @@ fn run_fix(
         ctx.rep.progress(format!("fix failed: {error}"));
         return Err(Vec::new());
     }
+    // A pinned tool is downloaded, sha256-checked and unpacked by icm.
+    if let Fix::Pinned { name } = fix {
+        let installed = crate::pinned::tool(name).and_then(|tool| {
+            ctx.rep.progress(format!(
+                "fix: install {} {} (pinned, sha256-checked)",
+                tool.name, tool.version
+            ));
+            crate::pinned::install(ctx, &tool)
+        });
+        return match installed {
+            Ok(found) => Ok(vec![format!(
+                "installed {name} at {}",
+                crate::paths::display(&found.path)
+            )]),
+            Err(error) => {
+                ctx.rep.progress(format!("fix failed: {}", error.detail));
+                let mut evidence = error.evidence.clone();
+                if evidence.is_empty() {
+                    evidence
+                        .push(Evidence::file(crate::paths::tools_dir()).with_excerpt(error.detail));
+                }
+                Err(evidence)
+            }
+        };
+    }
     let steps = match fix.steps(host, env, ctx.global.offline) {
         Ok(steps) => steps,
         Err(error) => {

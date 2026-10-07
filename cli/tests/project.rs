@@ -31,6 +31,8 @@ const SCRUB: &[&str] = &[
     "ANDROID_AVD_HOME",
     "JAVA_HOME",
     "DEVELOPER_DIR",
+    "ICM_TOOLS_TOML",
+    "ICM_TODAY",
 ];
 
 struct Sandbox {
@@ -44,6 +46,15 @@ impl Sandbox {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().join("work");
         std::fs::create_dir_all(&cwd).unwrap();
+        // `doctor --fix --yes` downloads pinned tools with curl: this one
+        // copies file:// URLs and refuses the network.
+        write_exe(
+            &root.path().join("fakebin/curl"),
+            &format!(
+                "#!/bin/sh\necho \"curl $*\" >> '{}'\nout=''\nurl=''\nwhile [ $# -gt 0 ]; do case \"$1\" in -o) shift; out=\"$1\";; *) url=\"$1\";; esac; shift; done\ncase \"$url\" in file://*) cp \"${{url#file://}}\" \"$out\";; *) echo 'curl: no network in tests' >&2; exit 6;; esac\n",
+                root.path().join("tools.log").display()
+            ),
+        );
         Sandbox {
             cwd,
             env: Vec::new(),
@@ -77,6 +88,7 @@ impl Sandbox {
             .env("ICM_CACHE_DIR", self.path("cache"))
             .env("ICM_HOST_CONFIG", self.path("host.toml"))
             .env("CARGO_TARGET_DIR", self.cwd.join("target"))
+            .env("ICM_TOOL_CURL", self.path("fakebin/curl"))
             .stdin(Stdio::null());
         for var in SCRUB {
             let _ = command.env_remove(var);
@@ -721,6 +733,115 @@ fn doctor_installs_rust_targets_for_the_projects_toolchain() {
     assert_eq!(plan["exit"], 0, "{plan}");
     assert_eq!(plan["plan"][0]["name"], "doctor.rustup.targets");
     assert!(!sysroot.join("lib/rustlib/wasm32-unknown-unknown").exists());
+}
+
+/// A tools table with one tool, `wasm-opt`, whose download is a local
+/// tarball: `sha256` is the pin (the real one, or a wrong one).
+fn fake_tools_table(sandbox: &mut Sandbox, wrong_sha: bool) -> PathBuf {
+    let staging = sandbox.path("tarball/binaryen-version_999/bin");
+    write_exe(
+        &staging.join("wasm-opt"),
+        "#!/bin/sh\necho 'wasm-opt version 999'\n",
+    );
+    let tarball = sandbox.path("binaryen.tar.gz");
+    let status = Command::new("tar")
+        .arg("-czf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(sandbox.path("tarball"))
+        .arg("binaryen-version_999")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let bytes = std::fs::read(&tarball).unwrap();
+    let sha = if wrong_sha {
+        "0".repeat(64)
+    } else {
+        icm::hash::sha256_hex(&bytes)
+    };
+    let table = sandbox.path("tools.toml");
+    std::fs::write(
+        &table,
+        format!(
+            "schema = 1\n\n[[tool]]\nname = \"wasm-opt\"\nversion = \"version_999\"\ndescription = \"test\"\ndoctor = \"web\"\nneeded_by = [\"web\"]\nkind = \"tar.gz\"\nexe = \"binaryen-version_999/bin/wasm-opt\"\nexecutable = true\n\n[tool.hosts.any]\nurl = \"file://{}\"\nsha256 = \"{sha}\"\nbytes = {}\n",
+            tarball.display(),
+            bytes.len()
+        ),
+    )
+    .unwrap();
+    sandbox.set("ICM_TOOLS_TOML", &table);
+    table
+}
+
+#[test]
+fn doctor_installs_pinned_tools_after_checking_their_sha256() {
+    let mut sandbox = Sandbox::new();
+    fake_rust(&mut sandbox, &["wasm32-unknown-unknown"]);
+    let chrome = sandbox.path("chrome");
+    write_exe(&chrome, "#!/bin/sh\n");
+    sandbox.set("ICM_CHROME", &chrome);
+    fake_tools_table(&mut sandbox, true);
+    let installed = sandbox.path("cache/tools/wasm-opt/version_999");
+
+    // Missing: a WARN that names the fix, and the exit stays 0.
+    let before = sandbox.json(&["doctor", "web"]);
+    assert_eq!(before["exit"], 0, "{before}");
+    let warning = before["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == "env.tool_missing")
+        .unwrap_or_else(|| panic!("{before}"));
+    assert_eq!(warning["fix"]["by"], "doctor-yes");
+    assert_eq!(warning["fix"]["commands"][0], "icm doctor web --fix --yes");
+
+    // Without --yes nothing is downloaded.
+    let local = sandbox.json(&["doctor", "web", "--fix"]);
+    assert_eq!(local["exit"], 0, "{local}");
+    assert!(!tool_log(&sandbox).contains("curl"));
+
+    // A download whose sha256 differs from the pin is deleted.
+    let bad = sandbox.json(&["doctor", "web", "--fix", "--yes"]);
+    assert_eq!(bad["exit"], 0, "{bad}");
+    assert!(tool_log(&sandbox).contains("curl -fsSL"));
+    assert!(!installed.exists());
+    let tools = sandbox.path("cache/tools/wasm-opt");
+    let leftovers: Vec<_> = std::fs::read_dir(&tools)
+        .map(|dir| dir.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    let still = bad["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == "env.tool_missing")
+        .unwrap_or_else(|| panic!("{bad}"));
+    assert!(
+        still["detail"].as_str().unwrap().contains("the fix failed"),
+        "{still}"
+    );
+
+    // The right sha256: installed, and doctor passes it.
+    fake_tools_table(&mut sandbox, false);
+    let fixed = sandbox.json(&["doctor", "web", "--fix", "--yes"]);
+    assert_eq!(fixed["exit"], 0, "{fixed}");
+    assert!(
+        installed
+            .join("binaryen-version_999/bin/wasm-opt")
+            .is_file()
+    );
+    assert!(installed.join(".icm-pinned.json").is_file());
+    assert!(
+        !fixed["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["id"] == "env.tool_missing"),
+        "{fixed}"
+    );
+    let report = sandbox.json(&["print", "tools"]);
+    assert_eq!(report["tools"]["wasm-opt"]["source"], "icm cache (pinned)");
+    assert_eq!(report["tools"]["wasm-opt"]["version"], "version_999");
 }
 
 #[test]

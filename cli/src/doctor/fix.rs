@@ -90,6 +90,13 @@ pub enum Fix {
         /// The app's Cargo.lock.
         lock: PathBuf,
     },
+    /// A pinned tool from icm's tools.toml: downloaded with curl, checked
+    /// against its sha256, unpacked into the tool cache
+    /// ([`crate::pinned::install`]).
+    Pinned {
+        /// The tool's name.
+        name: String,
+    },
 }
 
 /// One command a fix runs.
@@ -123,6 +130,7 @@ impl Fix {
             Fix::SimCreate { .. } => 7,
             Fix::GenerateLockfile { .. } => 8,
             Fix::WasmBindgen { .. } => 9,
+            Fix::Pinned { .. } => 10,
         }
     }
 
@@ -412,6 +420,18 @@ impl Fix {
                     cmd = cmd.arg("--offline");
                 }
                 vec![step("doctor.cargo.install.wasm_bindgen", cmd)]
+            }
+            // What the fix runs first; `crate::pinned::install` then checks
+            // the sha256 and unpacks (commands/doctor.rs runs it).
+            Fix::Pinned { name } => {
+                let tool = crate::pinned::tool(name)?;
+                let Some(download) = tool.download() else {
+                    return Err(crate::pinned::missing(&tool));
+                };
+                vec![step(
+                    &format!("pinned.{name}.download"),
+                    crate::pinned::download_cmd(download, &tool.dir().join("<download>")),
+                )]
             }
         })
     }

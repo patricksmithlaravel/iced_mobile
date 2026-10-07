@@ -321,6 +321,10 @@ fn tools_report(ctx: &mut Ctx) -> Result<()> {
         "chrome",
         tools::chrome(&host, &env).map(|found| json!(found)),
     );
+    // The pinned tools releases download (tools.toml).
+    for (name, found) in crate::pinned::report(&env) {
+        record(&name, found);
+    }
 
     ctx.rep.set("tools", Value::Object(report));
     ctx.rep.content(lines);

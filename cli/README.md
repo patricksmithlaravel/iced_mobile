@@ -59,6 +59,7 @@ cargo test
 | `signatures.rs` | known failure signatures (design §13.4) → `likely_causes`; `signatures::annotate(error, text, &Facts)` |
 | `hooks.rs` | project hooks, `[checks] <platform>` scripts; every platform's `run` calls `hooks::run_for` once the app is up |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
+| `pinned.rs` | the tools icm downloads itself (`tools.toml`, embedded: version, URL, size, sha256 per host): find, install with `--yes` (curl, sha256 check, unpack), doctor's WARN and `--fix --yes` |
 | `policy.rs` | the dated store policy table (`policy/stores.toml`, embedded): the floor in force on a day, `env.policy_stale`, upcoming floors; `icm print policy` |
 | `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices` for Android (`doctor android` is `doctor/`): APK pipeline, managed AVD, adb, logcat, session (`android/mod.rs` has the module map) |
 
@@ -135,5 +136,6 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 | `ANDROID_USER_HOME`, `ANDROID_AVD_HOME` | where AVDs live (default `~/.android`, `~/.android/avd`); tests point them at a temp dir. The debug keystore sits next to host.toml (`android/debug.keystore`) |
 | `ICED_TEST_BACKEND` | the backend the app's harness draws with (default `tiny-skia`) |
 | `ICM_BUILD_FRAMEWORK` | at build time: force the default framework pin (`tag:`/`rev:`/`path:`) |
+| `ICM_TOOLS_TOML` | a pinned-tools table to use instead of the embedded `tools.toml` (a mirror; the tests serve `file://` URLs) |
 | `ICM_TODAY` | `YYYY-MM-DD`: the day the store policy table is read for (icm's tests) |
 | `ICM_RUN_ID`, `ICM_RUN_DIR`, `ICM_RUN_ROOT`, `ICM_DETACHED` | internal: a detached child's run |
