@@ -196,6 +196,9 @@ pub fn application()
 /// When the app cannot start: no window, or no graphics backend.
 pub fn run() -> iced::Result {
     // The platform's logger and a panic hook. Calling it twice is harmless.
+    // A logger of your own (env_logger, tracing_subscriber) goes BEFORE this
+    // line, with `iced::android_main!(run, logger = false)` below: `log`
+    // takes one logger per process, and installing one after iced's panics.
     iced::mobile::init_logger();
 
     application().run()

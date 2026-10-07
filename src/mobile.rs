@@ -19,8 +19,9 @@
 //!
 //! # Features
 //!
-//! iced's default features include four for mobile, which do nothing on
-//! other targets:
+//! iced's default features include four for mobile. Three do nothing on
+//! other targets; `mobile-logger` also gives the desktop and the web a
+//! logger, through [`init_logger`]:
 //!
 //! - `android-native-activity`: runs in Android's `NativeActivity`, which
 //!   needs no Java code. An Android build needs exactly one activity feature.
@@ -349,6 +350,25 @@ pub fn set_android_app(_app: AndroidApp) {}
 /// application, it stays in place, and the panic hook is still installed,
 /// once. Without the `mobile-logger` feature (on by default) only the panic
 /// hook is installed.
+///
+/// # A logger of your own
+///
+/// With `mobile-logger`, this installs the process's `log` logger on every
+/// target, the desktop and the web included, and `log` takes one logger per
+/// process. Install yours (`env_logger`, `tracing_subscriber`'s `fmt`,
+/// `console_log`) **before** calling `init_logger`: iced's logger is then
+/// skipped and the panic hook logs panics through yours. Installed after
+/// it, yours fails, and the usual one-line initializers panic at startup:
+/// `env_logger::init()` with "env_logger::init should not be called after
+/// logger initialized", `tracing_subscriber::fmt::init()` with "Unable to
+/// install global subscriber". On Android, where
+/// [`android_main!`](crate::android_main) calls `init_logger` before your
+/// function, write `iced::android_main!(run, logger = false)` so your
+/// function can install its logger first.
+///
+/// With your logger in place, the hook still logs each panic through
+/// `log::error!` before the previous hook prints it to stderr, so on the
+/// desktop a logger that writes to stderr shows a panic twice.
 pub fn init_logger() {
     log_panics();
 

@@ -90,9 +90,12 @@ x11 = ["iced_renderer/x11", "iced_winit/x11"]
 # Enables the Unix Wayland backend
 wayland = ["iced_renderer/wayland", "iced_winit/wayland"]
 # The four mobile features below (`android-native-activity`, `mobile-logger`,
-# `mobile-fira-sans`, `mobile-system-fonts`) are in `default` and do nothing on
-# other targets. With `default-features = false` they are all gone: list the
-# ones the application needs (see the `iced::mobile` docs).
+# `mobile-fira-sans`, `mobile-system-fonts`) are in `default`. All but
+# `mobile-logger` do nothing on other targets; with it, `mobile::init_logger`
+# installs a logger on the desktop (stderr) and the web (the console) too, so
+# an application's own logger must be installed before it. With
+# `default-features = false` they are all gone: list the ones the application
+# needs (see the `iced::mobile` docs).
 #
 # Runs on Android in `android.app.NativeActivity`, which needs no Java code.
 # Inert on other targets. An Android build needs exactly one of the two

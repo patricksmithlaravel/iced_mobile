@@ -37,7 +37,7 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 
 ## Where things are
 - App code: `src/lib.rs`. `src/main.rs`, `tests/icm.rs` and the `iced::android_main!(run)` line are
-  fixed: don't edit them.
+  fixed: don't edit them (except `logger = false`, below).
 - Identity, icon, permissions, orientations, signing references: `icm.toml` (`icm explain config.<key>`).
 - Version: Cargo.toml `version`. Store build number: icm.toml `[app] build`.
 - Info.plist, AndroidManifest.xml, PrivacyInfo.xcprivacy and index.html are GENERATED from icm.toml on
@@ -70,6 +70,9 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 - Don't set `default-features = false` on iced: it drops the Android activity, the mobile logger and
   the mobile fonts without a word.
 - Leave `[lib]` without `crate-type`: icm builds Android's shared library itself.
+- A logger of your own (`env_logger`, `tracing_subscriber`) is installed in `run()` BEFORE
+  `iced::mobile::init_logger()`, and the Android line becomes `iced::android_main!(run, logger = false)`.
+  `log` takes one logger per process: installed after iced's, yours panics at startup.
 
 ## Releases belong to the owner
 - This icm builds and runs development builds. Store packages come with a later icm.
