@@ -1640,6 +1640,14 @@ async fn run_instance<P>(
 
                             for (_id, window) in window_manager.iter_mut() {
                                 window.raw.request_redraw();
+
+                                // iOS: winit draws a redraw requested during
+                                // `AboutToWait` only when the run loop turns
+                                // again, so make it turn now.
+                                #[cfg(target_os = "ios")]
+                                window.request_redraw(
+                                    window::RedrawRequest::At(Instant::now()),
+                                );
                             }
                         }
 
