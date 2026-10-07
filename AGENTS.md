@@ -115,10 +115,15 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
 - **`cli/tests/accept/phase2.sh`** covers the App Store release without the owner's signing assets:
   `icm release ios` stopping for the owner, `--sign none` with its IPA, gates and `verify`, an RGBA
   icon, broken inputs, `diagnose altool`, App Store screenshots and the ios-device commands that
-  need no device. It takes a few minutes and needs macOS with Xcode 26 or later and `/usr/bin/jq`.
-  - icm only reads signing assets. Point `ICM_KEYCHAIN` at a keychain file and
-    `ICM_PROVISIONING_PROFILES` at a directory to keep it away from the user's keychains and Xcode's
-    profiles; the CI job does.
+  need no device. Then the signed path with throwaway material: a release signed with a self-signed
+  `Apple Distribution: icm test (ICMTEST001)` identity and a fake App Store profile, every gate
+  PASS, exit 9 for the untrusted certificate, and `verify` on its IPA. It takes a few minutes and
+  needs macOS with Xcode 26 or later and `/usr/bin/jq`.
+  - icm only reads signing assets, and the script keeps the user's out of its reach: unless set,
+    `ICM_KEYCHAIN` names a keychain file that does not exist and `ICM_PROVISIONING_PROFILES` an
+    empty directory in `$ACCEPT`. The test identity lives in a temporary keychain made by
+    `test-identity.sh`, which never joins the search list (a step checks it) and is deleted at the
+    end; the profile is a CMS envelope signed by a throwaway key.
   - It creates the managed `icm-iphone-<n>-pro-max-ios-<version>` simulator when it is missing and
     shuts it down. The owner's signed release, upload and a physical iPhone are SKIP
     (`ICM_ACCEPT_DEVICE=1` runs on a connected, provisioned iPhone).
@@ -134,15 +139,20 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
   - It needs Chrome, `python3`, `/usr/bin/jq` and the network: `icm doctor web --fix --yes` creates
     the app's lock and installs the wasm-bindgen CLI and the pinned `wasm-opt` into icm's cache
     (`$ACCEPT/cache` unless `ICM_CACHE_DIR` is set).
-- **`cli/tests/accept/phase5.sh`** covers macOS desktop releases with the template app, and takes
-  a few minutes.
-  - It runs an unsigned release and its DMG, which it mounts and verifies, and launches the app.
-  - It signs a release with a throwaway self-signed identity (`test-identity.sh`) in a temporary
-    keychain. That keychain never joins the user's search list, the script checks the list is
-    unchanged, and it deletes the keychain at the end.
-  - It checks that Windows and Linux releases are refused on a Mac.
-  - The owner's notarization steps are listed as SKIP.
-  - The Windows and Linux real-host runs are the jobs of `.github/workflows/icm-desktop.yml`.
+- **`cli/tests/accept/phase5.sh`** covers the desktop releases of the host it runs on with the
+  template app, and takes a few minutes. On every host the other two targets are refused (exit 4).
+  - macOS: an unsigned release and its DMG, which it mounts and verifies, and the app launched. A
+    release signed with a throwaway self-signed identity (`test-identity.sh`) in a temporary
+    keychain, which never joins the user's search list (the script checks the list is unchanged)
+    and is deleted at the end. The owner's notarization steps are SKIP.
+  - Linux: the `.deb` and the AppImage (`--sign none`), `linux.glibc_floor`, `icm verify linux`,
+    `dpkg -i` and `dpkg -r` (as root, or with `ICM_ACCEPT_INSTALL=1` and passwordless sudo), and
+    the AppImage's first frame under `xvfb-run` or the session's display.
+  - Windows (Git Bash): the `.msi` and the NSIS installer (`--sign none`), `icm verify windows`,
+    and both installed and uninstalled with `ICM_ACCEPT_INSTALL=1`. icm does not build on Windows
+    yet, so these steps wait for that.
+  - The Windows and Linux branches have not run yet; `.github/workflows/icm-desktop.yml` runs the
+    same checks inline on those hosts.
 
 ## Rules
 

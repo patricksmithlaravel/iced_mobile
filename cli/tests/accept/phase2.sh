@@ -12,18 +12,32 @@
 #
 # Outputs go to $ACCEPT (default: a new temporary directory); icm is
 # installed into $ICM_ROOT (default $ACCEPT/icm), its cache and host.toml
-# live in $ACCEPT. icm only reads signing assets: set ICM_KEYCHAIN to a
-# keychain file and ICM_PROVISIONING_PROFILES to a directory to keep it
-# away from the user's keychain search list and Xcode's profiles (the
-# agent acceptance needs none of them; it expects the owner's items to be
-# missing). The store-screenshot steps create icm's managed
+# live in $ACCEPT. The store-screenshot steps create icm's managed
 # icm-iphone-<n>-pro-max-ios-<version> simulator when it is missing and
 # shut it down at the end.
 #
-# Owner steps (a signed release with real assets, upload.sh, TestFlight,
-# the ledger) and a run on a physical iPhone are printed as SKIP; set
-# ICM_ACCEPT_DEVICE=1 with a development-provisioned iPhone connected to
-# run on it too.
+# Signing material is throwaway and stays in $ACCEPT. icm only reads
+# signing assets, and this script never lets it see the user's: unless
+# set, ICM_KEYCHAIN names a keychain file that does not exist (no
+# identities) and ICM_PROVISIONING_PROFILES an empty directory, so the
+# releases stop for the owner's items as on a fresh host. The signed path
+# runs with a self-signed "Apple Distribution: icm test (ICMTEST001)"
+# identity in a temporary keychain (test-identity.sh; it never joins the
+# user's search list, a step checks the list is unchanged, and it is
+# deleted at the end) and a fake App Store profile for ICMTEST001 in a CMS
+# envelope signed by a throwaway key. The release signs and gates the app
+# with them and ends with exit 9, since no Apple service trusts that
+# certificate.
+#
+# Owner steps (never run here; printed as SKIP):
+#   - a signed release with the owner's id, team, App Store profile and
+#     Apple Distribution identity: icm release ios
+#   - upload.sh, the build processed in TestFlight (internal), then
+#     icm ledger mark-uploaded ios
+# A run on a physical iPhone is SKIP too; set ICM_ACCEPT_DEVICE=1 with a
+# development-provisioned iPhone connected (and ICM_KEYCHAIN and
+# ICM_PROVISIONING_PROFILES pointing at the owner's development assets) to
+# run on it.
 set -euo pipefail
 
 FORK=${FORK:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
@@ -38,17 +52,31 @@ ICM_ROOT=${ICM_ROOT:-$ACCEPT/icm}
 export PATH="$ICM_ROOT/bin:$PATH"
 export ICM_CACHE_DIR=${ICM_CACHE_DIR:-$ACCEPT/cache}
 export ICM_HOST_CONFIG=${ICM_HOST_CONFIG:-$ACCEPT/host/host.toml}
-mkdir -p "$ICM_CACHE_DIR" "$(dirname "$ICM_HOST_CONFIG")"
+# The user's keychains and Xcode's profile directories stay out of reach.
+export ICM_KEYCHAIN=${ICM_KEYCHAIN:-$ACCEPT/keys/no-signing.keychain-db}
+export ICM_PROVISIONING_PROFILES=${ICM_PROVISIONING_PROFILES:-$ACCEPT/keys/no-profiles}
+mkdir -p "$ICM_CACHE_DIR" "$(dirname "$ICM_HOST_CONFIG")" "$ACCEPT/keys"
+mkdir -p "$ICM_PROVISIONING_PROFILES" 2>/dev/null || true
 DEMO="$ACCEPT/demo"
+# The signed path's throwaway material.
+TEST_TEAM=ICMTEST001
+TEST_IDENTITY="Apple Distribution: icm test ($TEST_TEAM)"
+TEST_KC="$ACCEPT/keys/ios-test.keychain-db"
+TEST_PROFILES="$ACCEPT/keys/test-profiles"
+KC_PASS="phase2-throwaway-$$"
+SEARCH_LIST_BEFORE=$(security list-keychains -d user)
 cd "$ACCEPT"
 
 echo "fork: $FORK"
 echo "outputs: $ACCEPT"
-echo "keychain: ${ICM_KEYCHAIN:-the keychain search list, read only}; profiles: ${ICM_PROVISIONING_PROFILES:-the Xcode profile directories, read only}"
+echo "keychain: $ICM_KEYCHAIN; profiles: $ICM_PROVISIONING_PROFILES"
 
 cleanup() {
     if [ -f "$DEMO/icm.toml" ] && command -v icm >/dev/null; then
         (cd "$DEMO" && icm stop --all --shutdown --json -q >"$ACCEPT/cleanup.json" 2>&1) || true
+    fi
+    if [ -f "$TEST_KC" ]; then
+        security delete-keychain "$TEST_KC" 2>/dev/null || rm -f "$TEST_KC"
     fi
 }
 trap cleanup EXIT
@@ -260,6 +288,169 @@ device_run() {
     evidence "$(/usr/bin/jq -r '.summary' "$ACCEPT/device-run.json")"
 }
 
+# --- signed with throwaway material ----------------------------------------
+
+# A self-signed Apple Distribution identity in a temporary keychain, and a
+# fake App Store profile for ICMTEST001.dev.accept.ios that holds its
+# certificate, in a CMS envelope (Apple signs real ones; here a throwaway
+# key that is deleted once used).
+test_signing_material() {
+    rm -rf "$TEST_PROFILES" "$ACCEPT/keys/profile.uuid"
+    mkdir -p "$TEST_PROFILES"
+    bash "$FORK/cli/tests/accept/test-identity.sh" "$TEST_KC" "$KC_PASS" "$TEST_IDENTITY" >"$ACCEPT/keys/identity.txt"
+    test "$(security list-keychains -d user)" = "$SEARCH_LIST_BEFORE"
+    local sha1 der uuid now expires
+    sha1=$(sed -n 's/^sha1=//p' "$ACCEPT/keys/identity.txt")
+    security find-certificate -c "$TEST_IDENTITY" -p "$TEST_KC" >"$ACCEPT/keys/distribution.pem"
+    test "$(/usr/bin/openssl x509 -in "$ACCEPT/keys/distribution.pem" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')" = "$sha1"
+    der=$(/usr/bin/openssl x509 -in "$ACCEPT/keys/distribution.pem" -outform DER | base64 | tr -d '\n')
+    uuid=$(uuidgen)
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    expires=$(date -u -v+180d +%Y-%m-%dT%H:%M:%SZ)
+    cat >"$ACCEPT/keys/profile.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AppIDName</key>
+	<string>icm test</string>
+	<key>ApplicationIdentifierPrefix</key>
+	<array><string>$TEST_TEAM</string></array>
+	<key>CreationDate</key>
+	<date>$now</date>
+	<key>Platform</key>
+	<array><string>iOS</string></array>
+	<key>DeveloperCertificates</key>
+	<array><data>$der</data></array>
+	<key>Entitlements</key>
+	<dict>
+		<key>application-identifier</key>
+		<string>$TEST_TEAM.dev.accept.ios</string>
+		<key>keychain-access-groups</key>
+		<array><string>$TEST_TEAM.*</string></array>
+		<key>get-task-allow</key>
+		<false/>
+		<key>com.apple.developer.team-identifier</key>
+		<string>$TEST_TEAM</string>
+		<key>beta-reports-active</key>
+		<true/>
+	</dict>
+	<key>ExpirationDate</key>
+	<date>$expires</date>
+	<key>Name</key>
+	<string>icm test App Store</string>
+	<key>TeamIdentifier</key>
+	<array><string>$TEST_TEAM</string></array>
+	<key>TeamName</key>
+	<string>icm test</string>
+	<key>TimeToLive</key>
+	<integer>180</integer>
+	<key>UUID</key>
+	<string>$uuid</string>
+	<key>Version</key>
+	<integer>1</integer>
+</dict>
+</plist>
+EOF
+    plutil -lint "$ACCEPT/keys/profile.plist"
+    /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=icm test profile signer" \
+        -keyout "$ACCEPT/keys/cms.key" -out "$ACCEPT/keys/cms.pem" >/dev/null 2>&1
+    /usr/bin/openssl smime -sign -binary -nodetach -outform DER -signer "$ACCEPT/keys/cms.pem" \
+        -inkey "$ACCEPT/keys/cms.key" -in "$ACCEPT/keys/profile.plist" -out "$TEST_PROFILES/$uuid.mobileprovision"
+    rm -f "$ACCEPT/keys/cms.key"
+    # A CMS envelope whose content is the plist.
+    /usr/bin/openssl smime -verify -noverify -inform DER -in "$TEST_PROFILES/$uuid.mobileprovision" \
+        -out "$ACCEPT/keys/profile.decoded.plist" 2>/dev/null
+    cmp -s "$ACCEPT/keys/profile.plist" "$ACCEPT/keys/profile.decoded.plist"
+    echo "$uuid" >"$ACCEPT/keys/profile.uuid"
+    evidence "\"$TEST_IDENTITY\" ($sha1) in $TEST_KC; App Store profile $uuid for $TEST_TEAM.dev.accept.ios, expires $expires"
+}
+
+# The signed path: the identity and the profile are found, the app is
+# signed with the distribution entitlements and every gate passes; the
+# release still ends with the owner's item, an identity no Apple service
+# trusts (exit 9, ios.sign.no_identity).
+release_test_signed() {
+    cd "$DEMO"
+    local sha1
+    sha1=$(sed -n 's/^sha1=//p' "$ACCEPT/keys/identity.txt")
+    cp icm.toml "$ACCEPT/icm.toml.signed.bak"
+    cp assets/icon.png "$ACCEPT/icon.png.signed.bak"
+    # Steps run in a subshell: its exit puts the app back.
+    trap 'cp "$ACCEPT/icm.toml.signed.bak" "$DEMO/icm.toml"; cp "$ACCEPT/icon.png.signed.bak" "$DEMO/assets/icon.png"' EXIT
+    # Not the template's placeholders and unanswered questions: those
+    # would stop the release before the build.
+    sed -i '' 's/^id = "com.example.demo"/id = "dev.accept.ios"/' icm.toml
+    sed -i '' "s/^# team_id = .*/team_id = \"$TEST_TEAM\"/" icm.toml
+    sed -i '' 's/^# uses_non_exempt_encryption = .*/uses_non_exempt_encryption = false/' icm.toml
+    sed -i '' "s/^distribution = { identity = \"auto\"/distribution = { identity = \"$sha1\"/" icm.toml
+    grep -q "^distribution = { identity = \"$sha1\"" icm.toml
+    sips --rotate 90 assets/icon.png --out "$ACCEPT/icon-turned.png" >/dev/null
+    cp "$ACCEPT/icon-turned.png" assets/icon.png
+    ICM_KEYCHAIN=$TEST_KC ICM_PROVISIONING_PROFILES=$TEST_PROFILES \
+        icm release ios --allow-dirty --json -q >"$ACCEPT/s.json" || true
+    jqe '.exit == 9 and ([.errors[].id] == ["ios.sign.no_identity"]) and (.errors[0].detail | test("CSSMERR_TP_NOT_TRUSTED"))' "$ACCEPT/s.json"
+    # The owner's item is the only failed check.
+    jqe '.checks.failed == ["ios.sign.no_identity"] and .release.uploadable == false and (.artifacts.ipa | test("\\.ipa$"))' "$ACCEPT/s.json"
+    for id in app.id.placeholder ios.sign.no_profile ios.entitlements.not_in_profile ios.sign.verify ios.entitlements.get_task_allow \
+        ios.plist.export_compliance ios.plist.dt_keys ios.privacy.reasons ios.icon.opaque_1024 ios.dsym.uuid ios.dsym.line_tables \
+        ios.macho.platform ios.macho.minos ios.macho.arch ios.ipa.layout ios.ipa.signature release.notices; do
+        check_event "$ACCEPT/s.json" "$id" pass
+    done
+    evidence "exit 9: $(/usr/bin/jq -r '.errors[0].detail' "$ACCEPT/s.json" | cut -c1-200)"
+}
+
+# What the signed IPA holds: the identity's signature, the distribution
+# entitlements and the profile, embedded byte for byte.
+test_signed_ipa() {
+    local ipa app sha1 uuid
+    ipa=$(abs "$(/usr/bin/jq -r .artifacts.ipa "$ACCEPT/s.json")")
+    sha1=$(sed -n 's/^sha1=//p' "$ACCEPT/keys/identity.txt")
+    uuid=$(cat "$ACCEPT/keys/profile.uuid")
+    rm -rf "$ACCEPT/signed-ipa"
+    unzip -q "$ipa" -d "$ACCEPT/signed-ipa"
+    app=$(echo "$ACCEPT/signed-ipa/Payload/"*.app)
+    codesign -dvv "$app" >"$ACCEPT/signed-codesign.txt" 2>&1
+    grep -qx "Authority=$TEST_IDENTITY" "$ACCEPT/signed-codesign.txt"
+    grep -qx 'Identifier=dev.accept.ios' "$ACCEPT/signed-codesign.txt"
+    codesign --verify --strict --deep "$app"
+    codesign -d --entitlements - --xml "$app" 2>/dev/null >"$ACCEPT/signed-entitlements.plist"
+    test "$(plutil -extract application-identifier raw "$ACCEPT/signed-entitlements.plist")" = "$TEST_TEAM.dev.accept.ios"
+    test "$(plutil -extract get-task-allow raw "$ACCEPT/signed-entitlements.plist")" = false
+    test "$(plutil -extract beta-reports-active raw "$ACCEPT/signed-entitlements.plist")" = true
+    cmp -s "$app/embedded.mobileprovision" "$TEST_PROFILES/$uuid.mobileprovision"
+    test "$(plutil -extract CFBundleIdentifier raw "$app/Info.plist")" = dev.accept.ios
+    test "$(plutil -extract ITSAppUsesNonExemptEncryption raw "$app/Info.plist")" = false
+    /usr/bin/jq -e --arg sha1 "$sha1" --arg uuid "$uuid" \
+        '.signing.identity_sha1 == $sha1 and .signing.profile.uuid == $uuid and .signing.profile.type == "app-store"' \
+        "$(dirname "$ipa")/artifacts.json" >/dev/null
+    evidence "$(grep -E '^(Authority|TeamIdentifier|CodeDirectory)' "$ACCEPT/signed-codesign.txt" | tr '\n' ' ' | cut -c1-200)"
+    evidence "entitlements: application-identifier $TEST_TEAM.dev.accept.ios, get-task-allow false, beta-reports-active true; embedded.mobileprovision is the test profile"
+}
+
+verify_test_signed() {
+    local ipa
+    ipa=$(abs "$(/usr/bin/jq -r .artifacts.ipa "$ACCEPT/s.json")")
+    (cd "$DEMO" && icm verify ios --artifact "$ipa" --json -q) >"$ACCEPT/sv.json" || true
+    jqe '.ok and .checks.fail == 0' "$ACCEPT/sv.json"
+    check_event "$ACCEPT/sv.json" ios.sign.no_identity pass
+    check_event "$ACCEPT/sv.json" ios.sign.no_profile pass
+    evidence "$(/usr/bin/jq -r '.summary' "$ACCEPT/sv.json")"
+}
+
+keychain_cleaned() {
+    if [ -f "$TEST_KC" ]; then
+        security delete-keychain "$TEST_KC"
+    fi
+    test ! -e "$TEST_KC"
+    # The default keychain of the other steps was only ever a name.
+    if [ "$ICM_KEYCHAIN" = "$ACCEPT/keys/no-signing.keychain-db" ]; then
+        test ! -e "$ICM_KEYCHAIN"
+    fi
+    test "$(security list-keychains -d user)" = "$SEARCH_LIST_BEFORE"
+    evidence "the user's keychain search list is as before; the test keychain is deleted"
+}
+
 main() {
     must install install_icm
     must new new_app
@@ -282,6 +473,15 @@ main() {
     else
         skip device-run "no ICM_ACCEPT_DEVICE=1 (needs a provisioned iPhone and the owner's development certificate)"
     fi
+    step test-signing-material test_signing_material
+    if [ -f "$ACCEPT/keys/profile.uuid" ]; then
+        step release-test-signed release_test_signed
+        step test-signed-ipa test_signed_ipa
+        step verify-test-signed verify_test_signed
+    else
+        skip release-test-signed "no throwaway signing material"
+    fi
+    step keychain-cleaned keychain_cleaned
     skip owner-signed-release "owner: a real id, team, App Store profile and Apple Distribution identity, then icm release ios"
     skip owner-upload "owner: upload.sh, the build processed in TestFlight, icm ledger mark-uploaded ios"
     finish

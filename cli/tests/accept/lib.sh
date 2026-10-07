@@ -9,6 +9,13 @@
 # `must` (a step later steps cannot do without) ends the script. `finish`
 # prints the summary and exits 1 when any step failed.
 
+# jq: /usr/bin/jq (design §18), else the one on PATH (Git Bash has none
+# in /usr/bin).
+JQ=/usr/bin/jq
+if [ ! -x "$JQ" ]; then
+    JQ=$(command -v jq 2>/dev/null || echo /usr/bin/jq)
+fi
+
 ACCEPT_N=0
 ACCEPT_PASSED=()
 ACCEPT_FAILED=()
@@ -76,9 +83,9 @@ evidence() { printf 'evidence: %s\n' "$*"; }
 
 # jqe FILTER FILE: `jq -e` that shows the value it judged when it fails.
 jqe() {
-    if ! /usr/bin/jq -e "$1" "$2" >/dev/null; then
+    if ! "$JQ" -e "$1" "$2" >/dev/null; then
         printf 'assertion failed: %s\n  on %s:\n' "$1" "$2"
-        /usr/bin/jq -c '{ok, exit, summary, errors: [.errors[]? | {id, detail, evidence}], warnings: [.warnings[]? | .id], failed: .checks.failed}' "$2" 2>/dev/null ||
+        "$JQ" -c '{ok, exit, summary, errors: [.errors[]? | {id, detail, evidence}], warnings: [.warnings[]? | .id], failed: .checks.failed}' "$2" 2>/dev/null ||
             head -c 2000 "$2"
         return 1
     fi
@@ -94,16 +101,16 @@ icmd() {
         printf '%s\n' "$start"
         return "$rc"
     fi
-    if [ "$(/usr/bin/jq -r '.status' <<<"$start")" != running ]; then
+    if [ "$("$JQ" -r '.status' <<<"$start")" != running ]; then
         printf '%s\n' "$start"
-        return "$(/usr/bin/jq -r '.exit' <<<"$start")"
+        return "$("$JQ" -r '.exit' <<<"$start")"
     fi
-    run=$(/usr/bin/jq -r '.run' <<<"$start")
+    run=$("$JQ" -r '.run' <<<"$start")
     echo "detached: icm $* -> $run" >&2
     while :; do
         rc=0
         out=$(icm wait "$run" --timeout 9m --json -q) || rc=$?
-        if [ "$rc" -eq 8 ] && [ "$(/usr/bin/jq -r '.status' <<<"$out")" = running ]; then
+        if [ "$rc" -eq 8 ] && [ "$("$JQ" -r '.status' <<<"$out")" = running ]; then
             echo "still running: $run" >&2
             continue
         fi
