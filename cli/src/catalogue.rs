@@ -645,9 +645,9 @@ catalogue! {
     RunNotReady = "run.not_ready", AppDied, Fail, Agent,
         "The app is alive but never drew a first frame",
         "Read `icm logs <platform> --level warn`; raise `--wait-ready` if it is legitimately slow.";
-    RunActivityRecreated = "run.activity_recreated", CheckFailed, Fail, Agent,
-        "Android recreated the activity",
-        "Follow the detail: rebuild a stale APK, raise [android] target_sdk to 36 for assetsPaths, or rerun once a fresh emulator has settled; never remove configChanges values or call iced::exit on mobile.";
+    RunActivityRecreated = "run.activity_recreated", CheckFailed, Warn, Agent,
+        "Android recreated the activity, and the app started over",
+        "Follow the detail: rebuild a stale APK, raise [android] target_sdk to 36 for assetsPaths, or rerun once a fresh emulator has settled; never remove configChanges values.";
     RunScreenBlank = "run.screen_blank", CheckFailed, Warn, Agent,
         "The screenshot is a single colour",
         "Compare with `icm shot --headless`; check fonts and theme; read the logs.";

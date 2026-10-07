@@ -8,12 +8,14 @@ configuration changes that caused it; the detail names them as
 `android:configChanges` does (`80000000` is `assetsPaths`) and compares them
 with the manifest icm generates.
 
-An iced app cannot survive a recreated activity: android-activity holds the
-old activity's `onDestroy` until `android_main` returns, and winit 0.30 does
-not end its event loop then, so the app stops drawing and answering input.
-When the relaunch comes before the first frame, the run also fails
-`run.not_ready` (exit 10) ten seconds after it, with the relaunch as its
-likely cause; after the first frame it is this FAIL alone (exit 1).
+A relaunch destroys the activity, and the iced application ends with it: its
+state, windows and tasks are dropped, `android_main` returns, and the new
+activity starts the application again, from its boot function, usually in
+the same process (a new `ICM_EVENT start`, then `ready`). The app keeps
+running, so this is a WARN, but whatever it held in memory is gone, and a
+user would see it reset. When the relaunch comes before the first frame and
+the new activity does not draw within ten seconds, the run fails
+`run.not_ready` (exit 10) with the relaunch as its likely cause.
 
 Common causes:
 
@@ -25,9 +27,16 @@ Common causes:
   it, or `--no-build` reused it);
 - a change no `configChanges` value covers yet.
 
+A panic "Create event loop: an event loop is already running in this
+process" is related: Android started a second activity of the app while the
+first still ran it, after a launch a moment after Back (a launch a moment
+later works) or a start into another task, which the manifest's
+`android:launchMode="singleTask"` prevents.
+
 ## Fix
 
 Do what the detail says: rerun `icm run android` without `--no-build` for a
 stale APK, raise `[android] target_sdk` to 36 for `assetsPaths`, or rerun once
-a fresh emulator has settled. Never remove a `configChanges` value, and never
-call `iced::exit` on mobile.
+a fresh emulator has settled. Never remove a `configChanges` value. Save what
+must survive a destroyed activity on `Lifecycle::Suspended`, which comes
+before it.

@@ -564,17 +564,20 @@ struct Ready {
 }
 
 /// How long a relaunched activity gets to draw before the run gives up on
-/// it: iced freezes when Android recreates its activity (android-activity
-/// holds `onDestroy` until `android_main` returns, and winit 0.30 does not
-/// end its loop then), so the frame that never came will not come.
+/// it. The relaunch ends the application, and the new activity starts it
+/// again in the same process, which takes about as long as a warm start and
+/// sends its own `ICM_EVENT start` and `ready`. An app that stays silent
+/// this long after a relaunch will not draw (a framework from before the
+/// Android lifecycle fix freezes there: winit 0.30.13 does not end its
+/// event loop when the activity is destroyed).
 const RELAUNCH_GRACE: Duration = Duration::from_secs(10);
 
 /// Waits for `ICM_EVENT ready` in logcat (the framework emits it after
 /// the first presented frame). An app that never speaks the protocol (no
 /// `start` event) is ready by probe: alive and the top resumed activity on
 /// three polls in a row. A death or panic fails at once; so does an
-/// activity Android relaunched ([`RELAUNCH_GRACE`] later), which the probe
-/// cannot tell from a live one.
+/// activity Android relaunched that does not draw within
+/// [`RELAUNCH_GRACE`], which the probe cannot tell from a live one.
 fn wait_ready(
     ctx: &Ctx,
     adb: &Adb,
@@ -1092,8 +1095,9 @@ struct Recreated {
     evidence: Option<Evidence>,
 }
 
-/// `run.activity_recreated` (FAIL): Android relaunched the app's activity
-/// since the launch mark. Writes the events buffer since the mark to
+/// `run.activity_recreated` (WARN): Android relaunched the app's activity
+/// since the launch mark, so the app started over in the new one and lost
+/// what it kept in memory. Writes the events buffer since the mark to
 /// `events.txt` (design §10.4 step 12) and reports the first relaunch with
 /// the configuration changes that caused it ([`describe_recreation`]).
 fn recreation(
@@ -1123,7 +1127,7 @@ fn recreation(
     let evidence = Evidence::line(&path, line, first.record.line());
     let commands: Vec<&str> = recreated.commands.iter().map(String::as_str).collect();
     ctx.rep.check(
-        Check::fail(CheckId::RunActivityRecreated, detail)
+        Check::warn(CheckId::RunActivityRecreated, detail)
             .evidence(evidence.clone())
             .fix(recreated.fix.clone(), &commands),
     );
@@ -1198,11 +1202,11 @@ fn describe_recreation(
         detail.push_str(&format!(", {} relaunches", found.len()));
     }
     detail.push_str(&format!(
-        ": {why}. An iced app freezes when its activity is recreated"
+        ": {why}. The app ended with its activity and started over in the new one, losing what it kept in memory"
     ));
     let recreated = Recreated {
         cause: format!(
-            "Android relaunched the activity {after} after launch, and an iced app freezes when its activity is recreated (it stops drawing and answering input): {why} (run.activity_recreated)"
+            "Android relaunched the activity {after} after launch, which ends the app and starts it over in the new activity: {why} (run.activity_recreated)"
         ),
         fix: fix.to_string(),
         commands: vec!["icm run android --json -q".to_string()],
@@ -2002,6 +2006,7 @@ mod tests {
             ),
             "{detail}"
         );
+        assert!(detail.contains("started over"), "{detail}");
         assert!(recreated.cause.contains("runtime resource overlay"));
         assert!(recreated.cause.ends_with("(run.activity_recreated)"));
         assert!(recreated.fix.contains("target_sdk to 36"));

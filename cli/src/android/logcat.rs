@@ -289,11 +289,13 @@ pub fn likely_causes(records: &[Record], lib: &str) -> Vec<String> {
                     .to_string(),
             );
         }
-        if msg.contains("Call set_android_app")
+        if msg.contains("an event loop is already running in this process") {
+            add("a second activity started while another one still ran the app (a launch right after Back, or a start into another task); launch it again".to_string());
+        } else if msg.contains("Call set_android_app")
             || msg.contains("RecreationAttempt")
             || msg.contains("ran twice")
         {
-            add("duplicate iced copies (deps.single_iced) or Activity recreation (configChanges); never call iced::exit".to_string());
+            add("duplicate iced copies (deps.single_iced), or Activity recreation on an iced_mobile from before the Android lifecycle fix (update the pin); never call iced::exit".to_string());
         }
         if msg.starts_with("ANR in") {
             add("the main thread is blocked (ANR)".to_string());

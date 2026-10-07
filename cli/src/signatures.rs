@@ -67,13 +67,20 @@ pub const SIGNATURES: &[Signature] = &[
         related: Some(CheckId::IosPlistSceneManifest),
     },
     Signature {
+        name: "android.second_activity",
+        patterns: &[&["an event loop is already running in this process"]],
+        cause: "Android started a second Activity of the app while another one still ran it, and iced runs one at a time: the app was launched again a moment after Back, before Android had destroyed the Activity it was finishing (a launch a moment later works), or the activity was started into another task, which android:launchMode=\"singleTask\" (in icm's manifest) prevents (run.activity_recreated).",
+        per_platform: &[],
+        related: Some(CheckId::RunActivityRecreated),
+    },
+    Signature {
         name: "android.recreation",
         patterns: &[
             &["RecreationAttempt"],
             &["android_main ran a second time"],
             &["android_main ran twice"],
         ],
-        cause: "android_main ran a second time in one process (RecreationAttempt): Android recreated the Activity or kept the process after the app stopped. Keep the full android:configChanges list, never call iced::exit on Android, and use iced::android_main!, which ends the process when the app stops (run.activity_recreated).",
+        cause: "android_main ran a second time in one process (RecreationAttempt) on an iced_mobile from before the Android lifecycle fix, whose winit allows one event loop per process: Android recreated the Activity or kept the process after the app stopped. Update the app's iced_mobile pin; until then keep the full android:configChanges list and [android] back = \"key\", and never call iced::exit on Android (run.activity_recreated).",
         per_platform: &[],
         related: Some(CheckId::RunActivityRecreated),
     },
@@ -149,7 +156,7 @@ pub const SIGNATURES: &[Signature] = &[
             &["wm_relaunch_activity"],
             &["wm_relaunch_resume_activity"],
         ],
-        cause: "Android destroyed or relaunched the Activity: a configuration change it does not handle (a resource overlay change is assetsPaths), or Back finishing it. Keep the full android:configChanges list and [android] back = \"key\" (run.activity_recreated).",
+        cause: "Android destroyed or relaunched the Activity: Back at the app's root, or a configuration change it does not handle (a resource overlay change is assetsPaths). The app ends with its Activity and starts over in the next one, losing what it kept in memory; keep the full android:configChanges list (run.activity_recreated).",
         per_platform: &[],
         related: Some(CheckId::RunActivityRecreated),
     },
@@ -548,6 +555,10 @@ mod tests {
             (
                 "thread 'main' panicked at winit/src/lib.rs:190:39:\nCreate event loop: android_main ran a second time in this process (RecreationAttempt)",
                 "android.recreation",
+            ),
+            (
+                "thread 'android_main' panicked at winit/src/lib.rs:234:13:\nCreate event loop: an event loop is already running in this process, and winit runs one at a time.",
+                "android.second_activity",
             ),
             (
                 "E RustStdoutStderr: No AndroidApp: define the entry point with iced::android_main!(run)",
