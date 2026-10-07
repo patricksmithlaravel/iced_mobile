@@ -574,7 +574,7 @@ min_sdk = 26
 target_sdk = 36                        # Play floor since 2026-08-31 [S]
 abis = ["arm64-v8a", "x86_64"]         # release; dev builds only the device's ABI
 activity = "native"                    # "game" reserved (needs a dex path; phase 7)
-back = "key"                           # enableOnBackInvokedCallback="false" (temporary opt-out; WARN in release)
+back = "system"                        # Android's Back; "key": enableOnBackInvokedCallback="false", Back as a key for an app that handles it (temporary opt-out; WARN in release)
 allow_backup = true
 res = "platform/android/res"           # optional; compiled with aapt2 and layered over generated res
 extra_permissions = []
@@ -985,7 +985,7 @@ Each key must be allowed by the profile's `Entitlements`, with wildcards resolve
   <uses-permission android:name="android.permission.INTERNET"/>
   <application android:label="App" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round"
       android:hasCode="false" android:extractNativeLibs="false" android:allowBackup="true"
-      android:enableOnBackInvokedCallback="false" android:theme="@style/IcmTheme">
+      android:theme="@style/IcmTheme">
     <activity android:name="android.app.NativeActivity" android:exported="true" android:launchMode="singleTask"
         android:windowSoftInputMode="adjustResize|stateHidden"
         android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|screenSize|smallestScreenSize|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender|assetsPaths">
@@ -999,6 +999,7 @@ Each key must be allowed by the profile's `Entitlements`, with wildcards resolve
 </manifest>
 ```
 - The configChanges list is the review §6.6 list: Tawara's values plus `mcc|mnc|grammaticalGender`, and `assetsPaths` from API 36 (Appendix D, Android). It is policy data keyed by API level.
+- `android:enableOnBackInvokedCallback="false"` is added only with `[android] back = "key"` (API 33 and later), for an app that handles Back itself: Back then reaches it as `Key::Named(Named::BrowserBack)`. With the default `"system"`, Back at the app's root finishes the activity, and the application starts over at the next launch (the framework ends it with its activity).
 - Generated resources:
   - `values/themes.xml`: `IcmTheme`, parent `@android:style/Theme.Material.NoActionBar`, with `windowBackground` set from `background`
   - legacy `mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher.png` and `ic_launcher_round.png`, 48 to 192 px

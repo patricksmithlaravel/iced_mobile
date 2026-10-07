@@ -17,8 +17,10 @@ pub const THEME: &str = "IcmTheme";
 /// `android:configChanges` values, the API level that introduced each, and
 /// its bit (`ActivityInfo.CONFIG_*`, the mask Android logs when it
 /// relaunches an activity). The activity handles all of them itself, so
-/// Android never destroys and recreates it (which freezes an iced app);
-/// policy data keyed by the API level the manifest is linked against.
+/// Android never destroys and recreates it for them: a recreated activity
+/// ends the iced application, which starts over in the new one and loses
+/// its state. Policy data keyed by the API level the manifest is linked
+/// against.
 ///
 /// `assetsPaths` is a change of the app's resource overlays: on an
 /// emulator's first boots SystemUI applies its theme overlays (the
@@ -276,6 +278,9 @@ pub fn manifest(inputs: &Inputs<'_>) -> Result<String, IcmError> {
         "        android:allowBackup=\"{}\"\n",
         android.allow_backup
     ));
+    // `[android] back = "key"`: Back reaches the app as a key press
+    // (`Key::Named(Named::BrowserBack)`) instead of finishing the activity.
+    // Only for an app that handles it; the attribute exists from API 33.
     if android.back == "key" && api >= 33 {
         xml.push_str("        android:enableOnBackInvokedCallback=\"false\"\n");
     }
@@ -412,7 +417,6 @@ mod tests {
             "<uses-permission android:name=\"android.permission.INTERNET\"/>",
             "android:hasCode=\"false\"",
             "android:extractNativeLibs=\"false\"",
-            "android:enableOnBackInvokedCallback=\"false\"",
             "android:roundIcon=\"@mipmap/ic_launcher_round\"",
             "android:name=\"android.app.NativeActivity\"",
             "android:screenOrientation=\"portrait\"",
@@ -424,6 +428,8 @@ mod tests {
             assert!(xml.contains(expected), "missing {expected} in\n{xml}");
         }
         assert!(!xml.contains("debuggable"));
+        // The template leaves Back to Android (`back = "system"`).
+        assert!(!xml.contains("enableOnBackInvokedCallback"));
     }
 
     #[test]
@@ -461,7 +467,7 @@ mod tests {
             "<meta-data android:name=\"x\" android:value=\"y\"/>".into();
         config.android.extra_permissions = vec!["VIBRATE".into(), "com.x.PERM".into()];
         config.app.orientations = vec![Orientation::LandscapeLeft, Orientation::LandscapeRight];
-        config.android.back = "system".into();
+        config.android.back = "key".into();
         let xml = manifest(&Inputs {
             config: &config,
             version: "1.2.3",
@@ -477,7 +483,7 @@ mod tests {
         assert!(xml.contains("android.permission.VIBRATE"));
         assert!(xml.contains("\"com.x.PERM\""));
         assert!(xml.contains("sensorLandscape"));
-        assert!(!xml.contains("enableOnBackInvokedCallback"));
+        assert!(xml.contains("android:enableOnBackInvokedCallback=\"false\""));
 
         config.android.manifest.extra_manifest_xml =
             "<uses-sdk android:minSdkVersion=\"1\"/>".into();

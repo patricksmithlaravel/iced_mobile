@@ -55,29 +55,34 @@ this file in the commit that fixes or finds a limitation.
   Center, Notification Center, Face ID prompts and calls; on Android its
   native window is going away; on the web the page goes into the
   back-forward cache; the desktop never sends it. `on_lifecycle` takes one
-  plain `fn` (a second call is ignored with a warning) and cannot reach
-  `update` by itself. Hide sensitive content on `Suspended`, but do not
-  lock, log out or stop work on it alone: an unlock that asks for Face ID
-  suspends the app again, and loops.
-- **Destroying the Android activity freezes the app** (fixing it needs a
-  winit patch, rust-windowing/winit#4739). Whatever destroys the activity
-  while the process lives on (predictive Back, a configuration change
-  missing from `configChanges`, the "Don't keep activities" developer
-  option) freezes the app, and the next launch hangs until the process is
-  killed. icm's generated manifest lists every `configChanges` value
-  (with `assetsPaths` from target_sdk 36: an emulator's theme overlays
-  change during its first boots) and,
-  with `[android] back = "key"`, turns predictive Back off: Back then
-  reaches the app as `Key::Named(Named::BrowserBack)` and never closes it.
-  Handle that key for in-app navigation, never remove a `configChanges`
-  value, and do not test with "Don't keep activities".
+  plain `fn` (setting the same one again does nothing; a different one is
+  ignored with a warning) and cannot reach `update` by itself. Hide
+  sensitive content on `Suspended`, but do not lock, log out or stop work
+  on it alone: an unlock that asks for Face ID suspends the app again, and
+  loops.
+- **When Android destroys the activity, the app starts over.** Back at the
+  app's root, a configuration change missing from `configChanges`, the
+  "Don't keep activities" developer option and memory reclaim in the
+  background destroy the Android activity: the application is dropped
+  (after `Lifecycle::Suspended`) and the next activity starts it again,
+  from its boot function, often in the same process. Whatever it kept in
+  memory is gone. icm's generated manifest lists every `configChanges`
+  value (with `assetsPaths` from target_sdk 36: an emulator's theme
+  overlays change during its first boots), so rotation, dark mode and font
+  scale keep the state; never remove one. Save what must survive on
+  `Suspended`. Back is Android's by default (`[android] back = "system"`);
+  an app that handles Back itself (going back a screen) sets `back =
+  "key"`: Back then reaches it as `Key::Named(Named::BrowserBack)` and
+  never closes it, so at the root it does nothing. Launching the app again
+  a moment after Back can end the process; the next launch works.
 - **One window on Android.** A second `window::open` is refused with an error
   in the log, and its task ends without an id. Navigate inside one window.
   On iOS, a window being opened may replace the last one: open the new
   window before closing the old.
 - **Apps cannot quit themselves on phones.** `iced::exit()` and closing the
   last window are ignored on Android and iOS, with a warning in the log; the
-  system ends mobile apps. Never call them there.
+  system ends mobile apps. Never call them there. On Android, finishing the
+  activity through JNI (`Activity.finish`) leaves the app as Back does.
 - **iOS ignores most window settings** (size, position, title, decorations,
   level, icon): the window fills the screen. `window::Event::Opened` reports
   the safe-area size; the following `Resized` has the real one.

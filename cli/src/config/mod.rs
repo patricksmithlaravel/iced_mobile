@@ -343,7 +343,9 @@ pub struct AndroidConfig {
     /// `native` (NativeActivity); `game` is reserved.
     #[serde(default = "default_activity")]
     pub activity: String,
-    /// `key`: opt out of predictive back for now.
+    /// `system`: Android handles Back (predictive back) and finishes the
+    /// activity at the app's root. `key`: Back reaches the app as a key
+    /// (`enableOnBackInvokedCallback="false"`), for an app that handles it.
     #[serde(default = "default_back")]
     pub back: String,
     /// android:allowBackup.
@@ -692,7 +694,7 @@ fn default_activity() -> String {
     "native".to_string()
 }
 fn default_back() -> String {
-    "key".to_string()
+    "system".to_string()
 }
 fn default_track() -> String {
     "internal".to_string()
@@ -1421,7 +1423,7 @@ min_sdk = 26
 target_sdk = 36
 abis = ["arm64-v8a", "x86_64"]
 activity = "native"
-back = "key"
+back = "system"
 allow_backup = true
 res = "platform/android/res"
 extra_permissions = []
