@@ -69,13 +69,22 @@ impl Screen {
         )
     }
 
-    /// Device pixels per preview pixel.
-    pub fn preview_factor(&self) -> f64 {
-        if self.preview.0 == 0 {
-            1.0
-        } else {
-            f64::from(self.px.0) / f64::from(self.preview.0)
-        }
+    /// Device pixels per preview pixel, per axis. The preview's edges are
+    /// rounded separately, so one factor for both axes would be off by up
+    /// to a device pixel on the other one (1199 instead of 1200 on a
+    /// 1080x2400 screen).
+    pub fn preview_factors(&self) -> (f64, f64) {
+        let factor = |px: u32, preview: u32| {
+            if preview == 0 {
+                1.0
+            } else {
+                f64::from(px) / f64::from(preview)
+            }
+        };
+        (
+            factor(self.px.0, self.preview.0),
+            factor(self.px.1, self.preview.1),
+        )
     }
 
     /// A point in `space` as device pixels.
@@ -84,8 +93,8 @@ impl Screen {
             Space::Px => (x, y),
             Space::Pt => (x * self.scale, y * self.scale),
             Space::Preview => {
-                let factor = self.preview_factor();
-                (x * factor, y * factor)
+                let (fx, fy) = self.preview_factors();
+                (x * fx, y * fy)
             }
         }
     }
@@ -140,6 +149,15 @@ mod tests {
         );
         assert!(screen.contains(470.0, 1023.0, Space::Preview));
         assert!(!screen.contains(500.0, 10.0, Space::Preview));
+
+        // Each axis has its own factor: the preview's middle is the
+        // screen's middle on both.
+        let pixel9 = Screen::new((1080, 2400), 2.625);
+        assert_eq!(pixel9.preview, (461, 1024));
+        assert_eq!(
+            pixel9.to_px(461.0 / 2.0, 512.0, Space::Preview),
+            (540.0, 1200.0)
+        );
 
         let json = screen.to_json();
         assert_eq!(json["px"][0], 1206);

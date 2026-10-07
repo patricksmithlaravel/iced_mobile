@@ -154,16 +154,16 @@ fn copy_dir(from: &Path, to: &Path) {
 fn taps_are_in_preview_pixels_by_default() {
     let sandbox = Sandbox::new();
     // 1080x2400 previews at 461x1024, so a preview pixel is 1080/461 device
-    // pixels on both axes; preview (230.5, 512) is the centre.
+    // pixels across and 2400/1024 down; preview (230.5, 512) is the centre.
     let result = sandbox.result(&["input", "android", "tap", "230.5", "512"]);
     assert_eq!(result["exit"], 0, "{result}");
-    assert_eq!(result["input"]["px"], serde_json::json!([540, 1199]));
+    assert_eq!(result["input"]["px"], serde_json::json!([540, 1200]));
     assert_eq!(result["screen"]["preview"], serde_json::json!([461, 1024]));
     assert_eq!(result["screen"]["scale"], 2.625);
     assert!(
         sandbox
             .adb_calls()
-            .contains("-s emulator-5580 shell input tap 540 1199"),
+            .contains("-s emulator-5580 shell input tap 540 1200"),
         "{}",
         sandbox.adb_calls()
     );
