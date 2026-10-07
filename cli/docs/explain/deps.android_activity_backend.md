@@ -31,9 +31,10 @@ A `cargo tree` that fails is a SKIP; `cargo check` runs next and reports why.
 ## Fix
 
 Turn on exactly one backend: keep iced's default features, or list
-`android-native-activity` with `default-features = false`. An app that
-depends on winit directly can turn on winit's `android-native-activity`
-instead. To find which crate turns on each backend:
+`android-native-activity` with `default-features = false` (`iced_winit`
+has the same feature). Do not depend on winit directly for it: iced brings
+its own winit, and a second one fails `deps.single_winit`. To find which
+crate turns on each backend:
 
 ```sh
 cargo tree -p <package> --target aarch64-linux-android -e features -i android-activity

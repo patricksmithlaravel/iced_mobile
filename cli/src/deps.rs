@@ -1,7 +1,7 @@
 //! Dependency checks (design §2.4 item 4, §5, §12.1): from Cargo.lock, one
-//! iced, from the fork, pinned, and one winit at or above the floors the
-//! fork needs; from the Android build's resolved features (cargo tree), one
-//! Android activity backend.
+//! iced, from the fork, pinned, and one winit (the one iced brings) at or
+//! above the floors the fork needs; from the Android build's resolved
+//! features (cargo tree), one Android activity backend.
 
 use crate::cargo::{GitRef, Lock, LockPackage, Source};
 use crate::catalogue::CheckId;
@@ -238,11 +238,41 @@ fn short(rev: &str) -> &str {
     rev.get(..12).unwrap_or(rev)
 }
 
+/// Where iced comes from, as [`origin`] names it: the `iced` package's
+/// source, or the first framework crate's when the lock has no `iced`.
+fn iced_origin(lock: &Lock) -> Option<String> {
+    lock.named("iced")
+        .next()
+        .or_else(|| iced_packages(lock).into_iter().next())
+        .map(origin)
+}
+
 /// `deps.single_winit`: one winit in the graph.
+///
+/// The fork vendors its winit (`vendor/winit`, a path dependency of its
+/// workspace), so winit comes from iced's own source: in an app's lock, the
+/// same git URL and revision as iced; in the fork's workspace, or with iced
+/// as a path dependency, a path. An older fork takes winit from crates.io.
+/// Either way there must be one: a crate that depends on winit itself (from
+/// crates.io, another git source or path) adds a second copy, which iced
+/// does not use, and whose Objective-C classes clash with iced's on iOS.
 pub fn single_winit(lock: &Lock) -> Check {
     let winits: Vec<&LockPackage> = lock.named("winit").collect();
+    let iced = iced_origin(lock);
+    let from_iced = |package: &LockPackage| iced.as_deref() == Some(origin(package).as_str());
+    let describe = |package: &LockPackage| {
+        if from_iced(package) {
+            format!("{} from iced's own source", package.version)
+        } else {
+            format!("{} from {}", package.version, origin_kind(package))
+        }
+    };
     match winits.len() {
         0 => Check::skip(CheckId::DepsSingleWinit, "no winit in Cargo.lock"),
+        1 if from_iced(winits[0]) => Check::pass(
+            CheckId::DepsSingleWinit,
+            format!("winit {}", describe(winits[0])),
+        ),
         1 => Check::pass(
             CheckId::DepsSingleWinit,
             format!("winit {} ({})", winits[0].version, origin_kind(winits[0])),
@@ -254,11 +284,18 @@ pub fn single_winit(lock: &Lock) -> Check {
                     "{n} winits: {}",
                     winits
                         .iter()
-                        .map(|p| format!("{} from {}", p.version, origin_kind(p)))
+                        .map(|p| describe(p))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
+            )
+            .fix(
+                "Keep only the winit iced brings: drop direct winit dependencies (use iced::mobile::AndroidApp, iced_winit::winit and iced's activity features), and give a crate that needs winit itself iced's copy with [patch.crates-io] winit on iced's git URL and tag or rev, character for character. `cargo tree -d --target all` shows which crate pulls each copy.",
+                &["cargo tree -d --target all"],
             );
+            // iced's own first: the evidence of the others is what to fix.
+            let mut winits = winits;
+            winits.sort_by_key(|package| !from_iced(package));
             for package in &winits {
                 check = check.evidence(lock.evidence(package));
             }
@@ -457,7 +494,7 @@ pub fn android_activity_backend(
         )
         .fix(
             format!(
-                "Add \"{wanted_iced}\" to iced's features (or winit's `{wanted_iced}` when the app depends on winit directly)."
+                "Add \"{wanted_iced}\" to iced's features (or iced_winit's, which has the same feature); not to a winit of the app's own, which would be a second winit (deps.single_winit)."
             ),
             &[],
         )
@@ -673,6 +710,70 @@ mod tests {
         );
         assert_eq!(same.status, Status::Pass);
         assert_eq!(cli_framework_skew(&lock, "", "x").status, Status::Skip);
+    }
+
+    #[test]
+    fn the_winit_iced_brings_is_the_one() {
+        // The fork vendors winit: in an app's lock it comes from iced's
+        // git source, as dpi does.
+        let vendored = lock(&[
+            ("iced", "0.14.1", Some(FORK)),
+            ("iced_winit", "0.14.1", Some(FORK)),
+            ("dpi", "0.1.1", Some(FORK)),
+            ("winit", "0.30.13", Some(FORK)),
+        ]);
+        let check = single_winit(&vendored);
+        assert_eq!(check.status, Status::Pass);
+        assert!(
+            check.error.detail.contains("from iced's own source"),
+            "{}",
+            check.error.detail
+        );
+        assert_eq!(winit_floor(&vendored).status, Status::Pass);
+
+        // In the fork's own workspace both are paths.
+        let workspace = lock(&[
+            ("iced", "0.14.1", None),
+            ("iced_winit", "0.14.1", None),
+            ("winit", "0.30.13", None),
+        ]);
+        assert_eq!(single_winit(&workspace).status, Status::Pass);
+
+        // A crate that still depends on crates.io winit adds a second one.
+        let second = lock(&[
+            ("iced", "0.14.1", Some(FORK)),
+            ("winit", "0.30.13", Some(CRATES_IO)),
+            ("winit", "0.30.13", Some(FORK)),
+        ]);
+        let check = single_winit(&second);
+        assert_eq!(check.status, Status::Fail);
+        assert!(
+            check
+                .error
+                .detail
+                .contains("0.30.13 from crates.io, 0.30.13 from iced's own source"),
+            "{}",
+            check.error.detail
+        );
+        assert!(check.error.fix.summary.contains("[patch.crates-io]"));
+        // iced's copy first, then the one to remove.
+        assert_eq!(check.error.evidence.len(), 2);
+        let excerpt = |index: usize| {
+            check.error.evidence[index]
+                .excerpt
+                .clone()
+                .unwrap_or_default()
+        };
+        assert!(excerpt(0).contains("iced_mobile"), "{}", excerpt(0));
+        assert!(excerpt(1).contains("crates.io-index"), "{}", excerpt(1));
+
+        // So does winit from another revision of the fork.
+        let other_rev = lock(&[
+            ("iced", "0.14.1", Some(FORK)),
+            ("winit", "0.30.13", Some(FORK)),
+            ("winit", "0.30.13", Some(FORK_OTHER_REV)),
+        ]);
+        assert_eq!(single_winit(&other_rev).status, Status::Fail);
     }
 
     #[test]

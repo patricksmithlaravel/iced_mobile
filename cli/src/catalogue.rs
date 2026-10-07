@@ -323,7 +323,7 @@ catalogue! {
         "Install the icm that matches the app's framework tag, or move the app to this icm's framework.";
     DepsSingleWinit = "deps.single_winit", Config, Fail, Agent,
         "Cargo.lock holds more than one winit",
-        "Make every crate use the winit iced_winit uses (remove or align direct winit dependencies).";
+        "Keep only the winit iced brings: drop direct winit dependencies, or give the crate that needs one iced's copy with [patch.crates-io] on iced's git URL and tag or rev.";
     DepsWinitFloor = "deps.winit_floor", Config, Fail, Agent,
         "winit is older than 0.30.13",
         "Run `cargo update -p winit`.";

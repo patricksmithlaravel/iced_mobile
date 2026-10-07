@@ -45,7 +45,7 @@ None of this is pushed. The remote has only `tawara/0.14-mobile`, and no `v0.14.
 **How the owner's answers are reflected**
 
 1. **General-purpose framework.** The template, the config and the commands are app-agnostic, and Tawara is one consumer (§15).
-2. **"You decide."** The fork may carry winit patches only for fixes that cannot live in iced_winit: the A3 recreation freeze, C2 composition and C1 insets. iced_winit takes such a winit as a direct git dependency, never through `[patch]`, because `[patch]` does not reach apps. `icm check` enforces one winit (`deps.single_winit`), so either state of the fork is safe to detect.
+2. **"You decide."** The fork may carry winit patches only for fixes that cannot live in iced_winit: the A3 recreation freeze, C2 composition and C1 insets. iced_winit takes such a winit as a direct git dependency, never through `[patch]`, because `[patch]` does not reach apps. `icm check` enforces one winit (`deps.single_winit`), so either state of the fork is safe to detect. As built, the fork vendors that winit in its own repository (`vendor/winit`, a path dependency of the workspace), so an app's lock takes it from iced's git source, and `deps.single_winit` names that copy as iced's own.
 3. **Stay on 0.14.** Tags are `v0.14.x-mobile.N`, and changes from 0.15 are cherry-picked when they materially improve things. icm does not care which base is underneath, because it never links iced.
 4. **Borrow, don't join.** The Android system-font loading idea and the `run_android` naming are borrowed. icm itself never depends on the iced-mobile org's crates.
 
