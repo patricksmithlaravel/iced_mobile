@@ -92,6 +92,22 @@ pub struct Diagnostic {
     pub col: Option<u32>,
     /// The cargo targets that reported it.
     pub targets: Vec<String>,
+    /// Whether its file lies outside the app's workspace (a path
+    /// dependency such as the framework checkout): the app cannot fix it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dependency: bool,
+}
+
+impl Diagnostic {
+    /// Whether the diagnostic's file is outside `workspace_root`. rustc
+    /// names a workspace member's files relative to the workspace root and
+    /// a path dependency's absolutely; registry crates' lints are capped.
+    pub fn outside(&self, workspace_root: &std::path::Path) -> bool {
+        self.file.as_deref().is_some_and(|file| {
+            let path = std::path::Path::new(file);
+            path.is_absolute() && !path.starts_with(workspace_root)
+        })
+    }
 }
 
 /// A failure that stops a command, or one entry of `errors[]`.

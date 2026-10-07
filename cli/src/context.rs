@@ -103,6 +103,8 @@ impl Ctx {
                 Ok(project) => {
                     let _ = self.rep.attach(&project.icm_dir);
                     self.rep.set("app", project.app_json());
+                    self.rep
+                        .set_workspace_root(&project.metadata.workspace_root);
                     self.rep.set("inputs", project.inputs_json());
                     self.project = Some(project);
                 }

@@ -644,7 +644,11 @@ fn compile(
             if !summary {
                 match diagnostic.level.as_str() {
                     "error" | "error: internal compiler error" => errors.push(diagnostic.clone()),
-                    "warning" => warnings += 1,
+                    // Only the app's own: a path dependency's (the
+                    // framework checkout's) warnings are not its to fix.
+                    "warning" if !diagnostic.outside(&project.metadata.workspace_root) => {
+                        warnings += 1;
+                    }
                     _ => {}
                 }
             }

@@ -681,6 +681,7 @@ pub fn parse_message(line: &str) -> Option<Message> {
                 } else {
                     vec![target]
                 },
+                dependency: false,
             }))
         }
         "build-finished" => Some(Message::BuildFinished {

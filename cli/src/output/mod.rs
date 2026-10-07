@@ -94,6 +94,7 @@ struct Inner {
     warnings: Vec<IcmError>,
     diagnostics: Vec<Diagnostic>,
     diagnostic_keys: BTreeSet<String>,
+    workspace_root: Option<PathBuf>,
     artifacts: Map<String, Value>,
     next: Vec<Value>,
     fields: Map<String, Value>,
@@ -151,6 +152,7 @@ impl Reporter {
                 warnings: Vec::new(),
                 diagnostics: Vec::new(),
                 diagnostic_keys: BTreeSet::new(),
+                workspace_root: None,
                 artifacts: Map::new(),
                 next: Vec::new(),
                 fields: Map::new(),
@@ -333,8 +335,11 @@ impl Reporter {
     /// Reports a compiler diagnostic, de-duplicated across targets. The
     /// first [`MAX_DIAGNOSTICS`] errors are attached to `errors[0]` when the
     /// command fails with a build error.
-    pub fn diagnostic(&self, diagnostic: Diagnostic) {
+    pub fn diagnostic(&self, mut diagnostic: Diagnostic) {
         let mut inner = self.lock();
+        if let Some(root) = &inner.workspace_root {
+            diagnostic.dependency = diagnostic.outside(root);
+        }
         let key = format!(
             "{}|{:?}|{:?}|{:?}|{:?}|{}",
             diagnostic.level,
@@ -353,6 +358,12 @@ impl Reporter {
         let mut event = json!(diagnostic);
         event["type"] = json!("diagnostic");
         inner.emit(event);
+    }
+
+    /// The app's workspace root: diagnostics from files outside it are
+    /// marked `dependency` (and their warnings not printed in human mode).
+    pub fn set_workspace_root(&self, root: &Path) {
+        self.lock().workspace_root = Some(root.to_path_buf());
     }
 
     /// The first error-level diagnostics seen.
@@ -1108,6 +1119,30 @@ mod tests {
     }
 
     #[test]
+    fn dependency_warnings_are_marked_and_not_printed() {
+        let (rep, _out, err) = reporter(Mode::default(), false);
+        rep.set_workspace_root(Path::new("/work/app"));
+        let warning = |file: &str| Diagnostic {
+            level: "warning".into(),
+            code: None,
+            message: "use of deprecated method".into(),
+            rendered: format!("warning: use of deprecated method\n --> {file}:1:1\n"),
+            file: Some(file.into()),
+            line: Some(1),
+            col: Some(1),
+            targets: vec![],
+            dependency: false,
+        };
+        rep.diagnostic(warning("/fork/winit/src/lib.rs"));
+        rep.diagnostic(warning("src/lib.rs"));
+        rep.diagnostic(warning("/work/app/src/main.rs"));
+        let text = err.text();
+        assert!(!text.contains("/fork/winit"), "{text}");
+        assert!(text.contains("--> src/lib.rs"), "{text}");
+        assert!(text.contains("/work/app/src/main.rs"), "{text}");
+    }
+
+    #[test]
     fn build_failures_carry_the_diagnostics() {
         let (rep, out, _) = reporter(json_mode(), false);
         let diagnostic = Diagnostic {
@@ -1119,6 +1154,7 @@ mod tests {
             line: Some(4),
             col: Some(5),
             targets: vec!["app".into()],
+            dependency: false,
         };
         rep.diagnostic(diagnostic.clone());
         rep.diagnostic(diagnostic); // de-duplicated

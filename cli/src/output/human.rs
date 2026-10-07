@@ -73,6 +73,11 @@ pub fn render(event: &Value, quiet: bool, verbose: bool) -> Vec<(Stream, String)
             }
             out.push((Stream::Stdout, line.trim_end().replace("READY  ", "READY ")));
         }
+        // A dependency's warnings (the framework checkout's, say) are in
+        // events.ndjson; the app cannot act on them.
+        "diagnostic"
+            if event.get("dependency").and_then(Value::as_bool) == Some(true)
+                && str_field(event, "level") == "warning" => {}
         "diagnostic" if !quiet => {
             let rendered = str_field(event, "rendered");
             let text = if rendered.is_empty() {
