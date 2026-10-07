@@ -285,9 +285,72 @@ fn run_fails_before_building_when_the_sdk_lacks_pieces() {
     );
     assert_eq!(result["device"], Value::Null);
 
+    // --from-aab installs the newest release's bundle: without one it says
+    // how to make it, before choosing a device.
     let result = sandbox.result(&["run", "android", "--from-aab"]);
-    assert_eq!(result["exit"], 2);
-    assert_eq!(result["errors"][0]["id"], "usage.not_implemented");
+    assert_eq!(result["exit"], 2, "{result}");
+    assert_eq!(result["errors"][0]["id"], "release.not_found");
+    assert!(
+        result["errors"][0]["fix"]["commands"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("icm release android --sign none")
+    );
+    assert!(!sandbox.adb_calls().contains("install"));
+}
+
+#[test]
+fn the_lifecycle_suite_and_from_aab_plan_without_a_device() {
+    let sandbox = Sandbox::new();
+    for args in [
+        &["test", "android", "--lifecycle", "--dry-run"][..],
+        &["test", "--on", "android", "--lifecycle", "--dry-run"][..],
+    ] {
+        let result = sandbox.result(args);
+        assert_eq!(result["exit"], 0, "{result}");
+        assert_eq!(result["dry_run"], true);
+        let names: Vec<&str> = result["plan"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["name"].as_str().unwrap())
+            .collect();
+        for name in [
+            "android.launch",
+            "lifecycle.dark-mode",
+            "lifecycle.landscape",
+            "lifecycle.font-scale",
+            "lifecycle.home",
+            "lifecycle.home-relaunch",
+            "lifecycle.back",
+            "lifecycle.kill",
+            "lifecycle.kill-relaunch",
+            "lifecycle.restore",
+        ] {
+            assert!(names.contains(&name), "{name} not in {names:?}");
+        }
+    }
+    // `--on` and the positional platform are one choice.
+    let both = sandbox.result(&["test", "android", "--on", "android", "--lifecycle"]);
+    assert_eq!(both["exit"], 2, "{both}");
+
+    let result = sandbox.result(&["run", "android", "--from-aab", "--dry-run"]);
+    assert_eq!(result["exit"], 0, "{result}");
+    let names: Vec<&str> = result["plan"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"bundletool.install"), "{names:?}");
+    assert!(!names.contains(&"adb.install"), "{names:?}");
+    assert!(
+        !names.iter().any(|name| name.starts_with("cargo")),
+        "{names:?}"
+    );
+
+    // Nothing touched a device.
+    assert_eq!(sandbox.adb_calls(), "");
 }
 
 #[test]

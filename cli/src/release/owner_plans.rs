@@ -296,19 +296,33 @@ pub fn android(c: &Common<'_>, aab: &str, symbols: Option<&str>, icon: Option<&s
 
     if c.first_upload {
         plan.manual_only = Some(format!(
-            "This is the app's first Android release: Google Play takes it only through the Play Console. Create the app, upload {aab} to Internal testing by hand, then run `icm ledger mark-uploaded android --build {}`. Later releases upload with upload.sh.",
+            "This is the app's first Android release: Google Play takes it only through the Play Console. Create the app, upload {aab} to Internal testing by hand, then run `icm ledger mark-uploaded android --build {}`. Later releases upload with upload.sh, which runs the commands below.",
             c.build
         ));
         plan.push(OwnerStep::manual(
             StepKind::Web,
             "Create the app and upload this bundle by hand",
-            &format!("Play Console > Create app ({}), then Testing > Internal testing > Create new release with {aab}.", config.app.id),
+            &format!("Play Console > Create app ({}), then Testing > Internal testing > Create new release with {aab}. Google Play then creates its app signing key and registers this bundle's key as the upload key.", config.app.id),
         ));
-        plan.push(mark_uploaded(c));
-        return plan;
     }
 
     let account = config.android.play.service_account_json_env.as_str();
+    let track = config.android.play.track.as_str();
+    let api = "https://androidpublisher.googleapis.com";
+    let app = format!("applications/{}", config.app.id);
+    plan.push(OwnerStep::manual(
+        StepKind::Once,
+        "Or upload with the Play Developer API instead of fastlane",
+        &format!(
+            "With an access token for the service account in $PLAY_TOKEN (scope https://www.googleapis.com/auth/androidpublisher, for example `gcloud auth activate-service-account --key-file \"${account}\"` then `gcloud auth print-access-token`; icm has not verified this step), the edits flow is: \
+             `curl -fsS -X POST -H \"Authorization: Bearer $PLAY_TOKEN\" {api}/androidpublisher/v3/{app}/edits` (keep its \"id\" as $EDIT); \
+             `curl -fsS -X POST -H \"Authorization: Bearer $PLAY_TOKEN\" -H 'Content-Type: application/octet-stream' --data-binary \"@$D/{aab}\" '{api}/upload/androidpublisher/v3/{app}/edits/'\"$EDIT\"'/bundles?uploadType=media'` (edits.bundles.upload); \
+             `curl -fsS -X PUT -H \"Authorization: Bearer $PLAY_TOKEN\" -H 'Content-Type: application/json' -d '{{\"track\":\"{track}\",\"releases\":[{{\"versionCodes\":[\"{build}\"],\"status\":\"draft\"}}]}}' {api}/androidpublisher/v3/{app}/edits/\"$EDIT\"/tracks/{track}` (edits.tracks.update); \
+             `curl -fsS -X POST -H \"Authorization: Bearer $PLAY_TOKEN\" {api}/androidpublisher/v3/{app}/edits/\"$EDIT\":commit` (edits.commit). \
+             Save each answer and read it with `icm diagnose play <file>`.",
+            build = c.build
+        ),
+    ));
     plan.need(
         account,
         "the path of the Play Console service account's JSON key",
@@ -742,7 +756,34 @@ mod tests {
                 .unwrap()
                 .contains("first Android release")
         );
-        assert!(!lines(&first).iter().any(|l| l.contains("fastlane")));
+        // The first upload is the Play Console's; UPLOAD.md still shows what
+        // later releases run (upload.sh stops at manual_only, exit 9).
+        assert!(
+            first
+                .steps
+                .iter()
+                .any(|step| step.title.contains("by hand") && step.kind == StepKind::Web)
+        );
+        assert!(
+            lines(&first)[0].starts_with("fastlane supply"),
+            "{:?}",
+            lines(&first)
+        );
+        assert!(first.undeclared_vars().is_empty());
+        let api = first
+            .steps
+            .iter()
+            .find(|step| step.title.contains("Play Developer API"))
+            .and_then(|step| step.note.clone())
+            .unwrap();
+        for call in ["/edits`", "uploadType=media", "/tracks/internal", ":commit"] {
+            assert!(api.contains(call), "{call}: {api}");
+        }
+        assert!(
+            api.contains("\\\"versionCodes\\\":[\\\"12\\\"]")
+                || api.contains("\"versionCodes\":[\"12\"]"),
+            "{api}"
+        );
 
         let later = android(
             &common(ReleaseTarget::Android, &config, false),

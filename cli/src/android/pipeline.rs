@@ -119,21 +119,165 @@ fn props_from_env(env: &[String]) -> Result<(Props, Vec<String>)> {
 
 /// `icm run android`.
 pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
-    if ctx.dry_run() && !args.from_aab {
+    if ctx.dry_run() {
         return super::plan::run(ctx, args);
     }
-    if args.from_aab {
-        return Err(IcmError::new(
-            CheckId::UsageNotImplemented,
-            "`--from-aab` (install through bundletool) comes with Android releases",
-        )
-        .fix("Run without --from-aab.", &["icm run android"]));
+    let Launched {
+        project,
+        tools,
+        adb,
+        app_id,
+        dir,
+        mark,
+        pids,
+        session,
+        apk: apk_path,
+        lock: _lock,
+        ..
+    } = launch_app(ctx, args)?;
+    let ctx: &Ctx = ctx;
+
+    // The project's `[checks] android` scripts (design §13.6), with the
+    // JDK and SDK environment (Appendix C item 2).
+    crate::hooks::run_for(
+        ctx,
+        &project,
+        &crate::hooks::HookContext {
+            platform: "android".to_string(),
+            pid: session.pid,
+            device: Some(adb.serial.clone()),
+            adb: Some(format!(
+                "{} -s {}",
+                crate::process::shell_quote(&tools.sdk.adb(&ctx.env).display().to_string()),
+                adb.serial
+            )),
+            bin: Some(apk_path.clone()),
+            logs: Some(dir.join("logs.ndjson")),
+            log_mark: Some(mark.clone()),
+            env: tools.child_env().to_vec(),
+            ..crate::hooks::HookContext::default()
+        },
+    )?;
+
+    ctx.rep.next(
+        "icm logs android --level warn --json",
+        "read the app's warnings and errors",
+    );
+    ctx.rep.next(
+        "icm input android tap <x> <y> --json -q",
+        "tap in screen.preview.png pixels",
+    );
+    ctx.rep.next("icm stop android --json -q", "stop the app");
+
+    if args.attach {
+        match follow(ctx, &adb, &app_id, &mark, pids.clone(), true, &|_, _| true)? {
+            Followed::Gone { stopped: true } => {
+                ctx.rep
+                    .summary(format!("{app_id} was stopped (am force-stop)"));
+            }
+            Followed::Gone { stopped: false } => {
+                // The app's own exit decides the result, as on the other
+                // platforms: a panic or crash is the run's failure.
+                let mut error = IcmError::new(
+                    CheckId::RunAppDied,
+                    format!("{app_id} exited during --attach, after its first frame"),
+                );
+                let logs = collect_logs(ctx, &adb, &dir, &app_id, &mark, &pids);
+                attach_evidence(&mut error, &logs, &project);
+                ctx.rep
+                    .set("process", json!({"pid": session.pid, "alive": false}));
+                ctx.rep.clear_summary();
+                return Err(error);
+            }
+            Followed::Destroyed => {
+                // As closing the last window on the desktop: the app ended
+                // normally.
+                ctx.rep.set(
+                    "process",
+                    json!({"pid": session.pid, "alive": true, "activity": false}),
+                );
+                ctx.rep.summary(format!(
+                    "{app_id} ended with its activity, which Android destroyed (Back at the app's root, say); its process lives on, cached, with no window"
+                ));
+            }
+            Followed::Ended => {}
+        }
     }
+    Ok(())
+}
+
+/// What [`launch_app`] started: the app running on its device, ready and
+/// (unless `--no-shot`) screenshotted, with its session written.
+pub(crate) struct Launched {
+    /// The project.
+    pub project: Project,
+    /// The SDK, JDK and NDK.
+    pub tools: Toolset,
+    /// The device.
+    pub adb: Adb,
+    /// `[app] id`.
+    pub app_id: String,
+    /// The run directory.
+    pub dir: PathBuf,
+    /// The launch mark (device epoch seconds).
+    pub mark: String,
+    /// The app's pids seen so far.
+    pub pids: BTreeSet<u32>,
+    /// The session record, as written.
+    pub session: Session,
+    /// The installed APK (or the `.aab` of `--from-aab`).
+    pub apk: PathBuf,
+    /// "emulator-5580 (icm-api36, API 36)".
+    pub device_name: String,
+    /// The platform lock, held while this lives.
+    pub lock: crate::locks::Lock,
+}
+
+/// The `.aab` of the newest Android release (`dist/latest/android`), for
+/// `icm run android --from-aab`.
+fn release_bundle(project: &Project) -> Result<PathBuf> {
+    let not_found = |detail: String| {
+        IcmError::new(CheckId::ReleaseNotFound, detail).fix(
+            "Make a release first (an unsigned one is enough: the install re-signs it with icm's debug key).",
+            &["icm release android --sign none --allow-dirty --json -q"],
+        )
+    };
+    let latest = crate::release::dist::latest(project, "android");
+    let Some(dir) = crate::release::dist::resolve_latest(project, "android") else {
+        return Err(not_found(format!(
+            "--from-aab: there is no Android release in {}",
+            crate::paths::display(&latest)
+        )));
+    };
+    let manifest =
+        crate::release::manifest::Manifest::read(&dir.join(crate::release::manifest::FILE))?;
+    manifest
+        .uploads()
+        .find(|file| file.kind == "aab")
+        .map(|file| file.absolute(&dir))
+        .filter(|path| path.is_file())
+        .ok_or_else(|| {
+            not_found(format!(
+                "--from-aab: {} lists no .aab",
+                crate::paths::display(&dir.join(crate::release::manifest::FILE))
+            ))
+        })
+}
+
+/// `icm run android` up to the session: device, build (or the release's
+/// bundle with `--from-aab`), install, launch, readiness, screenshot,
+/// logs. `icm test --on android --lifecycle` starts the same way.
+pub(crate) fn launch_app(ctx: &mut Ctx, args: &RunArgs) -> Result<Launched> {
     let (props, ignored_env) = props_from_env(&args.env)?;
     let (project, host, tools) = setup(ctx)?;
     ctx.rep.latest("android");
-    let _lock = ctx.lock_platform("android")?;
+    let lock = ctx.lock_platform("android")?;
     let ctx: &Ctx = ctx;
+    let bundle = if args.from_aab {
+        Some(release_bundle(&project)?)
+    } else {
+        None
+    };
 
     let config = &project.config.config;
     let app_id = config.app.id.clone();
@@ -235,8 +379,31 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         ctx.rep.artifact("emulator_log", &booting.log);
     }
 
-    // 2. The APK.
-    let apk_path = if args.no_build {
+    // 2. The APK, or the release's bundle.
+    let apk_path = if let Some(aab) = &bundle {
+        let names = crate::release::notices::zip_names(aab).unwrap_or_default();
+        if !super::bundle::libraries(&names)
+            .iter()
+            .any(|(abi, _)| abi == chosen.abi.as_str())
+        {
+            return Err(IcmError::new(
+                CheckId::AndroidSoAbis,
+                format!(
+                    "--from-aab: {} has no library for {}, the device's ABI",
+                    crate::paths::display(aab),
+                    chosen.abi.as_str()
+                ),
+            )
+            .fix(
+                format!(
+                    "Add \"{}\" to [android] abis in icm.toml and release again.",
+                    chosen.abi.as_str()
+                ),
+                &["icm release android --sign none --allow-dirty --json -q"],
+            ));
+        }
+        aab.clone()
+    } else if args.no_build {
         let package = project.package_for("android")?;
         let path = apk::apk_path(&project, &package.name, profile);
         if !path.is_file() {
@@ -268,7 +435,8 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     } else {
         apk::build(ctx, &project, &tools, chosen.abi, args.release)?.apk
     };
-    ctx.rep.artifact("apk", &apk_path);
+    ctx.rep
+        .artifact(if bundle.is_some() { "aab" } else { "apk" }, &apk_path);
     session.apk = Some(apk_path.clone());
 
     // 3. Boot, install, launch.
@@ -323,14 +491,24 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         }
     };
 
-    install(
-        ctx,
-        &adb,
-        &apk_path,
-        &app_id,
-        args.reinstall,
-        args.wipe_data,
-    )?;
+    match &bundle {
+        Some(aab) => {
+            if args.reinstall {
+                uninstall(ctx, &adb, &app_id, args.wipe_data)?;
+            }
+            let (bundletool, _) = tools.bundletool(ctx)?;
+            let work = project.gen_dir("android", "release").join("bundle");
+            install_bundle(ctx, &tools, &adb, &bundletool, aab, &app_id, &work)?;
+        }
+        None => install(
+            ctx,
+            &adb,
+            &apk_path,
+            &app_id,
+            args.reinstall,
+            args.wipe_data,
+        )?,
+    }
 
     let mark = adb.epoch().ok_or_else(|| {
         IcmError::new(
@@ -410,77 +588,22 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         ctx.rep.set("session", json!(crate::paths::display(&path)));
     }
     result?;
-
-    // The project's `[checks] android` scripts (design §13.6), with the
-    // JDK and SDK environment (Appendix C item 2).
-    crate::hooks::run_for(
-        ctx,
-        &project,
-        &crate::hooks::HookContext {
-            platform: "android".to_string(),
-            pid: session.pid,
-            device: Some(adb.serial.clone()),
-            adb: Some(format!(
-                "{} -s {}",
-                crate::process::shell_quote(&tools.sdk.adb(&ctx.env).display().to_string()),
-                adb.serial
-            )),
-            bin: Some(apk_path.clone()),
-            logs: Some(dir.join("logs.ndjson")),
-            log_mark: Some(mark.clone()),
-            env: tools.child_env().to_vec(),
-            ..crate::hooks::HookContext::default()
-        },
-    )?;
-
-    ctx.rep.next(
-        "icm logs android --level warn --json",
-        "read the app's warnings and errors",
-    );
-    ctx.rep.next(
-        "icm input android tap <x> <y> --json -q",
-        "tap in screen.preview.png pixels",
-    );
-    ctx.rep.next("icm stop android --json -q", "stop the app");
-
-    if args.attach {
-        match follow(ctx, &adb, &app_id, &mark, pids.clone(), true, &|_, _| true)? {
-            Followed::Gone { stopped: true } => {
-                ctx.rep
-                    .summary(format!("{app_id} was stopped (am force-stop)"));
-            }
-            Followed::Gone { stopped: false } => {
-                // The app's own exit decides the result, as on the other
-                // platforms: a panic or crash is the run's failure.
-                let mut error = IcmError::new(
-                    CheckId::RunAppDied,
-                    format!("{app_id} exited during --attach, after its first frame"),
-                );
-                let logs = collect_logs(ctx, &adb, &dir, &app_id, &mark, &pids);
-                attach_evidence(&mut error, &logs, &project);
-                ctx.rep
-                    .set("process", json!({"pid": session.pid, "alive": false}));
-                ctx.rep.clear_summary();
-                return Err(error);
-            }
-            Followed::Destroyed => {
-                // As closing the last window on the desktop: the app ended
-                // normally.
-                ctx.rep.set(
-                    "process",
-                    json!({"pid": session.pid, "alive": true, "activity": false}),
-                );
-                ctx.rep.summary(format!(
-                    "{app_id} ended with its activity, which Android destroyed (Back at the app's root, say); its process lives on, cached, with no window"
-                ));
-            }
-            Followed::Ended => {}
-        }
-    }
-    Ok(())
+    Ok(Launched {
+        project,
+        tools,
+        adb,
+        app_id,
+        dir,
+        mark,
+        pids,
+        session,
+        apk: apk_path,
+        device_name,
+        lock,
+    })
 }
 
-fn set_props(ctx: &Ctx, adb: &Adb, props: &[(String, String)]) -> Result<()> {
+pub(super) fn set_props(ctx: &Ctx, adb: &Adb, props: &[(String, String)]) -> Result<()> {
     // Events are opt-in for every build (Appendix C item 27).
     let mut lines = vec!["setprop debug.icm.events 1".to_string()];
     let backend = props
@@ -503,6 +626,21 @@ fn set_props(ctx: &Ctx, adb: &Adb, props: &[(String, String)]) -> Result<()> {
     }
 }
 
+/// `pm uninstall` (`-k`: keeping the app's data, unless `wipe`).
+fn uninstall(ctx: &Ctx, adb: &Adb, app_id: &str, wipe: bool) -> Result<()> {
+    let line = if wipe {
+        format!("pm uninstall {}", adb::quote(app_id))
+    } else {
+        format!("pm uninstall -k {}", adb::quote(app_id))
+    };
+    // Not installed is fine.
+    let _ = ctx.step(
+        "adb.uninstall",
+        &adb.shell(&line).timeout(Duration::from_secs(120)),
+    )?;
+    Ok(())
+}
+
 fn install(
     ctx: &Ctx,
     adb: &Adb,
@@ -512,16 +650,7 @@ fn install(
     wipe: bool,
 ) -> Result<()> {
     if reinstall {
-        let line = if wipe {
-            format!("pm uninstall {}", adb::quote(app_id))
-        } else {
-            format!("pm uninstall -k {}", adb::quote(app_id))
-        };
-        // Not installed is fine.
-        let _ = ctx.step(
-            "adb.uninstall",
-            &adb.shell(&line).timeout(Duration::from_secs(120)),
-        )?;
+        uninstall(ctx, adb, app_id, wipe)?;
     }
 
     let cmd = adb
@@ -533,8 +662,18 @@ fn install(
     if outcome.success() && text.contains("Success") {
         return Ok(());
     }
+    Err(install_error(adb, apk, app_id, &text, &outcome))
+}
 
-    let reason = adb::install_failure(&text).unwrap_or_else(|| outcome.describe());
+/// The error of a failed install, from its output.
+fn install_error(
+    adb: &Adb,
+    apk: &Path,
+    app_id: &str,
+    text: &str,
+    outcome: &crate::process::Outcome,
+) -> IcmError {
+    let reason = adb::install_failure(text).unwrap_or_else(|| outcome.describe());
     let mut error = match reason.as_str() {
         "INSTALL_FAILED_UPDATE_INCOMPATIBLE" => IcmError::new(
             CheckId::AndroidInstallSignatureMismatch,
@@ -556,10 +695,112 @@ fn install(
     if let Some(log) = &outcome.log {
         error = error.evidence(Evidence::file(log).with_excerpt(reason));
     }
-    Err(error)
+    error
 }
 
-fn launch(ctx: &Ctx, adb: &Adb, app_id: &str) -> Result<adb::Started> {
+/// Installs an App Bundle the way Google Play would for this device:
+/// `bundletool build-apks --connected-device` into `<work>/device.apks`,
+/// signed with icm's debug key like dev installs (so neither replaces the
+/// other's signature; never `~/.android/debug.keystore`), then
+/// `bundletool install-apks --allow-downgrade` (as `adb install -d`).
+pub(crate) fn install_bundle(
+    ctx: &Ctx,
+    tools: &Toolset,
+    adb: &Adb,
+    bundletool: &crate::process::Cmd,
+    aab: &Path,
+    app_id: &str,
+    work: &Path,
+) -> Result<()> {
+    let keystore = apk::ensure_debug_keystore(ctx, tools)?;
+    std::fs::create_dir_all(work).map_err(|e| internal("cannot create the bundle directory", e))?;
+    let apks = work.join("device.apks");
+    let _ = std::fs::remove_file(&apks);
+    let adb_path = tools.sdk.adb(&ctx.env);
+    let build = bundletool
+        .clone()
+        .arg("build-apks")
+        .arg(format!("--bundle={}", aab.display()))
+        .arg(format!("--output={}", apks.display()))
+        .arg("--connected-device")
+        .arg(format!("--device-id={}", adb.serial))
+        .arg(format!("--adb={}", adb_path.display()))
+        .arg(format!("--ks={}", keystore.display()))
+        .arg(format!("--ks-pass=pass:{}", super::DEBUG_KEYSTORE_PASS))
+        .arg(format!("--ks-key-alias={}", super::DEBUG_KEY_ALIAS))
+        .arg(format!("--key-pass=pass:{}", super::DEBUG_KEYSTORE_PASS))
+        .timeout(Duration::from_secs(600));
+    apk::run_tool(
+        ctx,
+        "bundletool.build_apks",
+        &build,
+        CheckId::AndroidBundletoolFailed,
+    )?;
+    let install = bundletool
+        .clone()
+        .arg("install-apks")
+        .arg(format!("--apks={}", apks.display()))
+        .arg(format!("--device-id={}", adb.serial))
+        .arg(format!("--adb={}", adb_path.display()))
+        .arg("--allow-downgrade")
+        .timeout(Duration::from_secs(300));
+    let outcome = ctx.step("bundletool.install_apks", &install)?;
+    if outcome.success() {
+        return Ok(());
+    }
+    let text = format!("{}\n{}", outcome.stdout_text(), outcome.stderr_text());
+    Err(install_error(adb, aab, app_id, &text, &outcome))
+}
+
+/// Launches an app installed by [`install_bundle`] and waits for its first
+/// frame and a screenshot (`<stem>.png` in `dir`), as `icm run` does: the
+/// release's smoke test. Returns how it went, for a person.
+pub(crate) fn launch_installed(
+    ctx: &Ctx,
+    project: &Project,
+    adb: &Adb,
+    dir: &Path,
+    stem: &str,
+) -> Result<String> {
+    let app_id = project.config.config.app.id.clone();
+    let mark = adb.epoch().ok_or_else(|| {
+        IcmError::new(
+            CheckId::AndroidDeviceNone,
+            format!("{} does not answer `date`", adb.serial),
+        )
+    })?;
+    set_props(ctx, adb, &[])?;
+    let launched = Instant::now();
+    launch(ctx, adb, &app_id)?;
+    let fail = |mut error: IcmError| {
+        let pids: BTreeSet<u32> = adb.pids(&app_id).into_iter().collect();
+        let logs = collect_logs(ctx, adb, dir, &app_id, &mark, &pids);
+        attach_evidence(&mut error, &logs, project);
+        error
+    };
+    let ready =
+        wait_ready(ctx, adb, &app_id, &mark, launched, Duration::from_secs(30)).map_err(&fail)?;
+    std::thread::sleep(Duration::from_millis(1500));
+    let shot = capture(ctx, adb, dir, stem, &app_id, false)?;
+    if adb.pids(&app_id).is_empty() {
+        return Err(fail(IcmError::new(
+            CheckId::RunAppDied,
+            format!("{app_id} exited after its first frame"),
+        )));
+    }
+    let ms = ready
+        .ms
+        .unwrap_or_else(|| launched.elapsed().as_millis() as u64);
+    Ok(format!(
+        "{app_id} drew its first frame after {} (source: {}); screenshot {}x{}",
+        crate::time::format_duration(Duration::from_millis(ms)),
+        ready.source,
+        shot.px.0,
+        shot.px.1
+    ))
+}
+
+pub(super) fn launch(ctx: &Ctx, adb: &Adb, app_id: &str) -> Result<adb::Started> {
     let component = format!("{app_id}/{ACTIVITY}");
     let cmd = adb
         .shell(&format!("am start -W -S -n {}", adb::quote(&component)))
@@ -588,11 +829,11 @@ fn launch(ctx: &Ctx, adb: &Adb, app_id: &str) -> Result<adb::Started> {
 
 /// How the app became ready.
 #[derive(Clone, Debug)]
-struct Ready {
-    source: &'static str,
-    ms: Option<u64>,
-    window: Option<Value>,
-    pids: BTreeSet<u32>,
+pub(super) struct Ready {
+    pub(super) source: &'static str,
+    pub(super) ms: Option<u64>,
+    pub(super) window: Option<Value>,
+    pub(super) pids: BTreeSet<u32>,
 }
 
 /// How long a relaunched activity gets to draw before the run gives up on
@@ -610,7 +851,7 @@ const RELAUNCH_GRACE: Duration = Duration::from_secs(10);
 /// three polls in a row. A death or panic fails at once; so does an
 /// activity Android relaunched that does not draw within
 /// [`RELAUNCH_GRACE`], which the probe cannot tell from a live one.
-fn wait_ready(
+pub(super) fn wait_ready(
     ctx: &Ctx,
     adb: &Adb,
     app_id: &str,
@@ -745,7 +986,7 @@ fn wait_ready(
     }
 }
 
-fn events_since(adb: &Adb, mark: &str) -> Vec<Record> {
+pub(super) fn events_since(adb: &Adb, mark: &str) -> Vec<Record> {
     let cmd = adb.cmd([
         "logcat",
         "-d",
@@ -763,7 +1004,7 @@ fn events_since(adb: &Adb, mark: &str) -> Vec<Record> {
 
 /// The events buffer since `mark`, as logcat prints it (`tags` empty:
 /// every tag).
-fn events_buffer(adb: &Adb, mark: &str, tags: &[&str]) -> Option<String> {
+pub(super) fn events_buffer(adb: &Adb, mark: &str, tags: &[&str]) -> Option<String> {
     let mut args: Vec<String> = [
         "logcat",
         "-d",
@@ -808,7 +1049,7 @@ fn top_resumed(adb: &Adb, app_id: &str) -> bool {
 /// and after Back at the app's root Android destroys the activity but keeps
 /// the process, cached, with no window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Presence {
+pub(super) enum Presence {
     /// No process.
     Gone,
     /// A process without an activity: Android destroyed it, and the app
@@ -839,7 +1080,7 @@ impl Presence {
     }
 }
 
-fn presence(adb: &Adb, app_id: &str) -> Presence {
+pub(super) fn presence(adb: &Adb, app_id: &str) -> Presence {
     let Some(&pid) = adb.pids(app_id).first() else {
         return Presence::Gone;
     };
@@ -918,17 +1159,21 @@ fn report_ready(ctx: &Ctx, project: &Project, ready: &Ready, launched: Instant) 
 
 // ---- screenshots ---------------------------------------------------------------------
 
-/// Captures `<stem>.png` and `<stem>.preview.png` in `dir`, reports them,
-/// the `screen` geometry and blank detection (`run.screen_blank`, or INFO
-/// `android.screen.secure` for a FLAG_SECURE window).
-fn capture(
-    ctx: &Ctx,
-    adb: &Adb,
-    dir: &Path,
-    stem: &str,
-    app_id: &str,
-    expect_content: bool,
-) -> Result<Screen> {
+/// A screenshot on disk and what [`image::write_preview`] found in it.
+pub(super) struct Grabbed {
+    /// `<stem>.png`.
+    pub png: PathBuf,
+    /// `<stem>.preview.png`.
+    pub preview: PathBuf,
+    /// Size, preview size, blank detection.
+    pub stats: image::Stats,
+    /// The PNG's size in bytes.
+    pub bytes: usize,
+}
+
+/// `adb exec-out screencap -p` into `<dir>/<stem>.png` and its preview,
+/// without reporting anything.
+pub(super) fn grab(ctx: &Ctx, adb: &Adb, dir: &Path, stem: &str) -> Result<Grabbed> {
     std::fs::create_dir_all(dir).map_err(|e| internal("cannot create the run directory", e))?;
     let cmd = adb
         .cmd(["exec-out", "screencap", "-p"])
@@ -944,12 +1189,45 @@ fn capture(
         }
         return Err(error);
     }
-    let png_path = dir.join(format!("{stem}.png"));
-    let preview_path = dir.join(format!("{stem}.preview.png"));
-    std::fs::write(&png_path, &outcome.stdout)
+    let png = dir.join(format!("{stem}.png"));
+    let preview = dir.join(format!("{stem}.preview.png"));
+    std::fs::write(&png, &outcome.stdout)
         .map_err(|e| internal("cannot write the screenshot", e))?;
-    let stats = image::write_preview(&outcome.stdout, &preview_path)
+    let stats = image::write_preview(&outcome.stdout, &preview)
         .map_err(|e| internal("cannot write the preview", e))?;
+    Ok(Grabbed {
+        png,
+        preview,
+        stats,
+        bytes: outcome.stdout.len(),
+    })
+}
+
+/// Whether the app's focused window has FLAG_SECURE (its screenshots are
+/// black).
+pub(super) fn window_is_secure(adb: &Adb, app_id: &str) -> bool {
+    adb.shell_text("dumpsys window windows", Duration::from_secs(20))
+        .is_some_and(|text| adb::focused_window_is_secure(&text, app_id))
+}
+
+/// Captures `<stem>.png` and `<stem>.preview.png` in `dir`, reports them,
+/// the `screen` geometry and blank detection (`run.screen_blank`, or INFO
+/// `android.screen.secure` for a FLAG_SECURE window).
+fn capture(
+    ctx: &Ctx,
+    adb: &Adb,
+    dir: &Path,
+    stem: &str,
+    app_id: &str,
+    expect_content: bool,
+) -> Result<Screen> {
+    let Grabbed {
+        png: png_path,
+        preview: preview_path,
+        stats,
+        bytes,
+    } = grab(ctx, adb, dir, stem)?;
+    let outcome_len = bytes;
 
     let scale = adb
         .shell_text("wm density", Duration::from_secs(15))
@@ -959,17 +1237,14 @@ fn capture(
     screen.preview = stats.preview;
 
     let mut extra = serde_json::Map::new();
-    let _ = extra.insert("bytes".into(), json!(outcome.stdout.len()));
+    let _ = extra.insert("bytes".into(), json!(outcome_len));
     let _ = extra.insert("blank".into(), json!(stats.blank));
     ctx.rep.artifact_with("screenshot", &png_path, extra);
     ctx.rep.artifact("preview", &preview_path);
     ctx.rep.set("screen", screen.to_json());
 
     if stats.blank {
-        let secure = adb
-            .shell_text("dumpsys window windows", Duration::from_secs(20))
-            .is_some_and(|text| adb::focused_window_is_secure(&text, app_id));
-        if secure {
+        if window_is_secure(adb, app_id) {
             ctx.rep.check(Check::info(
                 CheckId::AndroidScreenSecure,
                 format!("{app_id}'s window has FLAG_SECURE, so the screenshot is black"),
@@ -1098,13 +1373,13 @@ fn session_device(
 
 /// What [`collect_logs`] found.
 #[derive(Clone, Debug, Default)]
-struct Collected {
+pub(super) struct Collected {
     records: Vec<Record>,
     selected: Vec<(String, Record)>,
     logs: Option<PathBuf>,
 }
 
-fn query(adb: &Adb, mark: &str, buffers: &[&str]) -> Option<String> {
+pub(super) fn query(adb: &Adb, mark: &str, buffers: &[&str]) -> Option<String> {
     let mut args: Vec<String> = vec!["logcat".into(), "-d".into()];
     for buffer in buffers {
         args.push("-b".into());
@@ -1134,7 +1409,7 @@ fn query(adb: &Adb, mark: &str, buffers: &[&str]) -> Option<String> {
 
 /// Writes `logcat.txt` (raw), `logs.ndjson` and `app.log` (the app's
 /// records) into the run directory.
-fn collect_logs(
+pub(super) fn collect_logs(
     ctx: &Ctx,
     adb: &Adb,
     dir: &Path,
@@ -1436,7 +1711,7 @@ fn describe_recreation(
 
 /// Adds the logs, a panic's location and the failure signatures to a run
 /// failure.
-fn attach_evidence(error: &mut IcmError, collected: &Collected, project: &Project) {
+pub(super) fn attach_evidence(error: &mut IcmError, collected: &Collected, project: &Project) {
     let pids: BTreeSet<u32> = collected
         .selected
         .iter()

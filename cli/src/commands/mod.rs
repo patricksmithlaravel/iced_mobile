@@ -139,6 +139,9 @@ fn route(ctx: &mut Ctx, command: Command) -> Result<()> {
         Command::Input(args) if args.platform == Platform::Android => {
             crate::android::input(ctx, &args)
         }
+        Command::Test(args) if args.lifecycle && args.device() == android => {
+            crate::android::lifecycle::run(ctx, &args)
+        }
         // web (design §10.2)
         Command::Run(args) if args.platform == Platform::Web => crate::web::run(ctx, &args),
         Command::Build(args) if args.platform == Some(Platform::Web) && !args.all => {

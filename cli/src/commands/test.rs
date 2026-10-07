@@ -30,7 +30,7 @@ pub const RUN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Runs `icm test`.
 pub fn run(ctx: &mut Ctx, args: &TestArgs) -> Result<()> {
-    if args.on.is_some() || args.lifecycle {
+    if args.device().is_some() || args.lifecycle {
         return Err(IcmError::new(
             CheckId::UsageNotImplemented,
             "`icm test --on <platform>` and `--lifecycle` (tests on a device) come in a later phase; this icm runs host tests",

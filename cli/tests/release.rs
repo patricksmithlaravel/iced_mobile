@@ -179,7 +179,7 @@ fn ids(result: &Value, key: &str) -> Vec<String> {
 #[test]
 fn the_target_pipelines_are_stubs_that_say_so() {
     let app = App::new();
-    for target in ["android", "web", "macos", "windows", "linux"] {
+    for target in ["web", "macos", "windows", "linux"] {
         let result = app.json(&["release", target, "--sign", "none", "--allow-dirty"]);
         assert_eq!(result["exit"], 2, "{target}: {result}");
         assert_eq!(

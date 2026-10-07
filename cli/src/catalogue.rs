@@ -588,6 +588,24 @@ catalogue! {
     AndroidBundletoolFailed = "android.bundletool_failed", Tool, Fail, Agent,
         "bundletool failed",
         "Read the step log.";
+    AndroidKeystoreUnreadable = "android.keystore.unreadable", NeedsOwner, Fail, Owner,
+        "keytool or jarsigner cannot use the upload key (a wrong password, alias or keystore)",
+        "The owner checks `[android.signing] upload` (keystore path, alias) and the values of its password variables, then releases again.";
+    AndroidSmoke = "android.smoke", CheckFailed, Fail, Agent,
+        "The release bundle did not install and start on a device",
+        "Read the evidence (logcat and the step logs in the run directory); `icm run android --from-aab` repeats the install.";
+    AndroidPlayRejected = "android.play.rejected", CheckFailed, Fail, Agent,
+        "Google Play refused the upload for a reason icm does not map",
+        "Read Google Play's message in the evidence, fix what it names and upload a new build.";
+    AndroidPlayAppMissing = "android.play.app_missing", NeedsOwner, Fail, Owner,
+        "The app does not exist in the Play Console yet",
+        "The owner creates the app in the Play Console and uploads the first bundle there by hand (UPLOAD.md), then runs `icm ledger mark-uploaded android`.";
+    AndroidPlayPermission = "android.play.permission", NeedsOwner, Fail, Owner,
+        "The Play Console service account cannot upload (access, key or API)",
+        "The owner grants the service account release permissions for the app, renews its JSON key, or enables the Google Play Android Developer API.";
+    AndroidPlayWrongKey = "android.play.wrong_key", NeedsOwner, Fail, Owner,
+        "Google Play expects the bundle signed with another upload key",
+        "The owner signs with the upload key registered in the Play Console, or asks Google to reset the upload key.";
 
     // ---- web -----------------------------------------------------------------------
     WebPortBusy = "web.port_busy", Device, Fail, Agent,
@@ -713,6 +731,9 @@ catalogue! {
     TestPassed = "test.passed", Ok, Pass, Agent,
         "Tests passed",
         "Nothing to fix.";
+    TestLifecycle = "test.lifecycle", CheckFailed, Fail, Agent,
+        "A lifecycle step lost the app: a new process, a recreated activity, no frame or an ANR",
+        "Read the step's evidence (events.txt, logcat.txt, its screenshot); the app must keep its process through configuration changes and Home, and start over after Back and a kill.";
     UiSelectorNotFound = "ui.selector_not_found", CheckFailed, Fail, Agent,
         "No widget in the headless view matches the selector",
         "Read `icm ui --headless tree` and match a widget's exact text or `#id`.";

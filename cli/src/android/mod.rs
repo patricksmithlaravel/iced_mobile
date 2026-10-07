@@ -6,10 +6,12 @@
 //! |---|---|
 //! | [`Toolset`] (here) | the SDK, JDK and NDK, and the environment every Android child gets (`JAVA_HOME`, `PATH`) |
 //! | [`apk`] | `cargo rustc --crate-type cdylib`, the ELF gates, res, manifest, aapt2 → zip → zipalign → apksigner → verify |
+//! | [`bundle`] | the release bundle: `base.zip`, keytool/jarsigner/`bundletool dump` parsing, the §12.3 gates (the pipeline is `crate::release::android`) |
 //! | [`avd`] | the managed AVD (`icm-api<target_sdk>`, host-ABI image), ports, boot, shutdown |
 //! | [`device`] | which device a command uses (design §6 order) |
 //! | [`pipeline`] | the commands: install, launch, readiness, screenshot, logs, input, stop |
 //! | [`plan`] | what `--dry-run` prints for each command (nothing touches a device) |
+//! | [`lifecycle`] | `icm test --on android --lifecycle`: the lifecycle suite on a device |
 //! | [`session`] | `target/icm/sessions/android.json` |
 //! | [`logcat`] | `threadtime,epoch` records, `ICM_EVENT` lines, failure signatures |
 //! | [`manifest`], [`res`] | the generated `AndroidManifest.xml` and resources |
@@ -21,9 +23,11 @@
 pub mod adb;
 pub mod apk;
 pub mod avd;
+pub mod bundle;
 pub mod device;
 pub mod elf;
 pub mod image;
+pub mod lifecycle;
 pub mod logcat;
 pub mod manifest;
 pub mod pipeline;
@@ -190,6 +194,26 @@ impl Toolset {
         }
         let jdk = self.jdk.clone()?;
         Ok(self.cmd(jdk.home.join("bin").join("keytool")))
+    }
+
+    /// A JDK program (`java`, `jar`, `jarsigner`), or its `ICM_TOOL_<NAME>`
+    /// stand-in.
+    pub fn jdk_tool(&self, name: &str) -> Result<Cmd, IcmError> {
+        if let Some(path) = self.env.tool_override(name) {
+            return Ok(self.cmd(path));
+        }
+        let jdk = self.jdk.clone()?;
+        Ok(self.cmd(jdk.home.join("bin").join(name)))
+    }
+
+    /// `java -jar <bundletool>`: the pinned bundletool (design §16.2), which
+    /// [`crate::pinned::require`] downloads only with `--yes`, or
+    /// `ICM_TOOL_BUNDLETOOL`. Returns the command and the version (`None`
+    /// for a stand-in).
+    pub fn bundletool(&self, ctx: &crate::context::Ctx) -> Result<(Cmd, Option<String>), IcmError> {
+        let found = crate::pinned::require(ctx, "bundletool")?;
+        let cmd = self.jdk_tool("java")?.arg("-jar").arg(&found.path);
+        Ok((cmd, found.version))
     }
 
     /// The NDK's `llvm-strip`.

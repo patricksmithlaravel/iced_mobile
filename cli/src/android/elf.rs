@@ -224,8 +224,9 @@ pub fn read(path: &Path) -> io::Result<Library> {
     })
 }
 
-/// Builds a minimal 64-bit ELF shared library for tests.
-#[cfg(test)]
+/// Builds a minimal 64-bit ELF shared library, for icm's tests (the unit
+/// tests and the fake toolchains of `tests/android_release.rs`).
+#[doc(hidden)]
 pub fn synthetic(machine: u16, align: u64, symbols: &[&str]) -> Vec<u8> {
     // Layout: ELF header (64) | 1 program header (56) | dynstr | dynsym |
     // 3 section headers (null, dynsym, dynstr).

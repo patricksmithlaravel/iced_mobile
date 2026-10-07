@@ -148,30 +148,47 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     };
     let mut plan = Plan::new();
     plan.push(Step::internal("android.device", &device));
-    if !args.no_build {
-        build_steps(
-            ctx,
-            &project,
-            tools.as_ref(),
-            super::avd::host_abi(),
-            args.release,
-            &mut plan,
-        )?;
+    let uninstall = if args.reinstall {
+        " (after pm uninstall, keeping data unless --wipe-data)"
+    } else {
+        ""
+    };
+    if args.from_aab {
+        plan.push(Step::internal(
+            "android.aab",
+            &format!(
+                "the .aab of the newest release ({}), which `icm release android` made; nothing is built",
+                crate::paths::display(&crate::release::dist::latest(&project, "android"))
+            ),
+        ));
+        plan.push(Step::internal(
+            "bundletool.install",
+            &format!(
+                "bundletool build-apks --connected-device --device-id=<serial> with icm's debug keystore {}, then bundletool install-apks --allow-downgrade{uninstall}",
+                crate::paths::display(&super::debug_keystore())
+            ),
+        ));
+    } else {
+        if !args.no_build {
+            build_steps(
+                ctx,
+                &project,
+                tools.as_ref(),
+                super::avd::host_abi(),
+                args.release,
+                &mut plan,
+            )?;
+        }
+        let profile = profile(args.release);
+        let package = project.package_for("android")?;
+        plan.push(Step::internal(
+            "adb.install",
+            &format!(
+                "adb install -r -d {}{uninstall}",
+                crate::paths::display(&apk::apk_path(&project, &package.name, profile)),
+            ),
+        ));
     }
-    let profile = profile(args.release);
-    let package = project.package_for("android")?;
-    plan.push(Step::internal(
-        "adb.install",
-        &format!(
-            "adb install -r -d {}{}",
-            crate::paths::display(&apk::apk_path(&project, &package.name, profile)),
-            if args.reinstall {
-                " (after pm uninstall, keeping data unless --wipe-data)"
-            } else {
-                ""
-            }
-        ),
-    ));
     plan.push(Step::internal(
         "android.props",
         "setprop debug.icm.events 1, and debug.iced.backend from --env ICED_BACKEND",

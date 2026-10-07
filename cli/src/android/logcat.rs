@@ -265,6 +265,37 @@ pub fn relaunches(records: &[Record], app_id: &str) -> Vec<Relaunch> {
         .collect()
 }
 
+/// The events-buffer tags Android writes when it destroys an activity
+/// (`wm_*` from API 29, `am_*` before).
+pub const DESTROY_TAGS: &[&str] = &["wm_destroy_activity", "am_destroy_activity"];
+
+/// The records that destroy one of `app_id`'s activities
+/// (`wm_destroy_activity: [0,123,8,<component>,finish-imm]`), with the
+/// reason Android gave (the last field).
+pub fn destroys(records: &[Record], app_id: &str) -> Vec<(Record, String)> {
+    let prefix = format!("{app_id}/");
+    records
+        .iter()
+        .filter(|record| DESTROY_TAGS.contains(&record.tag.as_str()))
+        .filter_map(|record| {
+            let fields: Vec<&str> = record
+                .msg
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .map(str::trim)
+                .collect();
+            fields.iter().any(|f| f.starts_with(&prefix)).then(|| {
+                (
+                    record.clone(),
+                    fields.last().map(ToString::to_string).unwrap_or_default(),
+                )
+            })
+        })
+        .collect()
+}
+
 /// Known failure signatures in the app's logs (design §13.4), as
 /// `likely_causes`.
 pub fn likely_causes(records: &[Record], lib: &str) -> Vec<String> {

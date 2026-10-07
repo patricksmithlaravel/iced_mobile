@@ -14,6 +14,8 @@ test it ONLY through `icm`, and read the last JSON line of every command: it is 
    Trust the `app` and `crash` records: the app's own output, panics and crash reports. On ios-sim,
    `--source system` adds the system log, mostly other processes' errors that merely mention the app.
 5. `icm test --json -q`: unit tests and `tests/flows/*.ice` in a headless renderer.
+   `icm test --on android --lifecycle --json -q` puts the app through rotation, dark mode, font
+   scale, Home, Back and a process kill on the emulator; every step must keep or restart it cleanly.
 6. `icm shot --headless --all-viewports --json -q`: the layout at phone and desktop sizes, no device.
 7. `icm ui --headless tree --json`: the widget tree with bounds, for writing `.ice` flows.
    `icm ui --headless find "<text>" --viewport pixel-9 --json` gives a widget's centre in points at

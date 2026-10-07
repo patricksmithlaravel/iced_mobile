@@ -64,7 +64,7 @@ cargo test
 | `ios/` | iOS device builds, shared by `icm release ios` (`release/ios.rs`) and `ios-device`: the device bundle and its gates (`bundle.rs`), `DT*` keys (`dt.rs`), identities (`identity.rs`), provisioning profiles (`profile.rs`), entitlements, codesign with the keychain watchdog, Mach-O symbols and UUIDs (`macho.rs`), the privacy scan, the dSYM gates, the `.ipa` (`ipa.rs`), an XML plist reader and SHA-1 |
 | `pinned.rs` | the tools icm downloads itself (`tools.toml`, embedded: version, URL, size, sha256 per host): find, install with `--yes` (curl, sha256 check, unpack), doctor's WARN and `--fix --yes` |
 | `policy.rs` | the dated store policy table (`policy/stores.toml`, embedded): the floor in force on a day, `env.policy_stale`, upcoming floors; `icm print policy` |
-| `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices` for Android (`doctor android` is `doctor/`): APK pipeline, managed AVD, adb, logcat, session (`android/mod.rs` has the module map) |
+| `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices` for Android (`doctor android` is `doctor/`): APK pipeline, managed AVD, adb, logcat, session; the release bundle's layout, tool-output parsing and store gates (`bundle.rs`, used by `release/android.rs`), `run --from-aab`, and `test --on android --lifecycle` (`lifecycle.rs`) (`android/mod.rs` has the module map) |
 
 ## Writing a command
 
@@ -140,6 +140,11 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   `xcodebuild` and `sw_vers` (`fixtures/fake-ios/`), a synthetic device
   Mach-O and fake profiles, with the real `plutil`, `ditto`, `zip` and
   `unzip` (macOS only).
+- `tests/android_release.rs` runs `icm release|verify android` and
+  `icm diagnose play` against a fake cargo (synthetic ELF libraries) and
+  stand-ins for aapt2, bundletool (`java -jar`), jar, keytool, jarsigner,
+  apksigner and zipalign that log their argv and write real zips with
+  `zip`/`unzip` (it skips without them).
 
 ## Environment
 

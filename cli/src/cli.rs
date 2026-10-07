@@ -196,7 +196,9 @@ pub enum Command {
     Ui(UiArgs),
 
     /// Run unit tests and the .ice flows headlessly
-    #[command(after_help = "Examples:\n  icm test --json -q\n  icm test --filter smoke")]
+    #[command(
+        after_help = "Examples:\n  icm test --json -q\n  icm test --filter smoke\n  icm test --on android --lifecycle --json -q"
+    )]
     Test(TestArgs),
 
     /// Explain an error or check id, the exit codes, or list the catalogue
@@ -312,7 +314,7 @@ impl Command {
             Command::Logs(args) => ("logs".into(), Some(args.platform.as_str().into())),
             Command::Input(args) => ("input".into(), Some(args.platform.as_str().into())),
             Command::Ui(_) => ("ui".into(), Some("headless".into())),
-            Command::Test(args) => ("test".into(), platform(&args.on)),
+            Command::Test(args) => ("test".into(), platform(&args.device())),
             Command::Explain(_) => ("explain".into(), None),
             Command::Wait(_) => ("wait".into(), None),
             Command::Print(args) => ("print".into(), Some(args.what.name().into())),
@@ -784,6 +786,9 @@ pub enum UiAction {
 /// `icm test`.
 #[derive(Debug, Args)]
 pub struct TestArgs {
+    /// The platform's device to test on (same as --on)
+    #[arg(value_enum, conflicts_with = "on")]
+    pub platform: Option<Platform>,
     /// Only host tests (unit tests and flows); the default
     #[arg(long)]
     pub host: bool,
@@ -796,6 +801,13 @@ pub struct TestArgs {
     /// The lifecycle suite (with --on)
     #[arg(long)]
     pub lifecycle: bool,
+}
+
+impl TestArgs {
+    /// The device platform: `--on` or the positional platform.
+    pub fn device(&self) -> Option<Platform> {
+        self.on.or(self.platform)
+    }
 }
 
 /// `icm explain`.

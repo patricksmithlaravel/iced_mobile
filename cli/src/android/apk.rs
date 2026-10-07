@@ -121,95 +121,21 @@ pub fn build(
         return Err(ctx.step_failure("llvm-strip", CheckId::ToolFailed, &outcome));
     }
 
-    // 4. Resources and manifest.
-    let icon = config
-        .app
-        .icon
-        .as_ref()
-        .map(|icon| project.dir().join(icon));
-    let generated = res::generate(
-        &gen_dir,
-        &res::Inputs {
-            icon,
-            background: config.app.background.clone(),
-        },
-    )?;
-    for check in generated.checks {
+    // 4. Resources and manifest; 5. link.
+    let resources = resources(ctx, project, tools, &gen_dir, &package.version, &lib)?;
+    for check in resources.checks.clone() {
         ctx.rep.check(check);
     }
-    let manifest_text = manifest::manifest(&manifest::Inputs {
-        config,
-        version: &package.version,
-        lib: &lib,
-    })?;
-    let manifest_path = gen_dir.join("AndroidManifest.xml");
-    write_if_changed(&manifest_path, manifest_text.as_bytes())?;
-
-    let res_zip = gen_dir.join("res.zip");
-    if generated.changed || !res_zip.is_file() {
-        let compile = tools
-            .build_tool("aapt2")?
-            .arg("compile")
-            .arg("--dir")
-            .arg(&generated.dir)
-            .arg("-o")
-            .arg(&res_zip)
-            .timeout(Duration::from_secs(180));
-        run_tool(ctx, "aapt2.compile", &compile, CheckId::AndroidAapt2Failed)?;
-    }
-    let mut overlays = vec![res_zip];
-    if let Some(user) = config.android.res.as_deref() {
-        let user_dir = project.dir().join(user);
-        if user_dir.is_dir() {
-            let user_zip = gen_dir.join("user-res.zip");
-            let compile = tools
-                .build_tool("aapt2")?
-                .arg("compile")
-                .arg("--dir")
-                .arg(&user_dir)
-                .arg("-o")
-                .arg(&user_zip)
-                .timeout(Duration::from_secs(180));
-            run_tool(
-                ctx,
-                "aapt2.compile.user",
-                &compile,
-                CheckId::AndroidAapt2Failed,
-            )?;
-            overlays.push(user_zip);
-        }
-    }
-
-    // 5. Link.
     let linked = gen_dir.join("apk");
-    if linked.exists() {
-        std::fs::remove_dir_all(&linked).map_err(|e| io_error("clean", &linked, &e))?;
-    }
-    std::fs::create_dir_all(&linked).map_err(|e| io_error("create", &linked, &e))?;
-    let mut link = tools
-        .build_tool("aapt2")?
-        .args(["link", "--output-to-dir", "-o"])
-        .arg(&linked)
-        .arg("-I")
-        .arg(&jar)
-        .arg("--manifest")
-        .arg(&manifest_path);
-    for overlay in &overlays {
-        link = link.arg("-R").arg(overlay);
-    }
-    link = link
-        .args(["--auto-add-overlay", "--replace-version", "--version-code"])
-        .arg(config.app.build.to_string())
-        .arg("--version-name")
-        .arg(&package.version);
-    if !release {
-        link = link.arg("--debug-mode");
-    }
-    run_tool(
+    link(
         ctx,
-        "aapt2.link",
-        &link.timeout(Duration::from_secs(180)),
-        CheckId::AndroidAapt2Failed,
+        tools,
+        &jar,
+        &resources,
+        &linked,
+        config.app.build,
+        &package.version,
+        if release { Link::Release } else { Link::Debug },
     )?;
 
     // 6. Package (all stored), align, sign, verify.
@@ -295,8 +221,159 @@ pub fn build(
     })
 }
 
+/// The generated manifest and resources, compiled for `aapt2 link`.
+#[derive(Clone, Debug)]
+pub struct Resources {
+    /// `AndroidManifest.xml` (text).
+    pub manifest: PathBuf,
+    /// The compiled resources, in `-R` order: icm's, then `[android] res`.
+    pub overlays: Vec<PathBuf>,
+    /// Findings about the icon (WARN `app.icon.invalid`), for the caller to
+    /// report.
+    pub checks: Vec<Check>,
+}
+
+/// Writes the manifest and the resource tree into `gen_dir` (design §9.4)
+/// and compiles them with `aapt2 compile` (icm's tree only when it
+/// changed; `[android] res` each time).
+pub fn resources(
+    ctx: &Ctx,
+    project: &Project,
+    tools: &Toolset,
+    gen_dir: &Path,
+    version: &str,
+    lib: &str,
+) -> Result<Resources> {
+    let config = &project.config.config;
+    std::fs::create_dir_all(gen_dir).map_err(|e| io_error("create", gen_dir, &e))?;
+    let icon = config
+        .app
+        .icon
+        .as_ref()
+        .map(|icon| project.dir().join(icon));
+    let generated = res::generate(
+        gen_dir,
+        &res::Inputs {
+            icon,
+            background: config.app.background.clone(),
+        },
+    )?;
+    let manifest_text = manifest::manifest(&manifest::Inputs {
+        config,
+        version,
+        lib,
+    })?;
+    let manifest_path = gen_dir.join("AndroidManifest.xml");
+    write_if_changed(&manifest_path, manifest_text.as_bytes())?;
+
+    let res_zip = gen_dir.join("res.zip");
+    if generated.changed || !res_zip.is_file() {
+        let compile = tools
+            .build_tool("aapt2")?
+            .arg("compile")
+            .arg("--dir")
+            .arg(&generated.dir)
+            .arg("-o")
+            .arg(&res_zip)
+            .timeout(Duration::from_secs(180));
+        run_tool(ctx, "aapt2.compile", &compile, CheckId::AndroidAapt2Failed)?;
+    }
+    let mut overlays = vec![res_zip];
+    if let Some(user) = config.android.res.as_deref() {
+        let user_dir = project.dir().join(user);
+        if user_dir.is_dir() {
+            let user_zip = gen_dir.join("user-res.zip");
+            let compile = tools
+                .build_tool("aapt2")?
+                .arg("compile")
+                .arg("--dir")
+                .arg(&user_dir)
+                .arg("-o")
+                .arg(&user_zip)
+                .timeout(Duration::from_secs(180));
+            run_tool(
+                ctx,
+                "aapt2.compile.user",
+                &compile,
+                CheckId::AndroidAapt2Failed,
+            )?;
+            overlays.push(user_zip);
+        }
+    }
+    Ok(Resources {
+        manifest: manifest_path,
+        overlays,
+        checks: generated.checks,
+    })
+}
+
+/// What `aapt2 link` produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    /// A dev APK's binary XML, with `--debug-mode` (android:debuggable).
+    Debug,
+    /// A release APK's binary XML.
+    Release,
+    /// The protobuf format an App Bundle's module takes
+    /// (`--proto-format`), never debuggable.
+    Proto,
+}
+
+/// `aapt2 link --output-to-dir -o <out>` (emptied first) with
+/// `android.jar`, the manifest and the overlays, `--version-code` and
+/// `--version-name`.
+#[allow(clippy::too_many_arguments)]
+pub fn link(
+    ctx: &Ctx,
+    tools: &Toolset,
+    jar: &Path,
+    resources: &Resources,
+    out: &Path,
+    build: u64,
+    version: &str,
+    mode: Link,
+) -> Result<()> {
+    if out.exists() {
+        std::fs::remove_dir_all(out).map_err(|e| io_error("clean", out, &e))?;
+    }
+    std::fs::create_dir_all(out).map_err(|e| io_error("create", out, &e))?;
+    let mut link = tools.build_tool("aapt2")?.arg("link");
+    if mode == Link::Proto {
+        link = link.arg("--proto-format");
+    }
+    link = link
+        .args(["--output-to-dir", "-o"])
+        .arg(out)
+        .arg("-I")
+        .arg(jar)
+        .arg("--manifest")
+        .arg(&resources.manifest);
+    for overlay in &resources.overlays {
+        link = link.arg("-R").arg(overlay);
+    }
+    link = link
+        .args(["--auto-add-overlay", "--replace-version", "--version-code"])
+        .arg(build.to_string())
+        .arg("--version-name")
+        .arg(version);
+    if mode == Link::Debug {
+        link = link.arg("--debug-mode");
+    }
+    let name = if mode == Link::Proto {
+        "aapt2.link.proto"
+    } else {
+        "aapt2.link"
+    };
+    run_tool(
+        ctx,
+        name,
+        &link.timeout(Duration::from_secs(180)),
+        CheckId::AndroidAapt2Failed,
+    )
+}
+
 /// Runs a tool step; a non-zero exit is `id`.
-fn run_tool(ctx: &Ctx, name: &str, cmd: &Cmd, id: CheckId) -> Result<()> {
+pub fn run_tool(ctx: &Ctx, name: &str, cmd: &Cmd, id: CheckId) -> Result<()> {
     let outcome = ctx.step(name, cmd)?;
     if outcome.success() {
         Ok(())
