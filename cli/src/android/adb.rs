@@ -290,11 +290,16 @@ pub struct Activities {
 }
 
 /// Reads `dumpsys activity activities` for `app_id`: its activities are
-/// `ActivityRecord{<hash> u0 <app_id>/<class> t<task>}`, and the one in
-/// front is on the `topResumedActivity=` (`ResumedActivity:` before API
-/// 29) line. `None` when the text lists no activity at all: a device whose
-/// launcher runs always lists one, so such an answer (a device still
-/// booting, a `dumpsys` that failed) says nothing about the app.
+/// `ActivityRecord{<hash> u0 <app_id>/<class> t<task>}` entries of a task's
+/// history (`* Hist #0:`, `Run #0:` before API 29, `* ActivityRecord{` in
+/// the window hierarchy), and the one in front is on the
+/// `topResumedActivity=` (`ResumedActivity:` before API 29) line. Other
+/// lines can name an activity Android has destroyed: the display's
+/// `RotationHistory` keeps the activity that asked for each rotation as its
+/// `source=`, so only those lines count. `None` when the text lists no
+/// activity at all: a device whose launcher runs always lists one, so such
+/// an answer (a device still booting, a `dumpsys` that failed) says nothing
+/// about the app.
 pub fn parse_activities(dumpsys: &str, app_id: &str) -> Option<Activities> {
     if !dumpsys.contains("ActivityRecord{") {
         return None;
@@ -308,11 +313,13 @@ pub fn parse_activities(dumpsys: &str, app_id: &str) -> Option<Activities> {
         if !line.contains("ActivityRecord{") || !line.contains(&component) {
             continue;
         }
-        activities.any = true;
         let line = line.trim_start();
-        if line.starts_with("topResumedActivity=") || line.starts_with("ResumedActivity:") {
-            activities.top = true;
-        }
+        let top = line.starts_with("topResumedActivity=") || line.starts_with("ResumedActivity:");
+        let listed = line.starts_with("* Hist ")
+            || line.starts_with("* ActivityRecord{")
+            || line.starts_with("Run #");
+        activities.any |= top || listed;
+        activities.top |= top;
     }
     Some(activities)
 }
@@ -423,6 +430,27 @@ mod tests {
             Some(Activities {
                 any: false,
                 top: false
+            })
+        );
+        // API 36, after Back from an app that turned the screen: the
+        // display's rotation history still names the destroyed activity.
+        let rotated = format!(
+            "{back}    RotationHistory\n      10-07 13:09:29.760 ROTATION_90 to ROTATION_270\n        source=ActivityRecord{{36924985 u0 com.example.fixer/android.app.NativeActivity t12}} SCREEN_ORIENTATION_UNSPECIFIED\n        mode=USER_ROTATION_LOCKED user=ROTATION_270 sensor=ROTATION_0\n"
+        );
+        assert_eq!(
+            parse_activities(&rotated, app),
+            Some(Activities {
+                any: false,
+                top: false
+            })
+        );
+        // Before API 29: `Run #` and `mResumedActivity`.
+        let old = "  Running activities (most recent first):\n    TaskRecord{8f1b2c4 #12 A=com.example.fixer U=0 StackId=3 sz=1}\n      Run #0: ActivityRecord{2d1e5a1 u0 com.example.fixer/android.app.NativeActivity t12}\n    mResumedActivity: ActivityRecord{2d1e5a1 u0 com.example.fixer/android.app.NativeActivity t12}\n  ResumedActivity: ActivityRecord{2d1e5a1 u0 com.example.fixer/android.app.NativeActivity t12}\n";
+        assert_eq!(
+            parse_activities(old, app),
+            Some(Activities {
+                any: true,
+                top: true
             })
         );
         // An id that another one starts with is not that one.
