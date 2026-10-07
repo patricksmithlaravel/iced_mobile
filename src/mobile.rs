@@ -689,6 +689,16 @@
 //!   fields fire only from a hardware keyboard on Android. The
 //!   [clipboard](#clipboard) itself works: offer Copy and Paste buttons
 //!   where they matter.
+//! - **Line breaks in inserted text on iOS.** UIKit hands over text one
+//!   insertion at a time. An insertion that is only a line break (`"\n"`,
+//!   `"\r"`, or `"\r\n"` counted once) is one Return, as from the
+//!   keyboard's Return key, and one that is only `"\t"` is Tab. A line
+//!   break or tab inside longer inserted text (dictation, a keyboard
+//!   suggestion, a third-party keyboard) is dropped: it neither submits a
+//!   `text_input` nor breaks the line in a `text_editor`. Insertions that
+//!   reach the app in the same turn of the run loop count as one, so a
+//!   Return typed right after other keys while the app is busy can be
+//!   lost.
 //! - **Android activity destruction** ends the application, which starts
 //!   over in the next Activity ([Activity
 //!   destruction](#android-activity-destruction)). The manifest settings

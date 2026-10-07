@@ -296,8 +296,11 @@ pub fn window_event(
                 ..
             } = event;
 
-            #[cfg(any(target_os = "android", target_os = "ios"))]
-            let (key, logical_key) = (mobile_key(key), mobile_key(logical_key));
+            // iOS maps Return and Tab per insertion instead, once the
+            // events are all in: see `ios_inserted_keys`.
+            #[cfg(target_os = "android")]
+            let (key, logical_key) =
+                (android_key(key), android_key(logical_key));
 
             let key = self::key(key);
             let modified_key = self::key(logical_key);
@@ -648,37 +651,154 @@ pub fn touch_event(
     }
 }
 
-/// Android and iOS: Return and Tab as the named keys a desktop keyboard
-/// sends.
+/// Android: Enter and Tab as the named keys a desktop keyboard sends.
 ///
-/// - iOS: winit hands over every character UIKit inserts through
-///   `insertText:` as a key event of its own with a `Key::Character`, so
-///   Return is `Character("\n")` and Tab is `Character("\t")` (winit 0.30.13
-///   src/platform_impl/ios/view.rs:543-579).
-/// - Android: winit looks every key up in the device's key character map
-///   first, and the map gives Enter (`KEYCODE_ENTER`, also what the soft
-///   keyboard's Return key sends) the character '\n' and Tab '\t', so they
-///   too arrive as `Character("\n")` and `Character("\t")` (winit 0.30.13
-///   src/platform_impl/android/keycodes.rs:224-230). Only keys the map has
-///   no character for, such as the D-pad centre, become `Named::Enter`.
+/// winit looks every key up in the device's key character map first, and
+/// the map gives Enter (`KEYCODE_ENTER`, also what the soft keyboard's
+/// Return key sends) the character '\n' and Tab '\t', so they arrive as
+/// `Character("\n")` and `Character("\t")` (winit 0.30.13
+/// src/platform_impl/android/keycodes.rs:224-230). Only keys the map has no
+/// character for, such as the D-pad centre, become `Named::Enter`. Each of
+/// these events is one key press, so each is mapped on its own.
 ///
 /// iced's widgets act on the named keys only: `text_input` submits and
 /// `text_editor` breaks the line on `Named::Enter`, and both drop control
 /// characters given as text. The event's `text` is left as the character,
 /// a control character the text widgets do not insert, as a desktop Return
 /// ("\r") or Tab ("\t") is.
-///
-/// UIKit inserts dictated and pasted text the same way, so on iOS a line
-/// break in it now acts as Return too: it submits a `text_input` and breaks
-/// the line in a `text_editor` ("\r\n" twice), where before it was dropped.
-#[cfg(any(target_os = "android", target_os = "ios", test))]
-fn mobile_key(key: winit::keyboard::Key) -> winit::keyboard::Key {
+#[cfg(any(target_os = "android", test))]
+fn android_key(key: winit::keyboard::Key) -> winit::keyboard::Key {
     use winit::keyboard::{Key, NamedKey};
 
     match key.as_ref() {
         Key::Character("\n" | "\r") => Key::Named(NamedKey::Enter),
         Key::Character("\t") => Key::Named(NamedKey::Tab),
         _ => key,
+    }
+}
+
+/// iOS: a Return or Tab that UIKit inserted on its own, as the named key a
+/// desktop keyboard sends. The shell calls it on the events it has
+/// collected, before the windows see them.
+///
+/// winit hands over every character UIKit inserts through `insertText:` as
+/// key events of its own: a press with a `Key::Character` and the
+/// character as its text, then a release, both without a key code (winit
+/// 0.30.13 src/platform_impl/ios/view.rs:543-579). The keyboard's Return
+/// key inserts "\n" that way, alone; a Tab arrives as "\t". Dictation,
+/// keyboard suggestions and third-party keyboards insert longer text the
+/// same way, and it can hold line breaks.
+///
+/// winit delivers the events of one insertion one after the other, and the
+/// shell keeps events until the run loop is about to wait, so a run of
+/// consecutive inserted characters for one window is one insertion, or
+/// several that UIKit delivered in the same turn of the run loop. A run
+/// that is exactly one line break ("\n", "\r", or "\r\n" counted once)
+/// becomes one press and release of `Named::Enter`, and a run that is
+/// exactly "\t" one of `Named::Tab`; their `text` is the inserted text. A
+/// line break or tab inside a longer run stays a character, which the text
+/// widgets drop as a control character: text with a line break neither
+/// submits a `text_input` halfway nor breaks the line in a `text_editor`.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn ios_inserted_keys(events: &mut Vec<(window::Id, Event)>) {
+    use keyboard::key::{Named, NativeCode, Physical};
+
+    /// The character of an event winit made for an inserted one, and
+    /// whether the event is its press.
+    fn inserted(event: &Event) -> Option<(&str, bool)> {
+        let (key, physical_key, location, pressed) = match event {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                physical_key,
+                location,
+                repeat: false,
+                ..
+            }) => (key, physical_key, location, true),
+            Event::Keyboard(keyboard::Event::KeyReleased {
+                key,
+                physical_key,
+                location,
+                ..
+            }) => (key, physical_key, location, false),
+            _ => return None,
+        };
+
+        match (key, physical_key, location) {
+            (
+                keyboard::Key::Character(c),
+                Physical::Unidentified(NativeCode::Unidentified),
+                keyboard::Location::Standard,
+            ) => Some((c.as_str(), pressed)),
+            _ => None,
+        }
+    }
+
+    let mut start = 0;
+
+    while start < events.len() {
+        let window = events[start].0;
+        let end = events[start..]
+            .iter()
+            .position(|(id, event)| *id != window || inserted(event).is_none())
+            .map_or(events.len(), |length| start + length);
+
+        if end == start {
+            start += 1;
+            continue;
+        }
+
+        let text: String = events[start..end]
+            .iter()
+            .filter_map(|(_, event)| inserted(event))
+            .filter_map(|(c, pressed)| pressed.then_some(c))
+            .collect();
+
+        let named = match text.as_str() {
+            "\n" | "\r" | "\r\n" => Named::Enter,
+            "\t" => Named::Tab,
+            _ => {
+                start = end;
+                continue;
+            }
+        };
+
+        let modifiers = match &events[start].1 {
+            Event::Keyboard(
+                keyboard::Event::KeyPressed { modifiers, .. }
+                | keyboard::Event::KeyReleased { modifiers, .. },
+            ) => *modifiers,
+            _ => keyboard::Modifiers::empty(),
+        };
+        let key = keyboard::Key::Named(named);
+        let physical_key = Physical::Unidentified(NativeCode::Unidentified);
+        let location = keyboard::Location::Standard;
+
+        let pressed = keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key.clone(),
+            physical_key,
+            location,
+            modifiers,
+            text: Some(text.into()),
+            repeat: false,
+        };
+        let released = keyboard::Event::KeyReleased {
+            key: key.clone(),
+            modified_key: key,
+            physical_key,
+            location,
+            modifiers,
+        };
+
+        let _ = events.splice(
+            start..end,
+            [
+                (window, Event::Keyboard(pressed)),
+                (window, Event::Keyboard(released)),
+            ],
+        );
+
+        start += 2;
     }
 }
 
@@ -1331,22 +1451,11 @@ fn is_private_use(c: char) -> bool {
 mod tests {
     use super::*;
 
+    use keyboard::key::Named;
     use winit::keyboard::{Key, NamedKey, SmolStr};
 
     fn character(c: &str) -> Key {
         Key::Character(SmolStr::new(c))
-    }
-
-    #[test]
-    fn ios_return_and_tab_are_named_keys() {
-        assert_eq!(mobile_key(character("\n")), Key::Named(NamedKey::Enter));
-        assert_eq!(mobile_key(character("\r")), Key::Named(NamedKey::Enter));
-        assert_eq!(mobile_key(character("\t")), Key::Named(NamedKey::Tab));
-
-        assert_eq!(
-            key(mobile_key(character("\n"))),
-            keyboard::Key::Named(keyboard::key::Named::Enter)
-        );
     }
 
     /// What an Android 16 emulator delivered for `input keyevent ENTER` and
@@ -1355,35 +1464,258 @@ mod tests {
     /// key map lookup as `Character("\t")`.
     #[test]
     fn android_enter_and_tab_from_the_key_map_are_named_keys() {
+        assert_eq!(android_key(character("\n")), Key::Named(NamedKey::Enter));
+        assert_eq!(android_key(character("\r")), Key::Named(NamedKey::Enter));
+        assert_eq!(android_key(character("\t")), Key::Named(NamedKey::Tab));
+
         assert_eq!(
-            key(mobile_key(character("\n"))),
-            keyboard::Key::Named(keyboard::key::Named::Enter)
+            key(android_key(character("\n"))),
+            keyboard::Key::Named(Named::Enter)
         );
         assert_eq!(
-            key(mobile_key(character("\t"))),
-            keyboard::Key::Named(keyboard::key::Named::Tab)
+            key(android_key(character("\t"))),
+            keyboard::Key::Named(Named::Tab)
         );
 
         // The D-pad centre already arrives named.
         assert_eq!(
-            mobile_key(Key::Named(NamedKey::Enter)),
+            android_key(Key::Named(NamedKey::Enter)),
             Key::Named(NamedKey::Enter)
         );
     }
 
     #[test]
-    fn mobile_other_keys_are_left_alone() {
+    fn android_other_keys_are_left_alone() {
         for c in ["a", " ", "\r\n", "\n\n", "é", "\u{7f}"] {
-            assert_eq!(mobile_key(character(c)), character(c));
+            assert_eq!(android_key(character(c)), character(c));
         }
 
         assert_eq!(
-            mobile_key(Key::Named(NamedKey::Backspace)),
+            android_key(Key::Named(NamedKey::Backspace)),
             Key::Named(NamedKey::Backspace)
         );
         assert_eq!(
-            mobile_key(Key::Named(NamedKey::BrowserBack)),
+            android_key(Key::Named(NamedKey::BrowserBack)),
             Key::Named(NamedKey::BrowserBack)
         );
+    }
+
+    /// The events `window_event` makes on iOS of each `insertText:` call:
+    /// per inserted character, a press with the character as its key and
+    /// text, then a release, without a key code (winit 0.30.13
+    /// src/platform_impl/ios/view.rs:543-579).
+    fn inserted(insertions: &[(window::Id, &str)]) -> Vec<(window::Id, Event)> {
+        let mut events = Vec::new();
+
+        for (window, text) in insertions {
+            for c in text.chars() {
+                let c = SmolStr::from_iter([c]);
+                let key = self::key(Key::Character(c.clone()));
+                let physical_key =
+                    physical_key(winit::keyboard::PhysicalKey::Unidentified(
+                        winit::keyboard::NativeKeyCode::Unidentified,
+                    ));
+
+                events.push((
+                    *window,
+                    Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: key.clone(),
+                        modified_key: key.clone(),
+                        physical_key,
+                        location: keyboard::Location::Standard,
+                        modifiers: keyboard::Modifiers::empty(),
+                        text: Some(c),
+                        repeat: false,
+                    }),
+                ));
+                events.push((
+                    *window,
+                    Event::Keyboard(keyboard::Event::KeyReleased {
+                        key: key.clone(),
+                        modified_key: key,
+                        physical_key,
+                        location: keyboard::Location::Standard,
+                        modifiers: keyboard::Modifiers::empty(),
+                    }),
+                ));
+            }
+        }
+
+        events
+    }
+
+    /// The events the windows see once the shell has collected them.
+    fn shell(mut events: Vec<(window::Id, Event)>) -> Vec<(window::Id, Event)> {
+        ios_inserted_keys(&mut events);
+
+        events
+    }
+
+    /// The named keys pressed, and the text the text widgets insert (what
+    /// is not a control character).
+    fn typed(events: &[(window::Id, Event)]) -> (Vec<Named>, String) {
+        let mut named = Vec::new();
+        let mut typed = String::new();
+
+        for (_, event) in events {
+            if let Event::Keyboard(keyboard::Event::KeyPressed {
+                modified_key,
+                text,
+                ..
+            }) = event
+            {
+                if let keyboard::Key::Named(key) = modified_key {
+                    named.push(*key);
+                } else if let Some(text) = text {
+                    typed.extend(text.chars().filter(|c| !c.is_control()));
+                }
+            }
+        }
+
+        (named, typed)
+    }
+
+    fn backspace(window: window::Id) -> (window::Id, Event) {
+        (
+            window,
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(Named::Backspace),
+                modified_key: keyboard::Key::Named(Named::Backspace),
+                physical_key: keyboard::key::Physical::Code(
+                    keyboard::key::Code::Backspace,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            }),
+        )
+    }
+
+    /// The keyboard's Return key and a hardware keyboard's insert "\n"
+    /// alone; "\r\n" is one Return.
+    #[test]
+    fn ios_a_lone_line_break_is_one_return() {
+        let window = window::Id::unique();
+
+        for line_break in ["\n", "\r", "\r\n"] {
+            let events = shell(inserted(&[(window, line_break)]));
+
+            assert_eq!(
+                typed(&events),
+                (vec![Named::Enter], String::new()),
+                "{line_break:?}"
+            );
+
+            // One press and its release, with the inserted text, as a
+            // desktop Return has its "\r".
+            let enter = keyboard::Key::Named(Named::Enter);
+
+            assert!(
+                matches!(
+                    &events[..],
+                    [
+                        (_, Event::Keyboard(keyboard::Event::KeyPressed {
+                            key,
+                            modified_key,
+                            text: Some(text),
+                            ..
+                        })),
+                        (_, Event::Keyboard(keyboard::Event::KeyReleased {
+                            key: released,
+                            ..
+                        })),
+                    ] if *key == enter
+                        && *modified_key == enter
+                        && *released == enter
+                        && text == line_break
+                ),
+                "{line_break:?}: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ios_a_lone_tab_is_tab() {
+        let window = window::Id::unique();
+        let events = shell(inserted(&[(window, "\t")]));
+
+        assert_eq!(typed(&events), (vec![Named::Tab], String::new()));
+    }
+
+    /// Dictation, a keyboard suggestion or a third-party keyboard inserts
+    /// longer text at once.
+    #[test]
+    fn ios_a_line_break_inside_inserted_text_is_not_return() {
+        let window = window::Id::unique();
+
+        for text in [
+            "one\ntwo",
+            "one\r\ntwo",
+            "one\n",
+            "\none",
+            "\n\n",
+            "\r\n\r\n",
+            "\n\r",
+            "one\ttwo",
+            "\t\t",
+        ] {
+            let events = shell(inserted(&[(window, text)]));
+            let (named, typed) = typed(&events);
+
+            assert!(named.is_empty(), "{text:?} pressed {named:?}");
+            assert_eq!(typed, text.replace(['\n', '\r', '\t'], ""), "{text:?}");
+            assert_eq!(events, inserted(&[(window, text)]), "{text:?}");
+        }
+    }
+
+    /// Another event between insertions ends the run: a Backspace
+    /// (`deleteBackward`), or an insertion into another window.
+    #[test]
+    fn ios_insertions_apart_are_judged_apart() {
+        let (one, two) = (window::Id::unique(), window::Id::unique());
+
+        let mut events = inserted(&[(one, "ab")]);
+        events.push(backspace(one));
+        events.extend(inserted(&[(one, "\n"), (two, "\r\n"), (one, "\t")]));
+
+        assert_eq!(
+            typed(&shell(events)),
+            (
+                vec![Named::Backspace, Named::Enter, Named::Enter, Named::Tab],
+                "ab".to_owned()
+            )
+        );
+    }
+
+    /// The limit: insertions that UIKit delivers in the same turn of the
+    /// run loop, with nothing between them, count as one.
+    #[test]
+    fn ios_insertions_in_one_turn_count_as_one() {
+        let window = window::Id::unique();
+        let events = shell(inserted(&[(window, "x"), (window, "\n")]));
+
+        assert_eq!(typed(&events), (vec![], "x".to_owned()));
+    }
+
+    /// Key events with a key code (Android's, a desktop's) are not
+    /// insertions.
+    #[test]
+    fn ios_key_events_with_a_code_are_left_alone() {
+        let window = window::Id::unique();
+        let event = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character("\n".into()),
+            modified_key: keyboard::Key::Character("\n".into()),
+            physical_key: keyboard::key::Physical::Code(
+                keyboard::key::Code::Enter,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: Some("\n".into()),
+            repeat: false,
+        });
+        let events = vec![(window, event.clone()), backspace(window)];
+
+        assert_eq!(shell(events.clone()), events);
     }
 }

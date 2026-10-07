@@ -47,6 +47,14 @@ this file in the commit that fixes or finds a limitation.
     keyboard, which may suggest or learn what is typed.
   - iOS hardware keyboards deliver typed characters and Backspace only: no
     arrows, Escape or Cmd shortcuts.
+  - On iOS, Return and Tab count only when UIKit inserts them alone, as
+    the keyboard's Return key does (`"\r\n"` is one Return). A line break or
+    tab inside longer inserted text (dictation, a keyboard suggestion, a
+    third-party keyboard) is dropped: it neither submits a `text_input` nor
+    breaks the line in a `text_editor`. Insertions that reach the app in
+    the same turn of the run loop count as one, so a Return typed right
+    after other keys while the app is busy can be lost. Give a form that
+    matters a submit button.
 - **A drag that starts on a button does not scroll** (any touch screen,
   iced-rs/iced#2004). A `scrollable` only scrolls when the finger lands on
   something that does not take touches: text, space, the gaps between
