@@ -1,0 +1,200 @@
+From 8d10641ca112ac371c9bd82e18dd60bdc98c1ef1 Mon Sep 17 00:00:00 2001
+From: patricksmithlaravel <patricksmithlaravel@gmail.com>
+Date: Tue, 6 Oct 2026 18:46:04 -0500
+Subject: [PATCH] android: exit on Destroy, allow a new loop, report inset
+ changes
+
+Android can destroy an activity and start a new one in the same process,
+for a configuration change the manifest does not take (font scale,
+locale, night mode, navigation mode). Both glues wait in onDestroy, on
+the Java main thread, for android_main to return, but the loop ignored
+MainEvent::Destroy, so the activity hung and the app hit an ANR. The
+loop now exits on Destroy. Input is not read after Destroy: there is
+none, and GameActivity (android-activity 0.6.1) would only log an error.
+
+The next activity's android_main, like a launch after the app ended its
+loop, then failed to build an EventLoop with RecreationAttempt. Dropping
+the EventLoop now resets the one-loop-per-process guard.
+
+ContentRectChanged (NativeActivity and GameActivity) and InsetsChanged
+(GameActivity) are reported as WindowEvent::Resized once the native
+window exists, so the app knows to read the new content rect or insets.
+The size may be unchanged; the iOS backend also reports a Resized on
+every layout of its view, safe-area changes included.
+
+This is winit PR #4739 with three additions: ContentRectChanged is
+reported too (NativeActivity has no InsetsChanged, so the PR's inset
+change never reached it), input is skipped after Destroy, and the
+EventLoopBuilder::build docs and the changelog describe the change.
+
+Verified: cargo check for aarch64-linux-android and x86_64-linux-android
+with android-native-activity and with android-game-activity, for
+aarch64-apple-ios, wasm32 and the host; cargo clippy -D warnings on both
+Android targets and features; cargo doc for Android; cargo +nightly fmt
+--check; cargo test on the host. On an API 36 arm64 emulator, with a
+NativeActivity probe app:
+- Changing the font scale twice relaunched the activity in the same
+  process each time: Suspended, LoopExiting, run_app returned, and the
+  next android_main built its loop. No ANR. With v0.30.13 the loop
+  stopped after Suspended and the app hit an input ANR.
+- Ending the loop from the app and launching again built a new loop in
+  the same process. With v0.30.13 the build failed with
+  RecreationAttempt.
+- With targetSdk 34, showing and hiding the keyboard each gave a Resized
+  with the new content rect (bottom 2337, 1517, 2337). The PR as posted
+  gave none.
+GameActivity was checked by compiling only.
+---
+ src/changelog/unreleased.md      |  9 +++++
+ src/event_loop.rs                |  6 ++-
+ src/platform_impl/android/mod.rs | 64 +++++++++++++++++++++-----------
+ 3 files changed, 55 insertions(+), 24 deletions(-)
+
+diff --git a/src/changelog/unreleased.md b/src/changelog/unreleased.md
+index f3a0f6d2..00ebadea 100644
+--- a/src/changelog/unreleased.md
++++ b/src/changelog/unreleased.md
+@@ -39,3 +39,12 @@ The migration guide could reference other migration examples in the current
+ changelog entry.
+ 
+ ## Unreleased
++
++### Changed
++
++- On Android, report content rect and window insets changes as `WindowEvent::Resized`.
++
++### Fixed
++
++- On Android, end the event loop when the activity is destroyed, so `android_main` returns and a new activity of the same process can start.
++- On Android, allow building a new `EventLoop` once the previous one has been dropped.
+diff --git a/src/event_loop.rs b/src/event_loop.rs
+index 233374be..68b58e3a 100644
+--- a/src/event_loop.rs
++++ b/src/event_loop.rs
+@@ -99,7 +99,9 @@ impl<T> EventLoopBuilder<T> {
+     /// - **Wayland/X11:** to prevent running under `Wayland` or `X11` unset `WAYLAND_DISPLAY` or
+     ///   `DISPLAY` respectively when building the event loop.
+     /// - **Android:** must be configured with an `AndroidApp` from `android_main()` by calling
+-    ///   [`.with_android_app(app)`] before calling `.build()`, otherwise it'll panic.
++    ///   [`.with_android_app(app)`] before calling `.build()`, otherwise it'll panic. Android can
++    ///   destroy an activity and start a new one in the same process, which calls `android_main()`
++    ///   again, so a new event loop can be built once the previous one has been dropped.
+     ///
+     /// [`platform`]: crate::platform
+     #[cfg_attr(
+@@ -127,7 +129,7 @@ impl<T> EventLoopBuilder<T> {
+         })
+     }
+ 
+-    #[cfg(web_platform)]
++    #[cfg(any(web_platform, android_platform))]
+     pub(crate) fn allow_event_loop_recreation() {
+         EVENT_LOOP_CREATED.store(false, Ordering::Relaxed);
+     }
+diff --git a/src/platform_impl/android/mod.rs b/src/platform_impl/android/mod.rs
+index c6a7416f..5faf4c8b 100644
+--- a/src/platform_impl/android/mod.rs
++++ b/src/platform_impl/android/mod.rs
+@@ -157,6 +157,14 @@ impl Default for PlatformSpecificEventLoopAttributes {
+     }
+ }
+ 
++impl<T: 'static> Drop for EventLoop<T> {
++    fn drop(&mut self) {
++        // Android can start a new activity in this process after destroying the last one, and the
++        // new activity's `android_main` needs an event loop of its own.
++        crate::event_loop::EventLoopBuilder::<()>::allow_event_loop_recreation();
++    }
++}
++
+ impl<T: 'static> EventLoop<T> {
+     pub(crate) fn new(
+         attributes: &PlatformSpecificEventLoopAttributes,
+@@ -204,6 +212,7 @@ impl<T: 'static> EventLoop<T> {
+         let cause = self.cause;
+         let mut pending_redraw = self.pending_redraw;
+         let mut resized = false;
++        let mut destroyed = false;
+ 
+         callback(event::Event::NewEvents(cause), self.window_target());
+ 
+@@ -219,9 +228,6 @@ impl<T: 'static> EventLoop<T> {
+                 },
+                 MainEvent::WindowResized { .. } => resized = true,
+                 MainEvent::RedrawNeeded { .. } => pending_redraw = true,
+-                MainEvent::ContentRectChanged { .. } => {
+-                    warn!("TODO: find a way to notify application of content rect change");
+-                },
+                 MainEvent::GainedFocus => {
+                     HAS_FOCUS.store(true, Ordering::Relaxed);
+                     callback(
+@@ -287,13 +293,23 @@ impl<T: 'static> EventLoop<T> {
+                     warn!("TODO: forward onStop notification to application");
+                 },
+                 MainEvent::Destroy => {
+-                    // XXX: maybe exit mainloop to drop things before being
+-                    // killed by the OS?
+-                    warn!("TODO: forward onDestroy notification to application");
++                    // The activity's `onDestroy` waits on the Java main thread for `android_main`
++                    // to return, so the loop ends here. If Android then starts a new activity in
++                    // this process (say, for a configuration change it relaunches for), that
++                    // activity gets its own `android_main`, which builds a new event loop.
++                    debug!("App Destroyed - exiting the event loop");
++                    destroyed = true;
++                    self.window_target.p.exit();
+                 },
+-                MainEvent::InsetsChanged { .. } => {
+-                    // XXX: how to forward this state to applications?
+-                    warn!("TODO: handle Android InsetsChanged notification");
++                MainEvent::ContentRectChanged { .. } | MainEvent::InsetsChanged { .. } => {
++                    // The area left for the app's content changed (system bars, display cutout,
++                    // keyboard), which `NativeActivity` reports as a new content rect and
++                    // `GameActivity` also as new insets. There is no event for this, so report a
++                    // `Resized`, even if the size stays the same, for the app to read the new
++                    // area. Not before the window exists: its size would be zero.
++                    if self.android_app.native_window().is_some() {
++                        resized = true;
++                    }
+                 },
+                 unknown => {
+                     trace!("Unknown MainEvent {unknown:?} (ignored)");
+@@ -307,19 +323,23 @@ impl<T: 'static> EventLoop<T> {
+         // a borrow of `self` while iterating
+         let android_app = self.android_app.clone();
+ 
+-        // Process input events
+-        match android_app.input_events_iter() {
+-            Ok(mut input_iter) => loop {
+-                let read_event =
+-                    input_iter.next(|event| self.handle_input_event(&android_app, event, callback));
+-
+-                if !read_event {
+-                    break;
+-                }
+-            },
+-            Err(err) => {
+-                tracing::warn!("Failed to get input events iterator: {err:?}");
+-            },
++        // Process input events, but not after `Destroy`: `NativeActivity` has detached its input
++        // queue by then, and `GameActivity` (android-activity 0.6.1) lets go of its glue on
++        // `Destroy`, after which reading input only logs an error.
++        if !destroyed {
++            match android_app.input_events_iter() {
++                Ok(mut input_iter) => loop {
++                    let read_event = input_iter
++                        .next(|event| self.handle_input_event(&android_app, event, callback));
++
++                    if !read_event {
++                        break;
++                    }
++                },
++                Err(err) => {
++                    tracing::warn!("Failed to get input events iterator: {err:?}");
++                },
++            }
+         }
+ 
+         // Empty the user event buffer
+-- 
+2.54.0 (Apple Git-157)
+

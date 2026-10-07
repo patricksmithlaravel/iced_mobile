@@ -285,15 +285,14 @@
 //!
 //! # winit
 //!
-//! iced takes winit 0.30.13 from a fork,
-//! [patricksmithlaravel/winit](https://github.com/patricksmithlaravel/winit),
-//! branch `iced-mobile/0.30`, which carries Android fixes until they ship in
-//! a winit release (winit PR #4739): the event loop ends when the Activity
-//! is destroyed, a new one can be built in the same process, and content
-//! rect changes are reported (as `Resized`).
+//! iced builds against winit 0.30.13 vendored in this repository
+//! (`vendor/winit`; its `PATCHES.md` lists the patches), which carries
+//! Android fixes until they ship in a winit release (winit PR #4739): the
+//! event loop ends when the Activity is destroyed, a new one can be built in
+//! the same process, and content rect changes are reported (as `Resized`).
 //!
 //! An application must not depend on winit from crates.io: the build would
-//! hold two copies of winit, and iced would use the fork alone. The two
+//! hold two copies of winit, and iced would use its own copy alone. The two
 //! share no types but `AndroidApp` (it comes from android-activity), and on
 //! iOS both would declare winit's Objective-C classes under the same names.
 //! Use what iced re-exports instead:
@@ -312,13 +311,9 @@
 //! `winit::platform::android::activity::AndroidApp` becomes
 //! `iced::mobile::AndroidApp`, or the same path under `iced_winit::winit`.
 //! `cargo tree -i winit --target all` must then list one winit, from the
-//! fork's git URL.
-//!
-//! The fork is a git source of its own, apart from iced's: a supply-chain
-//! check that allows only listed git sources, such as `[sources]
-//! allow-git` in cargo-deny's `deny.toml`, must list
-//! `https://github.com/patricksmithlaravel/winit` too, or it refuses winit
-//! and dpi.
+//! same git source as `iced`. Because winit (and its `dpi` crate) come from
+//! that source too, a supply-chain allow-list of git sources needs no new
+//! entry for them.
 //!
 //! # Known limitations
 //!
