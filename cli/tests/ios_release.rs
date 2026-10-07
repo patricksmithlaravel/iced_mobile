@@ -741,4 +741,10 @@ fn the_dry_run_prints_the_pipeline_and_writes_nothing() {
             .all(|l| l.starts_with("metadata"))
     );
     assert!(ios.log("codesign.log").is_empty());
+
+    // The xcodebuild export fallback is not built until the owner's first
+    // upload shows it is needed.
+    let export = ios.json(&["release", "ios", "--via-xcode-export", "--dry-run"]);
+    assert_eq!(export["exit"], 2, "{export}");
+    assert_eq!(export["errors"][0]["id"], "usage.not_implemented");
 }

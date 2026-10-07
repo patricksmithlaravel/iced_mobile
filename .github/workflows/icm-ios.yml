@@ -1,0 +1,104 @@
+# icm's iOS release and device work (docs/icm/DESIGN.md §17, §18 phase 2).
+# GitHub Actions is not enabled on the fork yet; this runs once it is.
+#
+# - `ios-unit`: the iOS modules' unit tests on Linux and macOS (profile
+#   matching, entitlements, the privacy scan, Mach-O parsing, the altool
+#   parser need no Apple tool), and on macOS the fake-tool tests of
+#   `icm release ios`, `verify ios`, `ios-device` and the store screenshots.
+# - `ios-accept`: cli/tests/accept/phase2.sh on a macOS runner with the
+#   newest release Xcode 26 or later: the template's `icm release ios
+#   --sign none`, `icm verify ios`, the gates on broken inputs and App Store
+#   screenshots on a Pro Max simulator. It has no signing assets: the
+#   owner's signed release, upload and TestFlight steps stay manual.
+name: icm iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cli/**"
+      - "examples/app/**"
+      - ".github/workflows/icm-ios.yml"
+  pull_request:
+    paths:
+      - "cli/**"
+      - "examples/app/**"
+      - ".github/workflows/icm-ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: icm-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  ios-unit:
+    name: iOS unit and fake-tool tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Unit tests of the iOS modules
+        working-directory: cli
+        run: |
+          cargo test --locked --lib -- ios:: release::ios platform::ios_device platform::ios_sim::store
+      - name: Fake-tool tests (macOS)
+        if: runner.os == 'macOS'
+        working-directory: cli
+        run: cargo test --locked --test ios_release --test ios_device --test ios_sim
+
+  ios-accept:
+    name: Phase 2 acceptance (macOS, release Xcode)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest release Xcode (26 or later)
+        run: |
+          xcode=$(for app in /Applications/Xcode_*.app; do
+            case "$app" in *[Bb]eta*) ;; *) echo "$app" ;; esac
+          done | sort -V | tail -n 1)
+          echo "selecting $xcode"
+          sudo xcode-select -s "$xcode/Contents/Developer"
+          xcodebuild -version
+          major=$(xcodebuild -version | awk '/^Xcode/ {split($2, v, "."); print v[1]}')
+          if [ "$major" -lt 26 ]; then
+            echo "::error::Xcode $major is below the App Store floor (26)"
+            exit 1
+          fi
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: cli/tests/accept/phase2.sh
+        env:
+          ACCEPT: ${{ runner.temp }}/accept
+          ICM_KEYCHAIN: ${{ runner.temp }}/no-signing.keychain-db
+          ICM_PROVISIONING_PROFILES: ${{ runner.temp }}/no-profiles
+        run: |
+          mkdir -p "$ICM_PROVISIONING_PROFILES"
+          cli/tests/accept/phase2.sh
+      - name: Keep the release and the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icm-ios-phase2
+          path: |
+            ${{ runner.temp }}/accept/log/
+            ${{ runner.temp }}/accept/*.json
+            ${{ runner.temp }}/accept/demo/target/icm/dist/
+            ${{ runner.temp }}/accept/demo/target/icm/store/
+          if-no-files-found: warn

@@ -36,7 +36,7 @@ use super::verify::Verify;
 use super::{Pipeline, Release, owner_plans};
 use crate::cargo::Select;
 use crate::catalogue::CheckId;
-use crate::cli::SignMode;
+use crate::cli::{ReleaseTarget, SignMode};
 use crate::context::Ctx;
 use crate::error::{Check, Evidence, IcmError, Result, Status};
 use crate::ios::dt::DtKeys;
@@ -85,12 +85,27 @@ fn io(what: &str, path: &Path, error: impl std::fmt::Display) -> IcmError {
     ))
 }
 
+/// `--via-xcode-export` (design §11.1's fallback, step 2.3 of §18) is
+/// built only if App Store Connect refuses icm's own IPA in the owner's
+/// first upload.
+fn via_xcode_export(rel: &Release) -> Result<()> {
+    if rel.args.via_xcode_export {
+        return Err(super::not_implemented(
+            ReleaseTarget::Ios,
+            "--via-xcode-export, the xcodebuild -exportArchive fallback, which waits until App Store Connect refuses an IPA icm built",
+        ));
+    }
+    Ok(())
+}
+
 impl Pipeline for Ios {
     fn plan(&self, _ctx: &Ctx, rel: &Release) -> Result<Plan> {
+        via_xcode_export(rel)?;
         Ok(plan(rel))
     }
 
     fn preconditions(&self, ctx: &mut Ctx, rel: &mut Release) -> Result<()> {
+        via_xcode_export(rel)?;
         let prepared = prepare(ctx, rel)?;
         *PREPARED.lock().unwrap_or_else(|e| e.into_inner()) = Some(prepared);
         Ok(())

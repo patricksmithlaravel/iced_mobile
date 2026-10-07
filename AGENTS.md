@@ -99,6 +99,16 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
     an `icm-test-*` emulator included.
   - Its Tawara steps clone `$TAWARA` (default `~/Tawara-mobile`) read-only into `$ACCEPT`. Set
     `TAWARA` to a path that does not exist to skip them.
+- **`cli/tests/accept/phase2.sh`** covers the App Store release without the owner's signing assets:
+  `icm release ios` stopping for the owner, `--sign none` with its IPA, gates and `verify`, an RGBA
+  icon, broken inputs, `diagnose altool`, App Store screenshots and the ios-device commands that
+  need no device. It takes a few minutes and needs macOS with Xcode 26 or later and `/usr/bin/jq`.
+  - icm only reads signing assets. Point `ICM_KEYCHAIN` at a keychain file and
+    `ICM_PROVISIONING_PROFILES` at a directory to keep it away from the user's keychains and Xcode's
+    profiles; the CI job does.
+  - It creates the managed `icm-iphone-<n>-pro-max-ios-<version>` simulator when it is missing and
+    shuts it down. The owner's signed release, upload and a physical iPhone are SKIP
+    (`ICM_ACCEPT_DEVICE=1` runs on a connected, provisioned iPhone).
 
 ## Rules
 
