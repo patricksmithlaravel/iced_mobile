@@ -2429,3 +2429,7 @@ These record where the code (`cli/`, with its tests) settles something the secti
 - **One managed simulator name** for `doctor` and `run` (item 19), and **one debug keystore** for `doctor` and the Android build (item 18).
 - **Failure signatures on `run`.** A failed `icm run desktop|web` gets the §13.4 signatures (`signatures.rs`) found in the text files its evidence names, as `likely_causes` (the panic itself stays the platform's own cause). ios-sim and android keep their own signature lists for the system log and logcat, so their causes are not doubled.
 
+
+### Release core (phases 2 to 5, shared by every target; `cli/src/release/`, `policy.rs`, `pinned.rs`)
+
+- **Store policy table** (§12.0). `cli/policy/stores.toml` (schema 1) is embedded: `reviewed` (2026-10-06), `stale_after_days` (90), `upcoming_days` (60), and `[[rule]]`s with an `id`, the `gates` that enforce it, a `source`, and `values` in date order, each with an optional `effective` date and `extension`. The value in force on a day is the last one whose date has come; an undated value (an API-level rule) is always in force. Gates read floors from it (`policy::get().int("play.target_sdk")`), and `[ios] min_os` validation takes its floor from `app_store.min_deployment`. `icm doctor` (and `icm release`) report PASS or WARN `env.policy_stale` and INFO `store.policy_upcoming` (new id) for each floor that takes effect within 60 days. `icm print policy` prints the table and the value in force today. `ICM_TODAY=YYYY-MM-DD` sets "today" for icm's tests.

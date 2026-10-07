@@ -823,6 +823,34 @@ fn print_env_web_works_without_a_project() {
 }
 
 #[test]
+fn print_policy_shows_the_dated_table() {
+    let sandbox = Sandbox::new();
+    let mut command = sandbox.command(&["print", "policy", "--json", "-q"]);
+    let _ = command.env("ICM_TODAY", "2026-10-07");
+    let result = result(&command.output().unwrap());
+    assert_eq!(result["exit"], 0, "{result}");
+    assert_eq!(result["policy"]["reviewed"], "2026-10-06");
+    assert_eq!(result["policy"]["stale"], false);
+    let rules = result["policy"]["rules"].as_array().unwrap();
+    let play = rules
+        .iter()
+        .find(|rule| rule["id"] == "play.target_sdk")
+        .unwrap();
+    assert_eq!(play["in_force"], 36);
+
+    // A year later the table is stale: a WARN, still exit 0.
+    let mut command = sandbox.command(&["print", "policy", "--json", "-q"]);
+    let _ = command.env("ICM_TODAY", "2027-10-07");
+    let stale = self::result(&command.output().unwrap());
+    assert_eq!(stale["exit"], 0, "{stale}");
+    assert_eq!(stale["warnings"][0]["id"], "env.policy_stale");
+
+    // Human mode prints the table on stdout.
+    let output = sandbox.run(&["print", "policy"]);
+    assert!(stdout(&output).contains("play.target_sdk"));
+}
+
+#[test]
 fn print_commands_lists_the_surface() {
     let result = result(&Sandbox::new().run(&["print", "commands", "--json", "-q"]));
     let names: Vec<&str> = result["commands"]["subcommands"]

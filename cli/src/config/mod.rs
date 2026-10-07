@@ -1184,12 +1184,19 @@ pub fn validate(loaded: &Loaded) -> Vec<IcmError> {
     }
 
     // [ios]
+    let store_floor = crate::policy::get()
+        .text("app_store.min_deployment")
+        .unwrap_or("13.0");
     match parse_os_version(&config.ios.min_os) {
-        Some(version) if version < (13, 0) => problems.push(invalid(
-            loaded,
-            "ios.min_os",
-            "is below iOS 13, the App Store's minimum deployment target",
-        )),
+        Some(version) if parse_os_version(store_floor).is_some_and(|floor| version < floor) => {
+            problems.push(invalid(
+                loaded,
+                "ios.min_os",
+                format!(
+                    "is below iOS {store_floor}, the App Store's minimum deployment target (`icm print policy`)"
+                ),
+            ))
+        }
         Some(_) => {}
         None => problems.push(invalid(loaded, "ios.min_os", "must look like \"16.0\"")),
     }

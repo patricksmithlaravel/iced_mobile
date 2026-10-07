@@ -688,6 +688,9 @@ catalogue! {
         "Read `icm ui --headless tree` and match a widget's exact text or `#id`.";
 
     // ---- release ---------------------------------------------------------------------
+    StorePolicyUpcoming = "store.policy_upcoming", CheckFailed, Info, Agent,
+        "A store floor in icm's policy table takes effect soon",
+        "Plan for it before the date in the detail; `icm print policy` lists every floor.";
     StoreNoAgentBridge = "store.no_agent_bridge", CheckFailed, Fail, Agent,
         "A release build contains the agent bridge",
         "Build releases without the `icm-agent` feature.";

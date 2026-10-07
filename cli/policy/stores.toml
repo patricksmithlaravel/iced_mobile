@@ -1,0 +1,76 @@
+# icm's store policy table (design §12.0): the dated floors the release gates
+# enforce. icm embeds this file; `icm print policy` shows it.
+#
+# `icm doctor` and `icm release` warn (env.policy_stale) once `reviewed` is
+# more than `stale_after_days` old, and report (store.policy_upcoming) every
+# floor that takes effect within `upcoming_days`.
+#
+# A rule's `values` are in date order. The one in force on a day is the last
+# whose `effective` date has come; a value without a date is always in force.
+# `extension` is a later deadline a store grants on request: icm gates on
+# `effective`. `gates` name the catalogue ids that enforce the rule.
+schema = 1
+reviewed = "2026-10-06"
+stale_after_days = 90
+upcoming_days = 60
+
+[[rule]]
+id = "app_store.min_sdk"
+title = "App Store uploads are built with Xcode and the iOS SDK of this major version or newer"
+store = "app-store"
+gates = ["ios.macho.sdk_floor", "env.xcode_too_old"]
+source = "[S A1] Apple Developer, Upcoming requirements"
+values = [{ value = 26, effective = "2026-04-28" }]
+
+[[rule]]
+id = "app_store.min_deployment"
+title = "The lowest MinimumOSVersion App Store Connect accepts"
+store = "app-store"
+gates = ["ios.macho.minos", "config.invalid"]
+source = "[S A1] Apple Developer, Upcoming requirements"
+values = [{ value = "13.0", effective = "2026-09-09" }]
+
+[[rule]]
+id = "app_store.privacy_manifest"
+title = "Uploads carry PrivacyInfo.xcprivacy with a reason for every required-reason API they use"
+store = "app-store"
+gates = ["ios.privacy.present", "ios.privacy.reasons"]
+source = "[S A3] Apple Developer, Privacy manifest files (ITMS-91053)"
+values = [{ value = true, effective = "2024-05-01" }]
+
+[[rule]]
+id = "play.target_sdk"
+title = "Google Play's lowest targetSdkVersion for new apps and updates"
+store = "google-play"
+gates = ["android.manifest.target_sdk"]
+source = "[S G1] Google Play Console Help, Target API level requirements"
+values = [
+  { value = 35, effective = "2025-08-31", extension = "2025-11-01" },
+  { value = 36, effective = "2026-08-31", extension = "2026-11-01" },
+]
+
+[[rule]]
+id = "play.page_size_16k"
+title = "Native libraries in uploads are aligned for 16 KB memory pages"
+store = "google-play"
+gates = ["android.so.align16k", "android.bundle.alignment"]
+source = "judge 2's sources (design Appendix A item 29)"
+note = "The research brief said 2027-02-01, which conflicts with these sources; the gates fail whatever the date."
+values = [{ value = true, effective = "2025-11-01", extension = "2026-05-31" }]
+
+[[rule]]
+id = "android.back_optout"
+title = "The highest targetSdkVersion that honours enableOnBackInvokedCallback=\"false\" ([android] back = \"key\")"
+store = "android"
+gates = ["android.manifest.back_optout"]
+source = "[S G4] Android Developers, Predictive back"
+note = "Removed at API 37: an app that targets 37 gets predictive back whatever its manifest says."
+values = [{ value = 36 }]
+
+[[rule]]
+id = "android.config_changes"
+title = "The lowest API level from which icm keeps android:configChanges complete (design §9.4)"
+store = "android"
+gates = ["android.manifest.config_changes"]
+source = "review §6.6"
+values = [{ value = 34 }]

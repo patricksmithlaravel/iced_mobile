@@ -185,6 +185,15 @@ pub fn gather(probe: &Probe<'_>, platforms: &[Platform]) -> Vec<Requirement> {
         }
     }
 
+    // The store policy table's age and the floors coming soon (§12.0).
+    for (index, check) in crate::policy::get()
+        .checks(crate::time::Day::today())
+        .into_iter()
+        .enumerate()
+    {
+        push(Requirement::new(format!("policy:{index}"), None, check));
+    }
+
     if let Some(project) = probe.project
         && let Ok(Some(lock)) = project.lock()
     {

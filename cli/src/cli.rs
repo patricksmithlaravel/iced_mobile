@@ -799,6 +799,8 @@ pub enum PrintWhat {
     },
     /// The whole command surface
     Commands,
+    /// The dated store policy table the release gates enforce
+    Policy,
 }
 
 impl PrintWhat {
@@ -811,6 +813,7 @@ impl PrintWhat {
             PrintWhat::Tools => "tools",
             PrintWhat::Plan { .. } => "plan",
             PrintWhat::Commands => "commands",
+            PrintWhat::Policy => "policy",
         }
     }
 }

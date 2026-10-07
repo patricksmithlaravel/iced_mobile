@@ -37,6 +37,7 @@ pub mod output;
 pub mod paths;
 pub mod plan;
 pub mod platform;
+pub mod policy;
 pub mod preview;
 pub mod process;
 pub mod raster;

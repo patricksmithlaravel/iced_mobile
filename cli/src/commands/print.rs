@@ -22,7 +22,28 @@ pub fn run(ctx: &mut Ctx, args: PrintArgs) -> Result<()> {
         PrintWhat::Tools => tools_report(ctx),
         PrintWhat::Plan { command } => plan(ctx, command),
         PrintWhat::Commands => commands(ctx),
+        PrintWhat::Policy => policy(ctx),
     }
+}
+
+/// `icm print policy`: the embedded store policy table (design §12.0) with
+/// the value of each rule in force today.
+fn policy(ctx: &mut Ctx) -> Result<()> {
+    let policy = crate::policy::get();
+    let today = crate::time::Day::today();
+    ctx.rep.set("policy", policy.to_json(today));
+    for check in policy.checks(today) {
+        if check.status != crate::error::Status::Pass {
+            ctx.rep.check(check);
+        }
+    }
+    ctx.rep.summary(format!(
+        "store policy table reviewed {} ({} rules)",
+        policy.reviewed,
+        policy.rules.len()
+    ));
+    ctx.rep.content(policy.to_text(today));
+    Ok(())
 }
 
 fn config(ctx: &mut Ctx) -> Result<()> {

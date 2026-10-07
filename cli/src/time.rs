@@ -77,6 +77,66 @@ impl Utc {
     }
 }
 
+/// A calendar day (UTC), counted in days since 1970-01-01, for the dated
+/// store policy table and release dates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Day(pub i64);
+
+impl Day {
+    /// The day of a calendar date (Howard Hinnant's days_from_civil).
+    pub fn from_civil(year: i64, month: u32, day: u32) -> Day {
+        let year = if month <= 2 { year - 1 } else { year };
+        let era = year.div_euclid(400);
+        let yoe = year.rem_euclid(400);
+        let month = i64::from(month);
+        let mp = if month > 2 { month - 3 } else { month + 9 };
+        let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        Day(era * 146_097 + doe - 719_468)
+    }
+
+    /// Parses `YYYY-MM-DD`.
+    pub fn parse(text: &str) -> Option<Day> {
+        let mut parts = text.trim().splitn(3, '-');
+        let year: i64 = parts.next()?.parse().ok()?;
+        let month: u32 = parts.next()?.parse().ok()?;
+        let day: u32 = parts.next()?.parse().ok()?;
+        let valid = (1..=12).contains(&month) && (1..=31).contains(&day);
+        let parsed = Day::from_civil(year, month, day);
+        // Reject days that roll over into the next month (2026-02-30).
+        (valid && parsed.to_utc().day == day).then_some(parsed)
+    }
+
+    /// Today: `ICM_TODAY` (`YYYY-MM-DD`, for icm's own tests), else the
+    /// system clock.
+    pub fn today() -> Day {
+        std::env::var("ICM_TODAY")
+            .ok()
+            .and_then(|text| Day::parse(&text))
+            .unwrap_or_else(|| {
+                let now = Utc::now();
+                Day::from_civil(now.year, now.month, now.day)
+            })
+    }
+
+    /// Midnight of the day.
+    pub fn to_utc(self) -> Utc {
+        Utc::from_unix(self.0 * 86_400)
+    }
+
+    /// The day `days` later.
+    pub fn plus(self, days: i64) -> Day {
+        Day(self.0 + days)
+    }
+}
+
+impl std::fmt::Display for Day {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let utc = self.to_utc();
+        write!(f, "{:04}-{:02}-{:02}", utc.year, utc.month, utc.day)
+    }
+}
+
 /// Parses `500ms`, `30s`, `1.5s`, `10m`, `2h` or a bare number of seconds.
 pub fn parse_duration(input: &str) -> Result<Duration, String> {
     let input = input.trim();
@@ -136,6 +196,21 @@ mod tests {
         // 2026-10-06T21:03:11Z
         assert_eq!(Utc::from_unix(1_791_320_591).stamp(), "20261006T210311Z");
         assert_eq!(Utc::from_unix(-1).rfc3339(), "1969-12-31T23:59:59Z");
+    }
+
+    #[test]
+    fn days_round_trip() {
+        assert_eq!(Day::from_civil(1970, 1, 1), Day(0));
+        assert_eq!(Day::parse("2026-10-06").unwrap().to_string(), "2026-10-06");
+        assert_eq!(Day::parse("2000-02-29").unwrap().to_string(), "2000-02-29");
+        assert_eq!(
+            Day::parse("2026-10-06").unwrap().plus(90).to_string(),
+            "2027-01-04"
+        );
+        assert!(Day::parse("2026-02-30").is_none());
+        assert!(Day::parse("2026-13-01").is_none());
+        assert!(Day::parse("soon").is_none());
+        assert!(Day::parse("1969-12-31").unwrap() < Day(0));
     }
 
     #[test]
