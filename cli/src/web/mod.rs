@@ -637,6 +637,8 @@ fn panic_error(panic: &Value, console: Option<&Path>) -> IcmError {
 fn wait_ready(ctx: &Ctx, session: &Session, wait: Duration) -> Result<Ready> {
     let started = Instant::now();
     let limit = ctx.remaining().map_or(wait, |r| r.min(wait));
+    // What was left of --timeout, not --wait-ready, is what ran out.
+    let overall = limit < wait;
     let console = session.console();
     let mut probe_hits = 0;
 
@@ -692,6 +694,25 @@ fn wait_ready(ctx: &Ctx, session: &Session, wait: Duration) -> Result<Ready> {
 
         if started.elapsed() >= limit {
             let error_record = first_error_record(console.as_deref());
+            let waited = crate::time::format_duration(started.elapsed());
+            if overall {
+                let mut error = IcmError::new(
+                    CheckId::StepTimeout,
+                    format!(
+                        "the overall --timeout ran out after {waited} while waiting for the app's first frame"
+                    ),
+                );
+                if let Some(console) = &console {
+                    error = error.evidence(Evidence::file(console));
+                }
+                if let Some(record) = &error_record {
+                    error = error.cause(format!(
+                        "the page logged an error first: {}",
+                        record["msg"].as_str().unwrap_or("an error")
+                    ));
+                }
+                return Err(error);
+            }
             let mut error = match (&error_record, status["start"].is_null()) {
                 (Some(record), _) => IcmError::new(
                     CheckId::RunAppDied,
@@ -703,16 +724,12 @@ fn wait_ready(ctx: &Ctx, session: &Session, wait: Duration) -> Result<Ready> {
                 (None, true) => IcmError::new(
                     CheckId::RunNotReady,
                     format!(
-                        "the app neither started nor drew within {} (no ICM_EVENT start and no canvas)",
-                        crate::time::format_duration(limit)
+                        "the app neither started nor drew within {waited} (no ICM_EVENT start and no canvas)"
                     ),
                 ),
                 (None, false) => IcmError::new(
                     CheckId::RunNotReady,
-                    format!(
-                        "the app started but drew no first frame within {}",
-                        crate::time::format_duration(limit)
-                    ),
+                    format!("the app started but drew no first frame within {waited}"),
                 ),
             };
             if let Some(console) = &console {

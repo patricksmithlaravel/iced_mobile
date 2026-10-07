@@ -495,10 +495,11 @@ fn wait_ready(
     launched: Instant,
     wait: Duration,
 ) -> Result<Ready> {
-    let limit = ctx
-        .remaining()
-        .map_or(wait, |remaining| remaining.min(wait));
-    let deadline = launched + limit;
+    let own = launched + wait;
+    let (deadline, overall) = match ctx.deadline() {
+        Some(overall) if overall < own => (overall, true),
+        _ => (own, false),
+    };
     let mut pids: BTreeSet<u32> = BTreeSet::new();
     let mut start_seen = false;
     let mut probes = 0;
@@ -599,19 +600,23 @@ fn wait_ready(
         }
 
         if Instant::now() >= deadline {
+            let waited = crate::time::format_duration(launched.elapsed());
+            if overall {
+                // The app may be fine: icm ran out of time, not the app.
+                return Err(IcmError::new(
+                    CheckId::StepTimeout,
+                    format!(
+                        "the overall --timeout ran out after {waited} while waiting for {app_id}'s first frame"
+                    ),
+                ));
+            }
             let detail = if start_seen {
-                format!(
-                    "{app_id} is alive but sent no ICM_EVENT ready within {}",
-                    crate::time::format_duration(limit)
-                )
+                format!("{app_id} is alive but sent no ICM_EVENT ready within {waited}")
             } else {
-                format!(
-                    "{app_id} is alive but never became the resumed activity within {}",
-                    crate::time::format_duration(limit)
-                )
+                format!("{app_id} is alive but never became the resumed activity within {waited}")
             };
             return Err(IcmError::new(CheckId::RunNotReady, detail)
-                .fix_commands(["icm logs android --level warn".to_string()]));
+                .fix_commands(["icm logs android --level warn --json".to_string()]));
         }
         std::thread::sleep(Duration::from_millis(500));
     }

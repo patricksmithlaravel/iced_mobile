@@ -718,8 +718,14 @@ enum Readiness {
     },
     /// The app died.
     Died { panic: Option<logs::Panic> },
-    /// Alive, but no first frame in time.
-    NotReady { saw_start: bool },
+    /// Alive, but no first frame in time: `waited` that long, and
+    /// `overall` when what was left of `--timeout` ran out before
+    /// `--wait-ready`.
+    NotReady {
+        saw_start: bool,
+        waited: Duration,
+        overall: bool,
+    },
 }
 
 /// Whether `launchctl list` in the simulator shows the app with a pid.
@@ -752,10 +758,11 @@ fn wait_ready(
     probe_shot: &Path,
 ) -> Result<Readiness> {
     let started = launched_at;
-    let deadline = started
-        + ctx
-            .remaining()
-            .map_or(limit, |remaining| remaining.min(limit));
+    let own = started + limit;
+    let (deadline, overall) = match ctx.deadline() {
+        Some(overall) if overall < own => (overall, true),
+        _ => (own, false),
+    };
     let mut saw_start = false;
     let mut panic = None;
     let mut polls = 0u32;
@@ -820,7 +827,11 @@ fn wait_ready(
         }
 
         if Instant::now() >= deadline {
-            return Ok(Readiness::NotReady { saw_start });
+            return Ok(Readiness::NotReady {
+                saw_start,
+                waited: started.elapsed(),
+                overall,
+            });
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -1462,7 +1473,11 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
             ctx.rep.next("icm logs ios-sim --json", "the app's output");
             return Err(error);
         }
-        Readiness::NotReady { saw_start } => {
+        Readiness::NotReady {
+            saw_start,
+            waited,
+            overall,
+        } => {
             ctx.rep.set("process", process(true, "none", None));
             let _ = screenshot(
                 ctx,
@@ -1474,22 +1489,29 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
                 args.expect_content,
             );
             snapshot_logs(ctx, &session, &run_dir);
-            let detail = if saw_start {
-                format!(
-                    "the app started (ICM_EVENT start) but drew no first frame within {}",
-                    crate::time::format_duration(args.wait_ready)
+            let waited = crate::time::format_duration(waited);
+            ctx.rep.next("icm stop ios-sim", "terminate the app");
+            if overall {
+                // The app may be fine: icm ran out of time, not the app.
+                return Err(IcmError::new(
+                    CheckId::StepTimeout,
+                    format!(
+                        "the overall --timeout ran out after {waited} while waiting for the app's first frame"
+                    ),
                 )
+                .evidence(Evidence::file(run_dir.join("app.stderr"))));
+            }
+            let detail = if saw_start {
+                format!("the app started (ICM_EVENT start) but drew no first frame within {waited}")
             } else {
                 format!(
-                    "the app is alive but sent no ICM_EVENT and the probe saw no content within {}",
-                    crate::time::format_duration(args.wait_ready)
+                    "the app is alive but sent no ICM_EVENT and the probe saw no content within {waited}"
                 )
             };
             ctx.rep.next(
                 "icm logs ios-sim --level warn --json",
                 "why it did not draw",
             );
-            ctx.rep.next("icm stop ios-sim", "terminate the app");
             return Err(IcmError::new(CheckId::RunNotReady, detail)
                 .evidence(Evidence::file(run_dir.join("app.stderr"))));
         }
