@@ -2,13 +2,17 @@
 //!
 //! winit reports no system or window theme on either platform and never
 //! sends `ThemeChanged`. The runner reads the mode where the platform keeps
-//! it whenever the event loop turns (`NewEvents` and `AboutToWait`), and
-//! hands a change to the instance, which treats it as Linux's theme stream
-//! does (`system::Action::NotifyTheme`): the default theme, `system::theme`
-//! and `system::theme_changes` follow it.
+//! it when the event loop turns (`NewEvents` and `AboutToWait`), and hands a
+//! change to the instance, which treats it as Linux's theme stream does
+//! (`system::Action::NotifyTheme`): the default theme, `system::theme` and
+//! `system::theme_changes` follow it.
 //!
 //! A switch wakes the event loop on both platforms, so the next turn sees
-//! it:
+//! it. iOS reads at every turn: two property reads. Android reads through
+//! JNI, a few calls each time, so only when a switch can have arrived: at
+//! the first turn, on `Resumed`, and after a configuration change, which
+//! winit reports as a `ScaleFactorChanged` window event
+//! ([`Appearance::changed`]).
 //!
 //! - Android: the night bits of the `uiMode` of the application's resources'
 //!   configuration (`getResources().getConfiguration()` of `ndk-context`'s
@@ -34,17 +38,38 @@ use crate::core::theme;
 #[derive(Debug, Default)]
 pub(crate) struct Appearance {
     last: Option<theme::Mode>,
+    /// Android: no switch can have arrived since the last read.
+    #[cfg(target_os = "android")]
+    current: bool,
 }
 
 impl Appearance {
     /// The system's mode, when it differs from the last one read (the first
-    /// read always reports).
+    /// read always reports). On Android it is read again only after
+    /// [`changed`](Self::changed).
     #[cfg(any(target_os = "android", target_os = "ios"))]
     pub(crate) fn poll(
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
     ) -> Option<theme::Mode> {
+        #[cfg(target_os = "android")]
+        {
+            if self.current {
+                return None;
+            }
+
+            self.current = true;
+        }
+
         self.update(system_mode(event_loop))
+    }
+
+    /// Android: a switch can have arrived (the application resumed, or its
+    /// configuration changed), so the next [`poll`](Self::poll) reads the
+    /// mode again.
+    #[cfg(target_os = "android")]
+    pub(crate) fn changed(&mut self) {
+        self.current = false;
     }
 
     /// `mode`, when it differs from the last one seen.

@@ -339,6 +339,10 @@ where
         fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
             lifecycle::report(lifecycle::Input::Resumed);
 
+            // Android: the mode may have switched while the app was away.
+            #[cfg(target_os = "android")]
+            self.appearance.changed();
+
             if let Some(sender) = self.system_theme.take() {
                 let _ = sender.send(
                     event_loop
@@ -407,6 +411,16 @@ where
         ) {
             if let Some(input) = lifecycle::Input::of(&event) {
                 lifecycle::report(input);
+            }
+
+            // Android: winit reports a configuration change, a dark-mode
+            // switch included, as a new scale factor.
+            #[cfg(target_os = "android")]
+            if matches!(
+                event,
+                winit::event::WindowEvent::ScaleFactorChanged { .. }
+            ) {
+                self.appearance.changed();
             }
 
             #[cfg(target_os = "windows")]
@@ -769,8 +783,9 @@ where
         }
 
         /// Android and iOS: winit reports no system theme there, so the
-        /// runner reads it whenever the event loop turns, and hands the
-        /// first mode and every change to the instance (see `appearance`).
+        /// runner reads it when the event loop turns (on Android only when a
+        /// switch can have arrived), and hands the first mode and every
+        /// change to the instance (see `appearance`).
         #[cfg(any(target_os = "android", target_os = "ios"))]
         fn sync_theme(
             &mut self,
