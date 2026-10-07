@@ -1,5 +1,7 @@
 //! Cargo: `cargo metadata` (own serde structs), `Cargo.lock`, build
-//! invocations with `--message-format=json-render-diagnostics`, and
+//! invocations with `--message-format=json` (rustc diagnostics arrive as
+//! JSON with their rendered text; `json-render-diagnostics` would print
+//! them to stderr instead and leave no `compiler-message`), and
 //! deployment-target stamping (Appendix C item 6).
 
 use crate::catalogue::CheckId;
@@ -446,7 +448,7 @@ pub enum Select {
 }
 
 /// A cargo build-like invocation (`build`, `rustc`, `check`, `clippy`,
-/// `test`), always with `--message-format=json-render-diagnostics`.
+/// `test`), always with `--message-format=json`.
 #[derive(Clone, Debug)]
 pub struct Invocation {
     /// The cargo subcommand.
@@ -526,7 +528,7 @@ impl Invocation {
         if let Some(dir) = &self.target_dir {
             args.extend(["--target-dir".to_string(), dir.display().to_string()]);
         }
-        args.push("--message-format=json-render-diagnostics".to_string());
+        args.push("--message-format=json".to_string());
         if !self.trailing.is_empty() {
             args.push("--".to_string());
             args.extend(self.trailing.iter().cloned());
@@ -894,7 +896,7 @@ checksum = "abc"
         assert_eq!(
             build.args().join(" "),
             "rustc --manifest-path /p/Cargo.toml -p app --lib --target aarch64-linux-android --release \
-             --message-format=json-render-diagnostics -- --crate-type cdylib"
+             --message-format=json -- --crate-type cdylib"
         );
 
         let mut web = Invocation::new("build", Path::new("/p/Cargo.toml"), "app");

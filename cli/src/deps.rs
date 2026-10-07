@@ -43,22 +43,21 @@ fn iced_packages(lock: &Lock) -> Vec<&LockPackage> {
         .collect()
 }
 
-/// A short, comparable description of where a package comes from.
+/// A short, comparable description of where a package comes from: the
+/// source and revision, not the version (the fork's crates do not all share
+/// one version: iced_widget is 0.14.2 next to iced 0.14.1).
 fn origin(package: &LockPackage) -> String {
     match Source::parse(package.source.as_deref()) {
-        Source::Path => format!("path dependency (version {})", package.version),
-        Source::Git { url, commit, .. } => format!(
-            "{}#{} (version {})",
-            crate::gitinfo::normalize_git_url(&url),
-            commit,
-            package.version
-        ),
-        Source::Registry { url } => format!("registry {url} (version {})", package.version),
-        Source::Other(other) => format!("{other} (version {})", package.version),
+        Source::Path => "a path dependency".to_string(),
+        Source::Git { url, commit, .. } => {
+            format!("{}#{}", crate::gitinfo::normalize_git_url(&url), commit)
+        }
+        Source::Registry { url } => format!("registry {url}"),
+        Source::Other(other) => other,
     }
 }
 
-/// `deps.single_iced`: every iced crate from one source, revision and version.
+/// `deps.single_iced`: every iced crate from one source and revision.
 pub fn single_iced(lock: &Lock) -> Check {
     let packages = iced_packages(lock);
     if packages.is_empty() {
@@ -90,7 +89,18 @@ pub fn single_iced(lock: &Lock) -> Check {
         format!(
             "iced crates come from {} sources: {}",
             origins.len(),
-            origins.keys().cloned().collect::<Vec<_>>().join("; ")
+            origins
+                .iter()
+                .map(|(origin, group)| format!(
+                    "{origin} ({})",
+                    group
+                        .iter()
+                        .map(|p| format!("{} {}", p.name, p.version))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
         ),
     );
     for group in origins.values() {
@@ -414,6 +424,18 @@ mod tests {
         assert_eq!(check.error.evidence.len(), 3);
         assert!(check.error.evidence.iter().all(|e| e.line.is_some()));
         assert_eq!(iced_not_fork(&lock).status, Status::Fail);
+    }
+
+    #[test]
+    fn one_source_with_several_versions_passes() {
+        // The fork's iced_widget is 0.14.2 next to iced 0.14.1.
+        let git = lock(&[
+            ("iced", "0.14.1", Some(FORK)),
+            ("iced_widget", "0.14.2", Some(FORK)),
+        ]);
+        assert_eq!(single_iced(&git).status, Status::Pass);
+        let path = lock(&[("iced", "0.14.1", None), ("iced_widget", "0.14.2", None)]);
+        assert_eq!(single_iced(&path).status, Status::Pass);
     }
 
     #[test]
