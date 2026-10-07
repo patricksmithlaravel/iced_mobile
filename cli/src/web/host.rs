@@ -15,6 +15,7 @@
 
 use super::cdp::{self, Conn};
 use super::console;
+use super::page::PageLog;
 use super::server::{self, Handler};
 use super::viewport::Viewport;
 use crate::catalogue::CheckId;
@@ -24,7 +25,7 @@ use crate::sessions;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,9 +36,6 @@ pub const MARKER: &str = "__session web";
 
 /// How long one DevTools command may take.
 const CDP_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// How many exception records `status` returns.
-const KEEP_EXCEPTIONS: usize = 5;
 
 /// What `icm run web` asks the host to do (written to a file, so the
 /// command line stays short and free of secrets).
@@ -141,18 +139,11 @@ pub fn token() -> String {
 struct State {
     token: String,
     url: String,
-    console: Mutex<Option<File>>,
+    log: PageLog,
     conn: Mutex<Option<Arc<Conn>>>,
     page: Mutex<Option<String>>,
     viewport: Mutex<Viewport>,
     product: Mutex<String>,
-    start: Mutex<Option<Value>>,
-    ready: Mutex<Option<Value>>,
-    panics: Mutex<Vec<Value>>,
-    warnings: Mutex<Vec<Value>>,
-    exceptions: Mutex<Vec<Value>>,
-    errors: AtomicU64,
-    crashed: AtomicBool,
     chrome_alive: AtomicBool,
     stop: AtomicBool,
     navigated_ms: AtomicU64,
@@ -161,13 +152,7 @@ struct State {
 
 impl State {
     fn write(&self, record: &Value) {
-        if let Ok(mut console) = self.console.lock()
-            && let Some(file) = console.as_mut()
-        {
-            let mut line = serde_json::to_string(record).unwrap_or_default();
-            line.push('\n');
-            let _ = file.write_all(line.as_bytes());
-        }
+        self.log.write(record);
     }
 
     fn conn_and_page(&self) -> std::result::Result<(Arc<Conn>, String), String> {
@@ -191,149 +176,7 @@ impl State {
         conn.call(Some(&page), method, params, CDP_TIMEOUT)
     }
 
-    /// One DevTools event.
-    fn on_event(&self, event: &Value) {
-        let method = event.get("method").and_then(Value::as_str).unwrap_or("");
-        let params = event.get("params").cloned().unwrap_or(Value::Null);
-        let str_of = |value: &Value, key: &str| -> String {
-            value
-                .get(key)
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string()
-        };
-
-        match method {
-            "Runtime.consoleAPICalled" => {
-                let kind = str_of(&params, "type");
-                let args = params
-                    .get("args")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                let msg = console::format_args(&args);
-                let epoch = params
-                    .get("timestamp")
-                    .and_then(Value::as_f64)
-                    .map(|ms| ms as u64)
-                    .unwrap_or_else(console::now_ms);
-                let level = console::console_level(&kind);
-                let mut tag = "";
-                if let Some(icm) = console::icm_event(&msg) {
-                    tag = console::ICM_EVENT_TAG;
-                    self.on_icm_event(icm, epoch);
-                } else if level == "error" {
-                    let _ = self.errors.fetch_add(1, Ordering::SeqCst);
-                }
-                self.write(&console::record(epoch, "console", level, tag, &msg));
-            }
-            "Runtime.exceptionThrown" => {
-                let details = params
-                    .get("exceptionDetails")
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                let description = details
-                    .get("exception")
-                    .and_then(|e| e.get("description"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| str_of(&details, "text"));
-                let url = str_of(&details, "url");
-                let location = if url.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        " (at {url}:{}:{})",
-                        details
-                            .get("lineNumber")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0)
-                            + 1,
-                        details
-                            .get("columnNumber")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0)
-                            + 1
-                    )
-                };
-                let record = console::record(
-                    console::now_ms(),
-                    "exception",
-                    "error",
-                    "exception",
-                    &format!("{description}{location}"),
-                );
-                let _ = self.errors.fetch_add(1, Ordering::SeqCst);
-                if let Ok(mut exceptions) = self.exceptions.lock()
-                    && exceptions.len() < KEEP_EXCEPTIONS
-                {
-                    exceptions.push(record.clone());
-                }
-                self.write(&record);
-            }
-            "Log.entryAdded" => {
-                let entry = params.get("entry").cloned().unwrap_or(Value::Null);
-                let mut msg = str_of(&entry, "text");
-                let url = str_of(&entry, "url");
-                if !url.is_empty() && !msg.contains(&url) {
-                    msg.push_str(&format!(" ({url})"));
-                }
-                let epoch = entry
-                    .get("timestamp")
-                    .and_then(Value::as_f64)
-                    .map(|ms| ms as u64)
-                    .unwrap_or_else(console::now_ms);
-                self.write(&console::record(
-                    epoch,
-                    "browser",
-                    console::browser_level(&str_of(&entry, "level"), &msg),
-                    &str_of(&entry, "source"),
-                    &msg,
-                ));
-            }
-            "Inspector.targetCrashed" | "Target.targetCrashed" => {
-                self.crashed.store(true, Ordering::SeqCst);
-                self.write(&console::record(
-                    console::now_ms(),
-                    "crash",
-                    "error",
-                    "renderer",
-                    "the page's renderer process crashed",
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    fn on_icm_event(&self, mut event: Value, epoch: u64) {
-        event["epoch_ms"] = json!(epoch);
-        let slot = match event.get("kind").and_then(Value::as_str).unwrap_or("") {
-            "ready" => &self.ready,
-            "start" => &self.start,
-            "panic" => {
-                if let Ok(mut panics) = self.panics.lock() {
-                    panics.push(event);
-                }
-                return;
-            }
-            "warning" => {
-                if let Ok(mut warnings) = self.warnings.lock() {
-                    warnings.push(event);
-                }
-                return;
-            }
-            _ => return,
-        };
-        if let Ok(mut slot) = slot.lock()
-            && slot.is_none()
-        {
-            *slot = Some(event);
-        }
-    }
-
     fn status(&self, probe: bool) -> Value {
-        let lock = |m: &Mutex<Option<Value>>| m.lock().ok().and_then(|v| v.clone());
-        let list = |m: &Mutex<Vec<Value>>| m.lock().map(|v| v.clone()).unwrap_or_default();
         let canvas = if probe {
             self.page_call(
                 "Runtime.evaluate",
@@ -351,13 +194,13 @@ impl State {
         json!({
             "ok": true,
             "url": self.url,
-            "start": lock(&self.start),
-            "ready": lock(&self.ready),
-            "panics": list(&self.panics),
-            "warnings": list(&self.warnings),
-            "exceptions": list(&self.exceptions),
-            "errors": self.errors.load(Ordering::SeqCst),
-            "crashed": self.crashed.load(Ordering::SeqCst),
+            "start": self.log.start(),
+            "ready": self.log.ready(),
+            "panics": self.log.panics(),
+            "warnings": self.log.warnings(),
+            "exceptions": self.log.exceptions(),
+            "errors": self.log.errors(),
+            "crashed": self.log.crashed(),
             "chrome": {
                 "alive": self.chrome_alive.load(Ordering::SeqCst),
                 "pid": self.chrome_pid.load(Ordering::SeqCst),
@@ -632,6 +475,7 @@ impl Handler for Control {
             ""
         };
         self.0
+            .log
             .write(&console::record(epoch, "forwarder", level, tag, msg));
     }
 }
@@ -712,18 +556,11 @@ pub fn main(ctx: &mut Ctx, args: &[String]) -> Result<()> {
     let state = Arc::new(State {
         token: token(),
         url: url.clone(),
-        console: Mutex::new(Some(console_file)),
+        log: PageLog::new(Some(console_file)),
         conn: Mutex::new(None),
         page: Mutex::new(None),
         viewport: Mutex::new(viewport.clone()),
         product: Mutex::new(String::new()),
-        start: Mutex::new(None),
-        ready: Mutex::new(None),
-        panics: Mutex::new(Vec::new()),
-        warnings: Mutex::new(Vec::new()),
-        exceptions: Mutex::new(Vec::new()),
-        errors: AtomicU64::new(0),
-        crashed: AtomicBool::new(false),
         chrome_alive: AtomicBool::new(false),
         stop: AtomicBool::new(false),
         navigated_ms: AtomicU64::new(0),
@@ -740,7 +577,7 @@ pub fn main(ctx: &mut Ctx, args: &[String]) -> Result<()> {
         &request.chrome,
         &cdp::chrome_args(&profile, viewport.scale),
         &files.chrome_log,
-        Box::new(move |event| events.on_event(&event)),
+        Box::new(move |event| events.log.on_event(&event)),
     )
     .map_err(|error| {
         fail(
@@ -897,11 +734,7 @@ pub fn main(ctx: &mut Ctx, args: &[String]) -> Result<()> {
     state.chrome_alive.store(false, Ordering::SeqCst);
     browser.close();
     sessions::remove(&request.sessions_dir, "web", pid);
-    if let Ok(mut console) = state.console.lock()
-        && let Some(file) = console.as_mut()
-    {
-        let _ = file.flush();
-    }
+    state.log.flush();
     ctx.rep.summary(format!("the web session ended: {ended}"));
     if ended == "Chrome exited" {
         return Err(IcmError::new(CheckId::WebChromeFailed, ended)

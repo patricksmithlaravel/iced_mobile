@@ -489,6 +489,28 @@ pub fn web(c: &Common<'_>, site: &str) -> OwnerPlan {
         }
     }
 
+    // The headers the site needs: the .wasm's type, and caching keyed to
+    // the content-hashed module names (`icm release web` writes them).
+    let headers = match web.host {
+        WebHost::CloudflarePages | WebHost::Netlify => {
+            "`_headers` in the site sets them on this host: nothing to configure."
+        }
+        WebHost::GithubPages => {
+            "GitHub Pages serves .wasm as application/wasm and ignores `_headers`; its own caching (10 minutes) applies."
+        }
+        WebHost::S3 => {
+            "The second upload command sets the .wasm's type; for long caching of the hashed pkg/app-*.js and pkg/app_bg-*.wasm, add --cache-control \"public, max-age=31536000, immutable\" to a copy of them, and serve index.html with no-cache (a CloudFront behaviour does both)."
+        }
+        WebHost::Generic => {
+            "Configure the server once from hosting/ beside the site: nginx.conf, apache.htaccess (saved as .htaccess) or Caddyfile set application/wasm and the caching; other hosts that read `_headers` (Netlify, Cloudflare Pages) need nothing."
+        }
+    };
+    plan.push(OwnerStep::manual(
+        StepKind::Once,
+        "Serve .wasm as application/wasm, cache the hashed modules",
+        headers,
+    ));
+
     let url = if web.public_url.starts_with("https://") {
         lit(&web.public_url)
     } else {

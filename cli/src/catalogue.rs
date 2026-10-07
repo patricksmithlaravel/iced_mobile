@@ -628,7 +628,7 @@ catalogue! {
         "Enable iced's `webgl` feature for wasm32 (headless Chrome has no WebGPU adapter).";
     WebHashedAssets = "web.hashed_assets", CheckFailed, Fail, Agent,
         "Release assets are not content-hashed",
-        "Report it.";
+        "Make the release again with `icm release web`; never edit its files.";
     WebServeSmoke = "web.serve_smoke", CheckFailed, Fail, Agent,
         "The release site did not load in headless Chrome",
         "Read console.ndjson in the run directory.";

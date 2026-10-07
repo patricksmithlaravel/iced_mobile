@@ -33,9 +33,12 @@ pub mod cdp;
 pub mod client;
 pub mod console;
 pub mod host;
+pub mod page;
 pub mod plan;
+pub mod release_site;
 pub mod server;
 pub mod site;
+pub mod smoke;
 pub mod viewport;
 
 use crate::cargo::{Invocation, Select};
@@ -295,7 +298,7 @@ pub fn build(ctx: &mut Ctx, project: &Project, release: bool) -> Result<Built> {
 
 /// Maps a wasm32 build failure caused by getrandom's missing web backend to
 /// `deps.getrandom_backend`, with the lines to add.
-fn getrandom_backend(ctx: &Ctx, error: IcmError) -> IcmError {
+pub(crate) fn getrandom_backend(ctx: &Ctx, error: IcmError) -> IcmError {
     if !matches!(
         error.check_id(),
         Some(CheckId::BuildCompileError | CheckId::BuildCargoFailed)
@@ -339,7 +342,7 @@ fn getrandom_backend(ctx: &Ctx, error: IcmError) -> IcmError {
 
 /// iced's features as resolved for wasm32, from `cargo metadata
 /// --filter-platform` (offline: the build just fetched everything).
-fn iced_features(ctx: &Ctx, manifest: &Path) -> Option<Vec<String>> {
+pub(crate) fn iced_features(ctx: &Ctx, manifest: &Path) -> Option<Vec<String>> {
     let cmd = Cmd::tool("cargo")
         .args(["metadata", "--format-version", "1", "--offline"])
         .args(["--filter-platform", TRIPLE])
@@ -385,7 +388,7 @@ fn feature_checks(ctx: &Ctx, manifest: &Path) {
         return;
     };
     let has = |name: &str| features.iter().any(|f| f == name);
-    let fix_line = "Cargo.toml [target.'cfg(target_arch = \"wasm32\")'.dependencies]: iced = { …, features = [\"fira-sans\", \"webgl\"] }";
+    let fix_line = FEATURES_FIX;
 
     if has("fira-sans") {
         ctx.rep.check(Check::pass(
@@ -402,24 +405,32 @@ fn feature_checks(ctx: &Ctx, manifest: &Path) {
         );
     }
 
+    ctx.rep.check(renderer_check(&features));
+}
+
+/// The Cargo.toml line that turns on iced's web features.
+pub(crate) const FEATURES_FIX: &str = "Cargo.toml [target.'cfg(target_arch = \"wasm32\")'.dependencies]: iced = { …, features = [\"fira-sans\", \"webgl\"] }";
+
+/// `web.renderer_fallback` from iced's features for wasm32: a WARN when
+/// wgpu has no WebGL2 fallback.
+pub(crate) fn renderer_check(features: &[String]) -> Check {
+    let has = |name: &str| features.iter().any(|f| f == name);
     if has("webgl") || !has("wgpu") {
-        ctx.rep.check(Check::pass(
+        Check::pass(
             CheckId::WebRendererFallback,
             if has("webgl") {
                 "iced's `webgl` is on: wgpu falls back to WebGL2 when the browser offers no WebGPU adapter (headless Chrome offers none)"
             } else {
                 "iced draws with tiny-skia on the web"
             },
-        ));
+        )
     } else {
         // Verified in headless Chrome 154: wgpu takes the canvas for
         // WebGPU, finds no adapter, and iced's tiny-skia fallback then
         // panics creating its softbuffer surface on that canvas.
         let detail = "iced's `webgl` is off for wasm32: where the browser has no WebGPU adapter (headless Chrome, many browsers) wgpu cannot draw, and iced's tiny-skia fallback panics on the canvas wgpu already took";
-        ctx.rep.check(
-            Check::warn(CheckId::WebRendererFallback, detail)
-                .fix("Enable iced's `webgl` feature for wasm32.", &[fix_line]),
-        );
+        Check::warn(CheckId::WebRendererFallback, detail)
+            .fix("Enable iced's `webgl` feature for wasm32.", &[FEATURES_FIX])
     }
 }
 

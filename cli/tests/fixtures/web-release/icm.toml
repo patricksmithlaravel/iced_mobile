@@ -1,0 +1,15 @@
+schema = 1
+min_icm = "0.14.1-mobile.1"
+
+[app]
+name = "Web Fixture"
+id = "com.acme.webfixture"
+build = 3
+description = "A web release fixture."
+background = "#203040"
+icon = "assets/icon.png"
+resources = ["fonts/*.ttf"]
+
+[web]
+public_url = "/app/"
+size_budget_kb = 64

@@ -95,6 +95,9 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 - NEVER upload, publish or notarize anything, and never run `altool`, `notarytool`, `fastlane`,
   `wrangler` or any other command that does.
 - Signing identities, profiles, keystores and their passwords are the owner's. Don't create or guess them.
+- `icm release web --json -q` builds the static site, runs its gates and loads it once in headless
+  Chrome; it lands in `target/icm/dist/latest/web/`. Deploying it is the owner's
+  (`icm upload-commands web` prints the commands).
 
 ## Known limitations of iced_mobile {{framework_tag}}
 {{limitations}}

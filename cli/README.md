@@ -54,13 +54,13 @@ cargo test
 | `platform/ios_device/` | `build`/`run`/`shot`/`logs`/`devices ios-device` through `xcrun devicectl` (`devicectl.rs` parses its JSON): device choice, development signing, install, the detached `--console` launch, readiness, screenshots; the session record that `icm stop` ends; fake-tool tests in `tests/ios_device.rs` |
 | `preview.rs` | after a capture: PNG decode, `screen.preview.png`, blank detection (`run.screen_blank`) |
 | `sessions.rs` | `target/icm/sessions/<platform>.json` records: write (mode 0600), list, alive (pid plus a command-line marker), terminate |
-| `web/` | the web platform: build, wasm-bindgen and the site (`site.rs`); the detached session host (`host.rs`) with its std server (`server.rs`), headless Chrome over `--remote-debugging-pipe` (`cdp.rs`) and console capture (`console.rs`); the control client (`client.rs`); viewports (`viewport.rs`) |
+| `web/` | the web platform: build, wasm-bindgen and the site (`site.rs`); the detached session host (`host.rs`) with its std server (`server.rs`), headless Chrome over `--remote-debugging-pipe` (`cdp.rs`), the page recorder both use (`page.rs`) and console capture (`console.rs`); the control client (`client.rs`); viewports (`viewport.rs`); for releases, the release site (`release_site.rs`: hashed names, `index.html`, `_headers` and server snippets, icons, the wasm-opt flags, fonts inside a `.wasm`) and the serve check in headless Chrome (`smoke.rs`), driven by `release/web.rs` |
 | `raster.rs` | screenshots as pixels: PNG decode/encode, the preview, blank detection (`raster::examine` for every capture) |
 | `harness/` | the app's headless harness (`tests/icm.rs`, protocol 1): build it, run `icm-shot`/`icm-tree`/`icm-ice`, judge the answer; `libtest.rs` reads `cargo test` output |
 | `signatures.rs` | known failure signatures (design §13.4) → `likely_causes`; `signatures::annotate(error, text, &Facts)` |
 | `hooks.rs` | project hooks, `[checks] <platform>` scripts; every platform's `run` calls `hooks::run_for` once the app is up |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
-| `release/` | `release`, `verify`, `upload-commands`, `ledger`, `diagnose`: the core every target shares (`mod.rs`: preconditions, owner items, the `Pipeline` contract), `gates.rs` (`--sign none` and owner items), `dist.rs` and `manifest.rs` (`target/icm/dist/`, `artifacts.json`), `compile.rs` (release profiles by `--config`, `target/icm/release-target`, deployment-target stamps), `notices.rs` (THIRD_PARTY_NOTICES from `cargo metadata`, Fira Sans's OFL, the `release.notices` gate), `upload.rs` (`UPLOAD.md`, `upload.sh`), `owner_plans.rs` (the only file with upload or notarize argv), `ledger.rs`, `verify.rs`; one stub per target (`ios.rs`, `android.rs`, `web.rs`, `macos.rs`, `windows.rs`, `linux.rs`) and `fake.rs`, the stand-in pipeline of `icm __test release` |
+| `release/` | `release`, `verify`, `upload-commands`, `ledger`, `diagnose`: the core every target shares (`mod.rs`: preconditions, owner items, the `Pipeline` contract), `gates.rs` (`--sign none` and owner items), `dist.rs` and `manifest.rs` (`target/icm/dist/`, `artifacts.json`), `compile.rs` (release profiles by `--config`, `target/icm/release-target`, deployment-target stamps), `notices.rs` (THIRD_PARTY_NOTICES from `cargo metadata`, Fira Sans's OFL, the `release.notices` gate), `upload.rs` (`UPLOAD.md`, `upload.sh`), `owner_plans.rs` (the only file with upload or notarize argv), `ledger.rs`, `verify.rs`; one pipeline per target (`ios.rs` builds and gates the App Store `.ipa`, `android.rs` the Google Play `.aab`, `web.rs` the static site; `macos.rs`, `windows.rs`, `linux.rs` are stubs) and `fake.rs`, the stand-in pipeline of `icm __test release` |
 | `ios/` | iOS device builds, shared by `icm release ios` (`release/ios.rs`) and `ios-device`: the device bundle and its gates (`bundle.rs`), `DT*` keys (`dt.rs`), identities (`identity.rs`), provisioning profiles (`profile.rs`), entitlements, codesign with the keychain watchdog, Mach-O symbols and UUIDs (`macho.rs`), the privacy scan, the dSYM gates, the `.ipa` (`ipa.rs`), an XML plist reader and SHA-1 |
 | `pinned.rs` | the tools icm downloads itself (`tools.toml`, embedded: version, URL, size, sha256 per host): find, install with `--yes` (curl, sha256 check, unpack), doctor's WARN and `--fix --yes` |
 | `policy.rs` | the dated store policy table (`policy/stores.toml`, embedded): the floor in force on a day, `env.policy_stale`, upcoming floors; `icm print policy` |
@@ -145,6 +145,11 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   stand-ins for aapt2, bundletool (`java -jar`), jar, keytool, jarsigner,
   apksigner and zipalign that log their argv and write real zips with
   `zip`/`unzip` (it skips without them).
+- `tests/web_release.rs` runs `icm release web` and `icm verify web` on
+  `fixtures/web-release` with a fake cargo build, wasm-bindgen and
+  wasm-opt (real `cargo metadata`, `rustc --print cfg` and gzip) and real
+  headless Chrome for the serve check; `verify web --url` goes to a test
+  server that serves the site with a right and a wrong `.wasm` type.
 
 ## Environment
 

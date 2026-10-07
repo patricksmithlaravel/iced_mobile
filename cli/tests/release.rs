@@ -179,7 +179,14 @@ fn ids(result: &Value, key: &str) -> Vec<String> {
 #[test]
 fn the_target_pipelines_are_stubs_that_say_so() {
     let app = App::new();
-    for target in ["web", "macos", "windows", "linux"] {
+    for target in ["ios", "android", "web", "macos", "windows", "linux"] {
+        // A pipeline this build implements plans its steps; its own tests
+        // cover it (the web: tests/web_release.rs).
+        let plan = app.json(&["release", target, "--dry-run"]);
+        if plan["exit"] == 0 {
+            assert!(!app.dir().join("target/icm/dist").exists(), "{target}");
+            continue;
+        }
         let result = app.json(&["release", target, "--sign", "none", "--allow-dirty"]);
         assert_eq!(result["exit"], 2, "{target}: {result}");
         assert_eq!(

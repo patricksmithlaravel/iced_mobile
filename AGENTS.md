@@ -70,8 +70,8 @@ cargo test
 ```
 
 `cargo test` in `cli/` uses fake tools and temporary directories. It downloads nothing and touches no
-real simulator or emulator. `tests/web.rs` uses headless Chrome when it is installed and skips
-otherwise.
+real simulator or emulator. `tests/web.rs` and `tests/web_release.rs` use headless Chrome when it is
+installed and skip otherwise.
 
 ### Acceptance scripts
 
@@ -115,6 +115,12 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
   installed on the managed emulator, `verify`, `run --from-aab`, `diagnose play` and
   `test --on android --lifecycle`. Its setup and isolation are phase1.sh's; the owner's Play
   Console uploads are SKIPs. It builds two ABIs in release, so run it in the background.
+- **`cli/tests/accept/phase4.sh`** covers the web release: `icm release web` on a new template app,
+  `icm verify web`, and `icm verify web --url` against a local static server (a right and a wrong
+  `.wasm` type). It deploys nothing.
+  - It needs Chrome, `python3`, `/usr/bin/jq` and the network: `icm doctor web --fix --yes` creates
+    the app's lock and installs the wasm-bindgen CLI and the pinned `wasm-opt` into icm's cache
+    (`$ACCEPT/cache` unless `ICM_CACHE_DIR` is set).
 
 ## Rules
 

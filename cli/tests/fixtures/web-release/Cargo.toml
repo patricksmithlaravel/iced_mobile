@@ -1,0 +1,23 @@
+# An app crate for the web release's tests: every dependency is a local
+# path package, so `cargo metadata --locked` works offline. vendor/ holds
+# stand-ins: an `iced` whose `fira-sans` reaches `iced_graphics` (which
+# keeps Fira Sans's OFL.txt) and that has a `webgl` feature, and a
+# `wasm-bindgen` at the version the release looks for in Cargo.lock.
+[package]
+name = "web-app"
+version = "0.2.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "web-app"
+path = "src/main.rs"
+
+[dependencies]
+iced = { path = "vendor/iced", features = ["fira-sans", "webgl"] }
+wasm-bindgen = { path = "vendor/wasm-bindgen" }
+
+[workspace]
