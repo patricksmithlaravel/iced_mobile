@@ -267,9 +267,11 @@
 //! the Activity on [`Lifecycle::Suspended`], which always comes before.
 //! What belongs to the process stays: the logger, the panic hook, the
 //! [`on_lifecycle`] hook (setting the same one again does nothing), the
-//! fonts loaded so far, and the application's own statics. A static that
-//! keeps an `AndroidApp` (for JNI, say) must take each Activity's new one:
-//! a `OnceLock` would keep the first, whose Activity is gone.
+//! fonts loaded so far (a font the next application loads again, from its
+//! settings or with `font::load`, is not added twice), and the
+//! application's own statics. A static that keeps an `AndroidApp` (for JNI,
+//! say) must take each Activity's new one: a `OnceLock` would keep the
+//! first, whose Activity is gone.
 //!
 //! [`android_main!`](crate::android_main) does steps 3 and 4 for you. The
 //! process ends instead after a panic, and when the application stops on

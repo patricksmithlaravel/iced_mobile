@@ -18,7 +18,7 @@ use crate::core::text::{Alignment, Shaping, Wrapping};
 use crate::core::{Color, Pixels, Point, Rectangle, Size, Transformation};
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 /// A text primitive.
@@ -155,11 +155,7 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let raw = mobile::font_system(embedded);
 
-        RwLock::new(FontSystem {
-            raw,
-            loaded_fonts: HashSet::new(),
-            version: Version::default(),
-        })
+        RwLock::new(FontSystem::new(raw))
     })
 }
 
@@ -184,29 +180,65 @@ pub fn is_loaded(font: Font) -> bool {
 /// A set of system fonts.
 pub struct FontSystem {
     raw: cosmic_text::FontSystem,
+    /// The addresses of the borrowed fonts loaded so far.
     loaded_fonts: HashSet<usize>,
+    /// The owned fonts loaded so far, by length.
+    loaded_owned_fonts: HashMap<usize, Vec<Arc<Vec<u8>>>>,
     version: Version,
 }
 
 impl FontSystem {
+    fn new(raw: cosmic_text::FontSystem) -> Self {
+        Self {
+            raw,
+            loaded_fonts: HashSet::new(),
+            loaded_owned_fonts: HashMap::new(),
+            version: Version::default(),
+        }
+    }
+
     /// Returns the raw [`cosmic_text::FontSystem`].
     pub fn raw(&mut self) -> &mut cosmic_text::FontSystem {
         &mut self.raw
     }
 
     /// Loads a font from its bytes.
+    ///
+    /// A font loaded already is not loaded again: borrowed bytes are
+    /// recognized by their address, and owned bytes by their content. The
+    /// font system lives as long as the process, which on Android outlives
+    /// an application: each new Activity runs a new one, which loads its
+    /// fonts again.
     pub fn load_font(&mut self, bytes: Cow<'static, [u8]>) {
-        if let Cow::Borrowed(bytes) = bytes {
-            let address = bytes.as_ptr() as usize;
+        let bytes = match bytes {
+            Cow::Borrowed(bytes) => {
+                let address = bytes.as_ptr() as usize;
 
-            if !self.loaded_fonts.insert(address) {
-                return;
+                if !self.loaded_fonts.insert(address) {
+                    return;
+                }
+
+                Arc::new(bytes.to_vec())
             }
-        }
+            Cow::Owned(bytes) => {
+                let same_length =
+                    self.loaded_owned_fonts.entry(bytes.len()).or_default();
 
-        let _ = self.raw.db_mut().load_font_source(
-            cosmic_text::fontdb::Source::Binary(Arc::new(bytes.into_owned())),
-        );
+                if same_length.iter().any(|loaded| **loaded == bytes) {
+                    return;
+                }
+
+                let bytes = Arc::new(bytes);
+                same_length.push(bytes.clone());
+
+                bytes
+            }
+        };
+
+        let _ = self
+            .raw
+            .db_mut()
+            .load_font_source(cosmic_text::fontdb::Source::Binary(bytes));
 
         self.version = Version(self.version.0 + 1);
     }
@@ -405,4 +437,54 @@ pub fn to_color(color: Color) -> cosmic_text::Color {
 pub trait Renderer {
     /// Draws the given [`Raw`] text.
     fn fill_raw(&mut self, raw: Raw);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ICONS: &[u8] = include_bytes!("../fonts/Iced-Icons.ttf");
+    const FIRA_SANS: &[u8] = include_bytes!("../fonts/FiraSans-Regular.ttf");
+
+    fn empty() -> FontSystem {
+        FontSystem::new(cosmic_text::FontSystem::new_with_locale_and_db(
+            "en-US".to_owned(),
+            cosmic_text::fontdb::Database::new(),
+        ))
+    }
+
+    #[test]
+    fn owned_fonts_are_loaded_once() {
+        let mut fonts = empty();
+
+        // What each new application of the process does with a font it
+        // was given as owned bytes.
+        for _ in 0..3 {
+            fonts.load_font(Cow::Owned(ICONS.to_vec()));
+        }
+
+        assert_eq!(fonts.raw().db().len(), 1);
+        assert_eq!(fonts.version(), Version(1));
+
+        // Other bytes of the same length are another font.
+        let mut other = ICONS.to_vec();
+        *other.last_mut().expect("A byte") ^= 1;
+        fonts.load_font(Cow::Owned(other));
+        fonts.load_font(Cow::Owned(FIRA_SANS.to_vec()));
+
+        assert_eq!(fonts.raw().db().len(), 3);
+        assert_eq!(fonts.version(), Version(3));
+    }
+
+    #[test]
+    fn borrowed_fonts_are_loaded_once() {
+        let mut fonts = empty();
+
+        for _ in 0..3 {
+            fonts.load_font(Cow::Borrowed(ICONS));
+        }
+
+        assert_eq!(fonts.raw().db().len(), 1);
+        assert_eq!(fonts.version(), Version(1));
+    }
 }
