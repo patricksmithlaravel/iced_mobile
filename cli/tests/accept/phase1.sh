@@ -19,7 +19,12 @@
 # ~/.config/icm; the emulator still writes ~/.android/modem-nv-ram-<port>.
 # The iOS Simulator has no such switch: the managed simulator
 # (icm-iphone-*) is created in the user's device set when missing, and shut
-# down at the end like the managed emulator. adb's server is shared, so the
+# down at the end like the managed emulator. An icm simulator that was
+# already booted when the run started is someone else's: the final checks
+# leave it out, unless the run's own session used it and icm should have
+# shut it down. To keep the run off one another process uses, pin a
+# throwaway icm-test-* simulator in host.toml (ios.simulator_udid) before
+# the run. adb's server is shared, so the
 # run stops early when an Android device other than an icm- emulator is
 # online: icm would otherwise install the demo on it.
 #
@@ -560,16 +565,16 @@ hooks_android() {
     while IFS= read -r line; do evidence "$line"; done < <(hook_details "$ACCEPT/hooks-android.json")
 }
 
-# No app, browser, booted icm simulator or icm emulator is left.
+# No app, browser, booted icm simulator or icm emulator is left. An icm
+# simulator booted before the run may still be up (simulators_left in
+# lib.sh). Every check runs, so one report shows all that is left.
 nothing_left() {
+    local left=0 adb serial name
     icm ps --json -q >"$ACCEPT/ps.json"
-    jqe '[.sessions[]? | select(.running and ((.alive | length) > 0))] | length == 0' "$ACCEPT/ps.json"
-    if xcrun simctl list devices booted | grep -E '^\s+icm-' | grep -v 'icm-test-'; then
-        echo "an icm simulator is still booted"
-        return 1
-    fi
-    local adb serial name
-    adb=$(sdk_adb)
+    jqe '[.sessions[]? | select(.running and ((.alive | length) > 0))] | length == 0' "$ACCEPT/ps.json" || left=1
+    # ps names the ios-sim session's simulator (`device.id`), stopped or not.
+    simulators_left "$(/usr/bin/jq -r '[.sessions[]? | select(.platform == "ios-sim") | .device.id // empty][0] // empty' "$ACCEPT/ps.json")" || left=1
+    adb=$(sdk_adb) || left=1
     if [ -x "$adb" ]; then
         for serial in $("$adb" devices | awk '/^emulator-/ {print $1}'); do
             name=$("$adb" -s "$serial" emu avd name 2>/dev/null | head -n1 | tr -d '\r')
@@ -577,11 +582,12 @@ nothing_left() {
             icm-test-*) ;;
             icm-*)
                 echo "the managed emulator $name ($serial) still runs"
-                return 1
+                left=1
                 ;;
             esac
         done
     fi
+    [ "$left" -eq 0 ]
 }
 
 stop_all() {
@@ -743,6 +749,7 @@ final_cleanup() {
 # In a function, so bash has read all of it before the first step: an edit
 # to this file during a run cannot change what the run does.
 main() {
+    step simulators-before simulators_before
     must install install_icm
     step version version
     must doctor doctor_machine

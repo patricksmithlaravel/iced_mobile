@@ -180,6 +180,56 @@ no_foreign_android() {
     evidence "online: $(awk 'NR > 1 && NF {printf "%s(%s) ", $1, $2}' <<<"$devices")"
 }
 
+# booted_icm_simulators: "UDID NAME" for each booted icm simulator (icm-*,
+# never a test run's icm-test-*).
+booted_icm_simulators() {
+    xcrun simctl list devices booted -j |
+        "$JQ" -r '.devices[][] | select(.state == "Booted" and (.name | startswith("icm-")) and (.name | startswith("icm-test-") | not)) | "\(.udid) \(.name)"'
+}
+
+# simulators_before: records in $ACCEPT/simulators-before.txt the icm
+# simulators booted before the run. They are another process's (a
+# simulator panel, another project's run), and simulators_left does not
+# blame the run for them.
+simulators_before() {
+    booted_icm_simulators >"$ACCEPT/simulators-before.txt"
+    if [ -s "$ACCEPT/simulators-before.txt" ]; then
+        evidence "booted before the run: $(paste -sd ';' "$ACCEPT/simulators-before.txt" | sed 's/;/; /g')"
+    else
+        evidence "no icm simulator was booted before the run"
+    fi
+}
+
+# simulators_left [UDID]: fails when an icm simulator the run should have
+# shut down is still booted: one that was not booted when the run started
+# (simulators_before), or UDID, the one the run's ios-sim session used,
+# when no project claimed it (ICM_BOOTED_BY), since `icm stop --shutdown`
+# shuts such a simulator down. One booted before the run is otherwise left
+# out, with an evidence line. Without the record of simulators_before,
+# every booted icm simulator counts.
+simulators_left() {
+    local session_udid=${1:-} udid name owner left=0 booted
+    booted=$(booted_icm_simulators) || return 1
+    while read -r udid name; do
+        [ -n "$udid" ] || continue
+        if ! grep -qF "$udid " "$ACCEPT/simulators-before.txt" 2>/dev/null; then
+            echo "the icm simulator $name ($udid) is still booted, and was not when the run started"
+            left=1
+        elif [ "$udid" = "$session_udid" ]; then
+            owner=$(xcrun simctl getenv "$udid" ICM_BOOTED_BY 2>/dev/null || true)
+            if [ -n "$owner" ]; then
+                evidence "left $name ($udid) running: the run used it, but another project's icm booted it (ICM_BOOTED_BY $owner)"
+            else
+                echo "the run's ios-sim session used $name ($udid), which no project claimed, and it is still booted"
+                left=1
+            fi
+        else
+            evidence "left $name ($udid) running: booted before the run, which did not use it"
+        fi
+    done <<<"$booted"
+    [ "$left" -eq 0 ]
+}
+
 # png_size FILE: "W H" of a PNG, from its IHDR.
 png_size() {
     local w h

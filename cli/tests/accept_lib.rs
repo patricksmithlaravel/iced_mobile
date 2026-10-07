@@ -178,3 +178,106 @@ fn the_foreign_device_guard_fails_closed() {
         text(&output)
     );
 }
+
+/// phase1.sh's final check on simulators (`simulators_before`,
+/// `simulators_left`) against a fake `xcrun`: an icm simulator booted
+/// before the run is another process's and stays out of the verdict,
+/// unless the run's session used it and no project claimed it; one booted
+/// since the run started fails it. The check once failed on any booted
+/// icm simulator, so a simulator another process kept booted (a simulator
+/// panel streaming its log) failed every run.
+#[test]
+fn the_simulator_check_leaves_out_what_was_booted_before_the_run() {
+    if !has_jq() {
+        eprintln!("skipped: no jq");
+        return;
+    }
+    let host = Host::new("");
+    let accept = host.root.path();
+    // `simctl list devices booted -j` from booted.json; `simctl getenv`
+    // from owner-<udid>, empty (and exit 0) when unset, as simctl does.
+    executable(
+        &accept.join("bin/xcrun"),
+        "#!/bin/sh\ncase \"$1 $2\" in\n\"simctl list\") cat \"$ACCEPT/booted.json\" ;;\n\"simctl getenv\") cat \"$ACCEPT/owner-$3\" 2>/dev/null ;;\n*) exit 1 ;;\nesac\nexit 0\n",
+    );
+    let boot = |devices: &[(&str, &str)]| {
+        let list: Vec<String> = devices
+            .iter()
+            .map(|(udid, name)| {
+                format!(r#"{{"udid": "{udid}", "name": "{name}", "state": "Booted"}}"#)
+            })
+            .collect();
+        std::fs::write(
+            accept.join("booted.json"),
+            format!(
+                r#"{{"devices": {{"com.apple.CoreSimulator.SimRuntime.iOS-27-0": [{}]}}}}"#,
+                list.join(", ")
+            ),
+        )
+        .unwrap();
+    };
+    let shared = ("SHARED-UDID", "icm-iphone-17-ios-27.0");
+    let test = ("TEST-UDID", "icm-test-accept");
+
+    // Before the run: the shared simulator is recorded, the test one never.
+    boot(&[shared, test]);
+    let output = host.bash("simulators_before");
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        std::fs::read_to_string(accept.join("simulators-before.txt")).unwrap(),
+        "SHARED-UDID icm-iphone-17-ios-27.0\n"
+    );
+    assert!(
+        text(&output).contains("booted before the run: SHARED-UDID icm-iphone-17-ios-27.0"),
+        "{}",
+        text(&output)
+    );
+
+    // The run used the test simulator: the shared one is left out.
+    let output = host.bash("simulators_left TEST-UDID");
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains(
+            "left icm-iphone-17-ios-27.0 (SHARED-UDID) running: booted before the run, which did not use it"
+        ),
+        "{}",
+        text(&output)
+    );
+
+    // One booted since the run started fails the check.
+    boot(&[shared, test, ("NEW-UDID", "icm-iphone-air-ios-27.0")]);
+    let output = host.bash("simulators_left TEST-UDID");
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains(
+            "the icm simulator icm-iphone-air-ios-27.0 (NEW-UDID) is still booted, and was not when the run started"
+        ),
+        "{}",
+        text(&output)
+    );
+
+    // The run used the shared one: `stop --shutdown` shuts it down unless
+    // another project's icm booted it.
+    boot(&[shared, test]);
+    let output = host.bash("simulators_left SHARED-UDID");
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("which no project claimed, and it is still booted"),
+        "{}",
+        text(&output)
+    );
+    std::fs::write(accept.join("owner-SHARED-UDID"), "0123456789abcdef\n").unwrap();
+    let output = host.bash("simulators_left SHARED-UDID");
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("ICM_BOOTED_BY 0123456789abcdef"),
+        "{}",
+        text(&output)
+    );
+
+    // Without the record of what was booted before, every icm simulator
+    // counts.
+    std::fs::remove_file(accept.join("simulators-before.txt")).unwrap();
+    let output = host.bash("simulators_left");
+    assert!(!output.status.success(), "{}", text(&output));
+}

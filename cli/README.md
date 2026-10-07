@@ -127,7 +127,9 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 - `tests/accept_lib.rs` runs the acceptance scripts' shared helpers
   (`tests/accept/lib.sh`) with the real icm against a fake SDK and JDK
   whose paths have a space: they read `icm print env android --json`, and
-  the foreign-device guard fails when it finds no adb.
+  the foreign-device guard fails when it finds no adb. Against a fake
+  `xcrun`, phase1.sh's simulator check leaves out what was booted before
+  the run.
 - `tests/project.rs` covers `new`, `check`, `doctor`, `stop`/`ps` and
   `explain config.<key>`. `check` compiles `tests/fixtures/checkapp`, whose
   `iced` is a local stand-in, offline in a second; `doctor` runs against a

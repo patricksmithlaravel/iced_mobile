@@ -114,6 +114,11 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
     an `icm-test-*` emulator included, and when it finds no adb to ask. It reads the SDK, adb and
     JDK paths from `icm print env android --json` (`icm_env` in `lib.sh`), so paths with spaces
     work; `cli/tests/accept_lib.rs` tests those helpers.
+  - It runs the iOS steps on the simulator a run picks without flags, which may be one another
+    process keeps booted. Its final checks leave out an icm simulator that was booted before it
+    started, unless its own session used it and no project claimed it. To keep the run off such a
+    simulator, pin a throwaway `icm-test-*` one in `$ACCEPT/host/host.toml` (`[ios]
+    simulator_udid`) before the run, and delete it afterwards.
   - Its Tawara steps clone `$TAWARA` (default `~/Tawara-mobile`) read-only into `$ACCEPT`. Set
     `TAWARA` to a path that does not exist to skip them.
 - **`cli/tests/accept/phase2.sh`** covers the App Store release without the owner's signing assets:
