@@ -120,6 +120,9 @@ pub fn run(ctx: &mut Ctx, args: SelfTestArgs) -> Result<()> {
         Scenario::Verify(args) => {
             crate::release::verify::run_with(ctx, &args, &crate::release::fake::Fake)
         }
+        Scenario::ReleaseBuild { target, min_os } => {
+            crate::release::fake::release_build(ctx, target, min_os.as_deref())
+        }
         Scenario::Pinned { name } => {
             ensure_run_dir(ctx);
             let found = crate::pinned::require(ctx, &name)?;

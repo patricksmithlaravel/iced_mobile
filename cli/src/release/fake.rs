@@ -17,6 +17,41 @@ use std::path::PathBuf;
 /// The stand-in pipeline.
 pub struct Fake;
 
+/// One release cargo build of the project's binary for a target
+/// (`icm __test release-build`): the profile, `--config`, `--locked`, the
+/// dedicated target directory and, with `min_os`, the deployment-target
+/// stamp, as a real pipeline's first step runs them.
+pub fn release_build(ctx: &mut Ctx, target: ReleaseTarget, min_os: Option<&str>) -> Result<()> {
+    let project = ctx.project()?.clone();
+    let args = crate::cli::ReleaseArgs {
+        target,
+        sign: SignMode::None,
+        allow_dirty: true,
+        no_smoke: false,
+        apk: false,
+        dmg: false,
+        universal: false,
+        via_xcode_export: false,
+    };
+    let mut rel = Release::new(&project, &args)?;
+    let triple = match target {
+        ReleaseTarget::Ios => Some("aarch64-apple-ios"),
+        ReleaseTarget::Android => Some("aarch64-linux-android"),
+        ReleaseTarget::Web => Some("wasm32-unknown-unknown"),
+        ReleaseTarget::Windows => Some("x86_64-pc-windows-msvc"),
+        ReleaseTarget::Macos | ReleaseTarget::Linux => None,
+    };
+    let bin = project.bin_for(super::ledger::platform_key(target))?;
+    let invocation = rel.invocation("build", crate::cargo::Select::Bin(bin), triple);
+    let _ = rel.cargo(ctx, "cargo.build", &invocation, &[], min_os)?;
+    ctx.rep.set(
+        "cargo_target_dir",
+        serde_json::json!(crate::paths::display(&rel.cargo_target_dir())),
+    );
+    ctx.rep.set("tools", serde_json::json!(rel.tools));
+    Ok(())
+}
+
 /// The upload file's name and kind for a target.
 fn upload_file(rel: &Release) -> (String, &'static str) {
     let name = &rel.config().app.name;

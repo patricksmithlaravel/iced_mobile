@@ -1118,6 +1118,15 @@ pub enum Scenario {
     Release(ReleaseArgs),
     /// `icm verify` with the stand-in pipeline's gates
     Verify(VerifyArgs),
+    /// One release cargo build of the app's binary for a target (profile, dedicated target dir, stamps)
+    ReleaseBuild {
+        /// The target
+        #[arg(value_enum)]
+        target: ReleaseTarget,
+        /// The deployment target (Apple triples)
+        #[arg(long)]
+        min_os: Option<String>,
+    },
 }
 
 impl Scenario {
@@ -1137,6 +1146,7 @@ impl Scenario {
             Scenario::Pinned { .. } => "pinned",
             Scenario::Release(_) => "release",
             Scenario::Verify(_) => "verify",
+            Scenario::ReleaseBuild { .. } => "release-build",
         }
     }
 }

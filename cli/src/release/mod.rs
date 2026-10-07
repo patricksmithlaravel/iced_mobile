@@ -55,6 +55,7 @@
 //! with a stand-in pipeline ([`fake`]).
 
 pub mod android;
+pub mod compile;
 pub mod diagnose;
 pub mod dist;
 pub mod fake;

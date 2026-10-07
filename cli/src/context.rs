@@ -256,17 +256,40 @@ impl Ctx {
         profile: &str,
         min_os: &str,
     ) -> Result<Option<((String, String), cargo::DeploymentStamp)>> {
+        self.deployment_target_in(project, package, triple, profile, min_os, None)
+    }
+
+    /// [`Ctx::deployment_target`] for builds in another cargo target
+    /// directory (`--target-dir`; releases build in their own, Appendix C
+    /// item 6). Its stamps live in that directory's `stamps/`, and the
+    /// clean runs with the same `--target-dir`.
+    pub fn deployment_target_in(
+        &self,
+        project: &Project,
+        package: &str,
+        triple: Option<&str>,
+        profile: &str,
+        min_os: &str,
+        target_dir: Option<&Path>,
+    ) -> Result<Option<((String, String), cargo::DeploymentStamp)>> {
         let resolved = triple.unwrap_or(crate::toolchain::host_triple());
         let Some(var) = cargo::deployment_var(resolved) else {
             return Ok(None);
         };
 
-        let stamp = cargo::DeploymentStamp::new(&project.icm_dir, triple, profile, var, min_os);
-        let artifacts = cargo::artifacts_dir(&project.target_dir, triple, profile);
+        let (stamps_root, cargo_dir) = match target_dir {
+            Some(dir) => (dir, dir),
+            None => (project.icm_dir.as_path(), project.target_dir.as_path()),
+        };
+        let stamp = cargo::DeploymentStamp::new(stamps_root, triple, profile, var, min_os);
+        let artifacts = cargo::artifacts_dir(cargo_dir, triple, profile);
         if let cargo::StampAction::Clean { reason } = stamp.action(&artifacts) {
             self.rep.progress(format!("relinking {package}: {reason}"));
             let manifest = &project.package_for_name(package)?.manifest_path;
-            let cmd = cargo::clean_cmd(manifest, package, triple, profile);
+            let mut cmd = cargo::clean_cmd(manifest, package, triple, profile);
+            if let Some(dir) = target_dir {
+                cmd = cmd.arg("--target-dir").arg(dir);
+            }
             let outcome = self.step("cargo.clean.deployment_target", &cmd)?;
             if !outcome.success() {
                 return Err(self.step_failure(

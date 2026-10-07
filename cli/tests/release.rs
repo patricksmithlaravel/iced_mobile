@@ -583,6 +583,102 @@ fn dry_runs_print_the_plan_and_write_nothing() {
 }
 
 #[test]
+fn release_builds_use_their_profile_dir_and_stamps() {
+    let mut app = App::new();
+    let real_cargo = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v cargo"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let log = app.path("cargo.log");
+    write_exe(
+        &app.path("fakebin/cargo"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in build|clean) echo \"$* | IPHONEOS_DEPLOYMENT_TARGET=${{IPHONEOS_DEPLOYMENT_TARGET:-}}\" >> '{}'; exit 0;; esac\nexec '{real_cargo}' \"$@\"\n",
+            log.display()
+        ),
+    );
+    app.set("ICM_TOOL_CARGO", app.path("fakebin/cargo"));
+    let target_dir = app.dir().join("target/icm/release-target");
+    let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
+
+    let web = app.json(&["__test", "release-build", "web"]);
+    assert_eq!(web["exit"], 0, "{web}");
+    let line = read_log();
+    assert!(
+        line.starts_with("build --config profile.icm-web.inherits=\"release\" --config profile.icm-web.opt-level=\"z\""),
+        "{line}"
+    );
+    assert!(
+        line.contains("--target wasm32-unknown-unknown --profile icm-web"),
+        "{line}"
+    );
+    assert!(line.contains("--locked"), "{line}");
+    assert!(
+        line.contains(&format!("--target-dir {}", target_dir.display())),
+        "{line}"
+    );
+
+    // An Apple target: the deployment target in cargo's environment and a
+    // stamp in the release directory.
+    std::fs::remove_file(&log).unwrap();
+    let ios = app.json(&["__test", "release-build", "ios", "--min-os", "16.0"]);
+    assert_eq!(ios["exit"], 0, "{ios}");
+    let line = read_log();
+    assert!(line.contains("--release"), "{line}");
+    assert!(
+        line.contains("profile.release.debug=\"line-tables-only\""),
+        "{line}"
+    );
+    assert!(
+        line.ends_with("IPHONEOS_DEPLOYMENT_TARGET=16.0\n"),
+        "{line}"
+    );
+    assert!(!line.contains("clean"), "{line}");
+    let stamp = target_dir.join("stamps/deployment-aarch64-apple-ios-release.txt");
+    assert_eq!(
+        std::fs::read_to_string(&stamp).unwrap().trim(),
+        "IPHONEOS_DEPLOYMENT_TARGET=16.0"
+    );
+
+    // A new minimum OS cleans the app package in the release directory
+    // first, so it relinks.
+    std::fs::create_dir_all(target_dir.join("aarch64-apple-ios/release")).unwrap();
+    std::fs::remove_file(&log).unwrap();
+    let changed = app.json(&["__test", "release-build", "ios", "--min-os", "17.0"]);
+    assert_eq!(changed["exit"], 0, "{changed}");
+    let lines = read_log();
+    let first = lines.lines().next().unwrap();
+    assert!(first.starts_with("clean --manifest-path"), "{lines}");
+    assert!(
+        first.contains("-p fixture-app --target aarch64-apple-ios --release"),
+        "{lines}"
+    );
+    assert!(
+        first.contains(&format!("--target-dir {}", target_dir.display())),
+        "{lines}"
+    );
+    assert!(
+        lines
+            .lines()
+            .nth(1)
+            .unwrap()
+            .ends_with("IPHONEOS_DEPLOYMENT_TARGET=17.0")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&stamp).unwrap().trim(),
+        "IPHONEOS_DEPLOYMENT_TARGET=17.0"
+    );
+    // The dev stamps are not touched.
+    assert!(!app.dir().join("target/icm/stamps").exists());
+}
+
+#[test]
 fn the_ledger_marks_uploads_once() {
     let app = App::new();
     let none = app.json(&["ledger", "mark-uploaded", "ios"]);
