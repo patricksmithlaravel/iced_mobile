@@ -218,8 +218,7 @@ crates keep upstream's version numbers.
 - **Releases:** phases 2 to 5 (design §11 and §18) are in. Still to come: icm on Windows hosts,
   which the `.msi` and NSIS installers need, the lifecycle suite on the iOS Simulator and
   `icm ci init`. The owner's first uploads will show whether the stores accept icm's artifacts.
-- **Framework:** safe-area insets, the clipboard and dark-mode detection on Android and iOS, and a
-  lifecycle subscription that reaches `update` (today `on_lifecycle` takes a plain `fn`).
+- **Framework:** safe-area insets, the clipboard and dark-mode detection on Android and iOS.
 - **Agent bridge** (phase 6): tap, type and read the widget tree of a running app on every platform.
 - **CI:** the fork's workflows are in `.github/workflows` (design §17), but GitHub Actions does
   not run on this fork yet: they start once the owner enables Actions.

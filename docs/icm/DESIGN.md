@@ -1586,6 +1586,7 @@ Each JSON object starts with `"v":1,"kind":"<kind>"`, for example `ICM_EVENT {"v
 | `start` | `protocol`, `framework`, `pid`, `platform`, `bridge` |
 | `ready` | after the first presented frame: `ms`, `window{size,scale}`, `backend` |
 | `lifecycle` | `state` |
+| `app_state` | `state` (`foreground`, `active`, `inactive`, `background`, `memory_warning`), what `iced::mobile::lifecycle()` delivers to `update` |
 | `panic` | `message`, `location`, `thread` |
 | `warning` | `code` (e.g. `font.default_missing`, `compositor.fallback`) |
 | `exit` | `code` |

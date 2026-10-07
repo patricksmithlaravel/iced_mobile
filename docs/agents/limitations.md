@@ -50,16 +50,24 @@ this file in the commit that fixes or finds a limitation.
   and changes never arrive, so the app draws in iced's default theme. Set a
   theme explicitly (`.theme(..)`), with an in-app switch if the app needs
   dark mode.
-- **`Lifecycle::Suspended` means something different per platform.** On iOS
-  the app is about to become inactive, which also happens for Control
-  Center, Notification Center, Face ID prompts and calls; on Android its
-  native window is going away; on the web the page goes into the
-  back-forward cache; the desktop never sends it. `on_lifecycle` takes one
-  plain `fn` (setting the same one again does nothing; a different one is
-  ignored with a warning) and cannot reach `update` by itself. Hide
-  sensitive content on `Suspended`, but do not lock, log out or stop work
-  on it alone: an unlock that asks for Face ID suspends the app again, and
-  loops.
+- **Two lifecycle channels, with different timing.**
+  `iced::mobile::lifecycle()` delivers `Foreground`, `Active`, `Inactive`,
+  `Background` and `MemoryWarning` to `update`, the same on iOS and
+  Android, a moment after the event. Hide sensitive content on `Inactive`
+  (Control Center, Face ID prompts, calls, the notification shade) and lock
+  on `Background`, never on `Inactive`: an unlock that asks for Face ID
+  makes the app inactive again, and loops. `on_lifecycle` runs one plain
+  `fn` (setting the same one again does nothing; a different one is
+  ignored with a warning) before iced acts, with `Lifecycle::Suspended`
+  and `Resumed` only, whose meaning differs per platform: on iOS the app is
+  about to become inactive, on Android its native window is going away, on
+  the web the page goes into the back-forward cache, and the desktop never
+  sends it. Save what must survive there, not on a `lifecycle()` message.
+  On Android the app draws only while its activity runs, so hiding on
+  `Inactive` does not reliably keep content out of Recents (set
+  `FLAG_SECURE`); the focus can come and go more than once while a system
+  window opens; Back can end the app before its `Background` message
+  arrives; and `MemoryWarning` is rare (`onLowMemory` only).
 - **When Android destroys the activity, the app starts over.** Back at the
   app's root, a configuration change missing from `configChanges` and the
   "Don't keep activities" developer option destroy the Android activity: the

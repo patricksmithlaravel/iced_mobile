@@ -235,13 +235,87 @@
 //!
 //! # Lifecycle
 //!
-//! [`on_lifecycle`] runs a hook on the event loop's thread whenever winit
-//! reports the application suspended or resumed, before iced acts on it.
-//! [`Lifecycle::Suspended`] means different things per platform: on iOS the
-//! application is about to stop being active, which also happens for
-//! Control Center, notifications and Face ID; on Android its window is going
-//! away. On the web it fires when the page goes into the back-forward cache.
-//! The desktop never sends it. [`Lifecycle`] has the full table.
+//! Two channels report the application's life:
+//!
+//! - [`lifecycle()`] is a subscription that delivers
+//!   [`Lifecycle::Foreground`], [`Active`](Lifecycle::Active),
+//!   [`Inactive`](Lifecycle::Inactive), [`Background`](Lifecycle::Background)
+//!   and [`MemoryWarning`](Lifecycle::MemoryWarning) to `update`, with the
+//!   same meaning on iOS and Android. Hide what is on screen on `Inactive`
+//!   (Control Center, a Face ID prompt, a call, the notification shade), lock
+//!   or pause on `Background`, free caches on `MemoryWarning`. The messages
+//!   arrive a moment after the event.
+//! - [`on_lifecycle`] runs a hook on the event loop's thread whenever winit
+//!   reports the application suspended or resumed, before iced acts on it:
+//!   save there what must outlive the process. [`Lifecycle::Suspended`]
+//!   means different things per platform: on iOS the application is about
+//!   to stop being active, which also happens for Control Center,
+//!   notifications and Face ID; on Android its window is going away. On the
+//!   web it fires when the page goes into the back-forward cache. The
+//!   desktop never sends it.
+//!
+//! [`Lifecycle`] has the full tables. Lock on `Background`, not on
+//! `Inactive` or `Suspended`: an unlock that asks for Face ID makes the app
+//! inactive again, and would loop.
+//!
+//! ```no_run,standalone_crate
+//! use iced::mobile::{self, Lifecycle};
+//! use iced::widget::text;
+//! use iced::{Element, Subscription};
+//!
+//! #[derive(Default)]
+//! struct Wallet {
+//!     hidden: bool,
+//!     locked: bool,
+//! }
+//!
+//! #[derive(Debug, Clone)]
+//! enum Message {
+//!     Lifecycle(Lifecycle),
+//! }
+//!
+//! impl Wallet {
+//!     fn update(&mut self, message: Message) {
+//!         match message {
+//!             Message::Lifecycle(Lifecycle::Inactive) => self.hidden = true,
+//!             Message::Lifecycle(Lifecycle::Active) => self.hidden = false,
+//!             Message::Lifecycle(Lifecycle::Background) => self.locked = true,
+//!             Message::Lifecycle(_) => {}
+//!         }
+//!     }
+//!
+//!     fn view(&self) -> Element<'_, Message> {
+//!         text(if self.hidden || self.locked { "****" } else { "1 234.56" })
+//!             .into()
+//!     }
+//!
+//!     fn subscription(&self) -> Subscription<Message> {
+//!         mobile::lifecycle().map(Message::Lifecycle)
+//!     }
+//! }
+//!
+//! pub fn run() -> iced::Result {
+//!     iced::application(Wallet::default, Wallet::update, Wallet::view)
+//!         .subscription(Wallet::subscription)
+//!         .run()
+//! }
+//! ```
+//!
+//! On Android:
+//!
+//! - The messages reach `update` while the Activity is paused or stopped
+//!   too, but iced draws only while Android lets the Activity run, so hiding
+//!   content on `Inactive` does not reliably keep it out of the Recents
+//!   thumbnail. To keep content out of Recents and screenshots, set
+//!   `FLAG_SECURE` on the window (`AndroidApp::set_window_flags` with
+//!   `WindowManagerFlags::SECURE`).
+//! - While a system window opens over the app, the focus can come and go
+//!   more than once: `Inactive`, `Active`, `Inactive`.
+//! - When Android destroys the Activity (Back), the application can end
+//!   before its `Background` message arrives: save in the hook, on
+//!   [`Lifecycle::Suspended`], which always comes first.
+//! - `MemoryWarning` comes from `onLowMemory`, which is rare; `onTrimMemory`
+//!   does not reach the app.
 //!
 //! # Android: Activity destruction
 //!
@@ -362,7 +436,7 @@
 //! - **Not yet available on mobile:** safe-area insets (pad the root view),
 //!   the clipboard, and detecting dark mode.
 
-pub use crate::shell::{Lifecycle, on_lifecycle};
+pub use crate::shell::{Lifecycle, lifecycle, on_lifecycle};
 
 /// The Android activity handle that android-activity gives `android_main`.
 #[cfg(target_os = "android")]

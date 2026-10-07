@@ -21,8 +21,8 @@ every app instead. Its source is [examples/app/AGENTS.md](examples/app/AGENTS.md
 | Path | What it is |
 |---|---|
 | `src/mobile.rs` | `iced::mobile` and `iced::android_main!`: the app-facing mobile API. Its docs are the main mobile documentation (features, manifest and plist keys, logs, lifecycle, Activity destruction, known limitations). |
-| `winit/src/lib.rs` | `iced_winit`: `set_android_app`, `activity_destroyed`, `Lifecycle`, `on_lifecycle`, and the Android and iOS handling in the event loop |
-| `winit/src/icm.rs` | the `ICM_EVENT` protocol (start, ready, lifecycle, panic, warning, exit) that launchers read |
+| `winit/src/lib.rs` | `iced_winit`: `set_android_app`, `activity_destroyed`, and the Android and iOS handling in the event loop. `Lifecycle`, `on_lifecycle` and the `lifecycle()` subscription are in `winit/src/lifecycle.rs` |
+| `winit/src/icm.rs` | the `ICM_EVENT` protocol (start, ready, lifecycle, app_state, panic, warning, exit) that launchers read |
 | `winit/src/scene.rs`, `winit/src/ios_sdk.rs` | iOS: windows in the UIKit scene, and the SDK the app was linked with |
 | `vendor/winit/`, `vendor/patches/` | winit 0.30.13 with Android fixes, its own workspace; `vendor/winit/PATCHES.md` lists the patches |
 | `core/`, `widget/`, `runtime/`, `graphics/`, `renderer/`, `wgpu/`, `tiny_skia/`, `futures/`, `test/`, ... | the upstream crates, with small mobile changes |

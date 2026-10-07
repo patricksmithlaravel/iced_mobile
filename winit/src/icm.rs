@@ -30,6 +30,7 @@
 //! | `start` | `protocol` (1), `framework` (the iced version), `pid` (`null` on the web), `platform` (`macos`, `linux`, `windows`, `ios`, `android`, `web`, ...), `bridge` (the agent bridge protocol, `null` when it is not compiled in) | the shell starts |
 //! | `ready` | `ms` (since `start`), `window{size, physical, scale}` (logical and physical size, scale factor), `backend` (`wgpu`, `tiny-skia`), `adapter`, `api` (`Metal`, `Vulkan`, `Gl`, ...) | the shell's first frame was presented, once per `start` |
 //! | `lifecycle` | `state` (`suspended`, `resumed`) | winit reports the application suspended or resumed; see [`Lifecycle`](crate::Lifecycle) |
+//! | `app_state` | `state` (`foreground`, `active`, `inactive`, `background`, `memory_warning`) | the application's state changed, as [`lifecycle()`](crate::lifecycle()) delivers it to `update`; see [`Lifecycle`](crate::Lifecycle) |
 //! | `panic` | `message`, `location` (`file:line:column` or `null`), `thread` | a thread panics, once [`install_panic_hook`] ran |
 //! | `warning` | `code`, `message` | something degraded; see [`warning`] |
 //! | `exit` | `code` (0, or 1 when the shell stopped with an error), `destroyed` (`true` when Android destroyed the Activity) | the shell stopped; iOS and the web never send it |
@@ -235,6 +236,15 @@ pub(crate) fn lifecycle(state: &str) {
     }
 
     emit(Event::new("lifecycle").str("state", state));
+}
+
+/// Emits `app_state`.
+pub(crate) fn app_state(state: &str) {
+    if !enabled() {
+        return;
+    }
+
+    emit(Event::new("app_state").str("state", state));
 }
 
 /// Emits `exit`; `destroyed` when the shell stopped because Android

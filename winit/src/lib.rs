@@ -30,6 +30,7 @@ pub mod clipboard;
 pub mod conversion;
 pub mod icm;
 
+mod broadcast;
 mod error;
 mod proxy;
 mod window;
@@ -120,7 +121,7 @@ pub fn activity_destroyed() -> bool {
 
 mod lifecycle;
 
-pub use lifecycle::{Lifecycle, on_lifecycle};
+pub use lifecycle::{Lifecycle, lifecycle, on_lifecycle};
 
 /// Runs a [`Program`] with the provided settings.
 pub fn run<P>(program: P) -> Result<(), Error>
@@ -131,6 +132,7 @@ where
     use winit::event_loop::EventLoop;
 
     icm::start();
+    lifecycle::start();
 
     let boot_span = debug::boot();
     let settings = program.settings();
@@ -316,7 +318,7 @@ where
         F: Future<Output = ()>,
     {
         fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-            lifecycle::report(Lifecycle::Resumed);
+            lifecycle::report(lifecycle::Input::Resumed);
 
             if let Some(sender) = self.system_theme.take() {
                 let _ = sender.send(
@@ -346,7 +348,7 @@ where
             &mut self,
             event_loop: &winit::event_loop::ActiveEventLoop,
         ) {
-            lifecycle::report(Lifecycle::Suspended);
+            lifecycle::report(lifecycle::Input::Suspended);
 
             // Android: the native window is going away. Every surface on it
             // is dropped before this returns, as winit requires.
@@ -381,6 +383,10 @@ where
             window_id: winit::window::WindowId,
             event: winit::event::WindowEvent,
         ) {
+            if let Some(input) = lifecycle::Input::of(&event) {
+                lifecycle::report(input);
+            }
+
             #[cfg(target_os = "windows")]
             let is_move_or_resize = matches!(
                 event,
@@ -434,6 +440,9 @@ where
                 event_loop,
                 Event::EventLoopAwakened(winit::event::Event::AboutToWait),
             );
+
+            #[cfg(target_os = "android")]
+            lifecycle::wake_up(event_loop);
         }
 
         /// Android: winit ends the event loop by itself only when the
@@ -472,6 +481,14 @@ where
             }
 
             self.finished = true;
+        }
+
+        /// iOS and Android: the system is short of memory.
+        fn memory_warning(
+            &mut self,
+            _event_loop: &winit::event_loop::ActiveEventLoop,
+        ) {
+            lifecycle::report(lifecycle::Input::MemoryWarning);
         }
     }
 
