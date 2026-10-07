@@ -121,6 +121,15 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
   - It needs Chrome, `python3`, `/usr/bin/jq` and the network: `icm doctor web --fix --yes` creates
     the app's lock and installs the wasm-bindgen CLI and the pinned `wasm-opt` into icm's cache
     (`$ACCEPT/cache` unless `ICM_CACHE_DIR` is set).
+- **`cli/tests/accept/phase5.sh`** covers macOS desktop releases with the template app, and takes
+  a few minutes.
+  - It runs an unsigned release and its DMG, which it mounts and verifies, and launches the app.
+  - It signs a release with a throwaway self-signed identity (`test-identity.sh`) in a temporary
+    keychain. That keychain never joins the user's search list, the script checks the list is
+    unchanged, and it deletes the keychain at the end.
+  - It checks that Windows and Linux releases are refused on a Mac.
+  - The owner's notarization steps are listed as SKIP.
+  - The Windows and Linux real-host runs are the jobs of `.github/workflows/icm-desktop.yml`.
 
 ## Rules
 

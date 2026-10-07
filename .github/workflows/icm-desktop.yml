@@ -3,6 +3,8 @@
 # workflow runs once the owner enables it. The other workflows in this
 # directory are upstream iced's.
 #
+# - macos: cli/tests/accept/phase5.sh (an unsigned release and its DMG, a
+#   release signed with a throwaway identity, the app launched).
 # - linux: in ubuntu:22.04 (glibc 2.35, the default glibc_floor): the
 #   release, `dpkg -i`, the AppImage under Xvfb until ICM_EVENT ready,
 #   `icm verify linux`, and icm's desktop release tests with the real
@@ -38,6 +40,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: The template's toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)".*/\1/p' examples/app/rust-toolchain.toml)" --profile minimal
+      - name: Phase 5 acceptance
+        run: ACCEPT="$RUNNER_TEMP/accept" cli/tests/accept/phase5.sh
+      - name: Keep the release
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icm-macos-release
+          path: |
+            ${{ runner.temp }}/accept/demo/target/icm/dist
+            ${{ runner.temp }}/accept/log
+          if-no-files-found: ignore
+
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 60
