@@ -218,6 +218,23 @@ fn unimplemented_commands_say_so() {
 }
 
 #[test]
+fn shot_asks_for_a_platform() {
+    // `icm shot` needs a platform (or --headless): a usage error, not a
+    // command this build lacks.
+    let sandbox = Sandbox::new();
+    let shot = result(&sandbox.run(&["shot", "--json", "-q"]));
+    assert_eq!(shot["exit"], 2, "{shot}");
+    assert_eq!(shot["errors"][0]["id"], "usage.bad_args", "{shot}");
+    assert!(
+        shot["errors"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("icm shot android"),
+        "{shot}"
+    );
+}
+
+#[test]
 fn devices_lists_the_desktop() {
     // Physical iOS devices: tests/ios_device.rs, with a fake devicectl.
     let sandbox = Sandbox::new();

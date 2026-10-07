@@ -160,6 +160,14 @@ fn route(ctx: &mut Ctx, command: Command) -> Result<()> {
         Command::Ps => stop::ps(ctx),
         Command::Devices(args) => devices::run(ctx, &args),
         Command::Shot(args) if args.headless => headless::shot(ctx, &args),
+        Command::Shot(args) if args.platform.is_none() => Err(IcmError::new(
+            CheckId::UsageBadArgs,
+            "name the platform whose running app to capture (`icm shot android`), or pass --headless",
+        )
+        .fix(
+            "Capture the app `icm run` started on a platform, or render it without a device.",
+            &["icm ps --json -q", "icm shot --headless --json -q"],
+        )),
         Command::Shot(_) => not_implemented("shot"),
         Command::Logs(_) => not_implemented("logs"),
         Command::Input(_) => not_implemented("input"),
