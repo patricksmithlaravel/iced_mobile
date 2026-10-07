@@ -384,6 +384,15 @@ fn command(path: &Path, dir: &Path, app_id: &str, context: &HookContext, ctx: &C
             None => cmd.env_remove(key),
         };
     }
+    // A detached run's plumbing: an icm the hook starts must begin its own
+    // run, not continue (and end) this one.
+    for key in [
+        "ICM_RUN_ID",
+        "ICM_RUN_ROOT",
+        crate::commands::detach::DETACHED_ENV,
+    ] {
+        cmd = cmd.env_remove(key);
+    }
     for (key, value) in &context.env {
         cmd = cmd.env(key, value);
     }
@@ -553,6 +562,32 @@ mod tests {
         let missing = find("hook.missing");
         assert_eq!(missing.1, "fail");
         assert!(missing.2.contains("does not exist"));
+    }
+
+    #[test]
+    fn hooks_never_inherit_a_detached_runs_plumbing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _sink) = context(GlobalArgs::default());
+        let hook = HookContext {
+            platform: "desktop".into(),
+            ..HookContext::default()
+        };
+        let cmd = command(
+            &dir.path().join("x.sh"),
+            dir.path(),
+            "com.acme.x",
+            &hook,
+            &ctx,
+        );
+        for key in ["ICM_RUN_ID", "ICM_RUN_ROOT", "ICM_DETACHED", "ICM_RUN_DIR"] {
+            let last = cmd
+                .env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == key)
+                .unwrap_or_else(|| panic!("{key} is left to inheritance"));
+            assert!(last.1.is_none(), "{key} is set for the hook");
+        }
     }
 
     #[test]

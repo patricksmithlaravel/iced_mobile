@@ -93,8 +93,8 @@ fn env_flag(name: &str) -> bool {
 
 fn run(cli: Cli, argv: Vec<String>) -> Exit {
     let (command, target) = cli.command.name_and_target();
-    let detaching =
-        cli.global.detach && !cli.command.is_view() && !env_flag(commands::detach::DETACHED_ENV);
+    let detached_child = env_flag(commands::detach::DETACHED_ENV);
+    let detaching = cli.global.detach && !cli.command.is_view() && !detached_child;
     // An unknown or later-phase command, and the command after `print
     // plan`, swallow their flags unparsed.
     let swallowed: &[String] = match &cli.command {
@@ -110,9 +110,13 @@ fn run(cli: Cli, argv: Vec<String>) -> Exit {
     );
     let json = cli.global.json || env_flag("ICM_JSON") || external_json;
 
-    let inherited = std::env::var("ICM_RUN_ID")
-        .ok()
-        .filter(|id| rundir::is_run_id(id) && env_flag(commands::detach::DETACHED_ENV));
+    // A detached child continues the run directory its parent created
+    // (`ICM_RUN_ID`, `ICM_RUN_DIR`, `ICM_RUN_ROOT`, `ICM_DETACHED`). Read
+    // the plumbing once and take it out of the environment, so no child
+    // (a hook, an app, a session host) inherits it: an icm started by a
+    // hook would otherwise take over this run's directory and its result.
+    let plumbing = take_run_plumbing();
+    let inherited = plumbing.as_ref().map(|plumbing| plumbing.id.clone());
     let run_id = match (&cli.command, inherited) {
         (cli::Command::Wait(args), _) => args.run.clone(),
         (_, Some(id)) => id,
@@ -138,11 +142,8 @@ fn run(cli: Cli, argv: Vec<String>) -> Exit {
     );
     rep.make_active();
 
-    // A detached child continues the run directory its parent created.
-    if let (Ok(dir), Ok(root)) = (std::env::var("ICM_RUN_DIR"), std::env::var("ICM_RUN_ROOT"))
-        && env_flag(commands::detach::DETACHED_ENV)
-    {
-        let _ = rep.attach_dir(std::path::Path::new(&root), std::path::Path::new(&dir));
+    if let Some(plumbing) = &plumbing {
+        let _ = rep.attach_dir(&plumbing.root, &plumbing.dir);
     }
 
     if !matches!(cli.command, cli::Command::Wait(_)) {
@@ -176,6 +177,42 @@ fn run(cli: Cli, argv: Vec<String>) -> Exit {
     };
     FINISHED.store(true, Ordering::SeqCst);
     exit
+}
+
+/// The run a detached child continues.
+struct RunPlumbing {
+    id: String,
+    dir: std::path::PathBuf,
+    root: std::path::PathBuf,
+}
+
+/// The variables a detached parent hands its child.
+const RUN_PLUMBING: [&str; 4] = [
+    "ICM_RUN_ID",
+    "ICM_RUN_DIR",
+    "ICM_RUN_ROOT",
+    commands::detach::DETACHED_ENV,
+];
+
+/// Reads the detached run's plumbing and removes it from icm's
+/// environment. Only a detached child (`ICM_DETACHED=1` with a valid id
+/// and both directories) continues a run, and never one that already has
+/// its `result.json`: that run has ended, so this icm starts its own.
+fn take_run_plumbing() -> Option<RunPlumbing> {
+    let detached = env_flag(commands::detach::DETACHED_ENV);
+    let id = std::env::var("ICM_RUN_ID").ok();
+    let dir = std::env::var_os("ICM_RUN_DIR").map(std::path::PathBuf::from);
+    let root = std::env::var_os("ICM_RUN_ROOT").map(std::path::PathBuf::from);
+    for name in RUN_PLUMBING {
+        // SAFETY: called from `run` on the main thread before icm starts
+        // any thread (the watchdog, the runner's readers), so nothing reads
+        // the environment concurrently.
+        unsafe { std::env::remove_var(name) };
+    }
+
+    let (id, dir, root) = (id?, dir?, root?);
+    (detached && rundir::is_run_id(&id) && !dir.join("result.json").exists())
+        .then_some(RunPlumbing { id, dir, root })
 }
 
 /// Records panic messages for the exit-70 result; still prints them to
