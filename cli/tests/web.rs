@@ -5,7 +5,8 @@
 //! `ICM_TOOL_WASM_BINDGEN`): the fake wasm-bindgen writes a small
 //! JavaScript "app" that speaks the `ICM_EVENT` protocol, draws a canvas
 //! and logs the pointer and key events it receives (and an `api_token` its
-//! URL carries), so the tests cover icm's server, session, DevTools pipe,
+//! URL carries, plain, as JSON and in the URL encodings a page has), so
+//! the tests cover icm's server, session, DevTools pipe,
 //! readiness, screenshots and input in seconds without compiling iced. The
 //! Chrome tests skip (and say so) on a machine without Chrome or the wasm32
 //! target.
@@ -64,6 +65,9 @@ export default async function init() {
   if (token) {
     console.log("signed in with " + token);
     console.log(JSON.stringify({token}));
+    console.log("GET https://api.example.com/v1?" + new URLSearchParams({token}) + "&uri=" + encodeURIComponent(token));
+    console.log("lower " + encodeURIComponent(token).replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase()));
+    console.log("INFO payload " + JSON.stringify({t: token}).replace(/\//g, "\\u002f"));
     console.warn("token " + token);
     event({v: 1, kind: "warning", code: "fixture.token", message: "token " + token});
   }

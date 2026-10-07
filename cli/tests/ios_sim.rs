@@ -472,8 +472,13 @@ fn run_directories_keep_no_secret() {
         .filter(|record| record["source"] == "oslog")
         .map(|record| serde_json::from_str(record["msg"].as_str().unwrap()).unwrap())
         .collect();
-    assert_eq!(lines.len(), 2, "{raw}");
+    assert_eq!(lines.len(), 3, "{raw}");
     assert_eq!(lines[1]["eventMessage"], "{\"token\":\"<redacted>\"}");
+    // A URL with lowercase hex.
+    assert_eq!(
+        lines[2]["eventMessage"],
+        "GET https://api.example.com/v1?lower=<redacted>"
+    );
     assert!(!raw.to_string().contains(secret::TAIL), "{raw}");
     assert_eq!(
         fake.result_with("leak", &["stop", "ios-sim", "--json", "-q"], &env)["exit"],

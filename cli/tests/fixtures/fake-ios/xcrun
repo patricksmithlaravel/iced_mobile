@@ -4,7 +4,8 @@
 # launched "app" does: `ok` (draws), `panic` (panics and exits) or `silent`
 # (runs but sends no ICM_EVENT lines). `leak` draws and `leak-panic` panics
 # like them, logging the secret in $ICM_TEST_API_TOKEN everywhere an app's
-# output goes: stdout, stderr (plain and as JSON), an ICM_EVENT warning,
+# output goes: stdout, stderr (plain, as JSON, in a URL with lowercase hex,
+# as JSON with a \u escape after a log prefix), an ICM_EVENT warning,
 # the unified log (`log stream` and `log show`, which write `/` as `\/`)
 # and, for `leak-panic`, a crash report in ~/Library/Logs/DiagnosticReports.
 #
@@ -24,6 +25,10 @@ S="$ICM_FAKE_STATE"
 tok_json=$(printf '%s' "${ICM_TEST_API_TOKEN:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
 tok_log=$(printf '%s' "$tok_json" | sed -e 's/\//\\\//g')
 json_log=$(printf '{"token":"%s"}' "$tok_json" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\//\\\//g')
+# The secret in a URL with lowercase hex (for the characters the tests'
+# secret has), and as JSON with `\u002f` for `/` after a log prefix.
+tok_pct=$(printf '%s' "${ICM_TEST_API_TOKEN:-}" | sed -e 's/%/%25/g' -e 's/\//%2f/g' -e 's/"/%22/g' -e 's/\\/%5c/g')
+tok_u=$(printf '%s' "$tok_json" | sed -e 's/\//\\u002f/g')
 # One unified-log line of the app; $2 is its message as `log` writes it.
 oslog_line() {
   printf '{"eventType":"logEvent","subsystem":"iced","category":"app","messageType":"Default","processID":%s,"processImagePath":"\\/data\\/Fixture.app\\/fixture-app","timestamp":"%s","eventMessage":"%s"}\n' \
@@ -85,6 +90,7 @@ simctl)
         if [ -n "$leak" ]; then
           oslog_line 0 "signed in with $tok_log"
           oslog_line 0 "$json_log"
+          oslog_line 0 "GET https:\/\/api.example.com\/v1?lower=$tok_pct"
         fi
         exec sleep 20
       elif [ "$2" = show ] && [ -n "$leak" ]; then
@@ -130,6 +136,8 @@ simctl)
       {
         printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":%s}\n' "$pid"
         printf '{"token":"%s"}\n' "$tok_json"
+        printf 'GET https://api.example.com/v1?lower=%s\n' "$tok_pct"
+        printf 'INFO fixture: payload {"t":"%s"}\n' "$tok_u"
         printf 'ICM_EVENT {"v":1,"kind":"warning","code":"fixture.token","message":"token %s"}\n' "$tok_json"
         if [ "$ICM_FAKE_SCENARIO" = leak ]; then
           printf 'ICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n'
@@ -228,6 +236,8 @@ devicectl)
         echo $$ > "$S/device-app.pid"
         printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":4242}\n'
         printf 'signed in with %s\n{"token":"%s"}\n' "$ICM_TEST_API_TOKEN" "$tok_json"
+        printf 'GET https://api.example.com/v1?lower=%s\n' "$tok_pct"
+        printf 'INFO fixture: payload {"t":"%s"}\n' "$tok_u"
         printf 'ICM_EVENT {"v":1,"kind":"warning","code":"fixture.token","message":"token %s"}\n' "$tok_json"
         printf 'ICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n'
         exec sleep 30

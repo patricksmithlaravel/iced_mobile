@@ -66,6 +66,9 @@ export default async function init(options) {
   if (token) {
     console.log("signed in with " + token);
     console.log(JSON.stringify({token}));
+    console.log("GET https://api.example.com/v1?" + new URLSearchParams({token}) + "&uri=" + encodeURIComponent(token));
+    console.log("lower " + encodeURIComponent(token).replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase()));
+    console.log("INFO payload " + JSON.stringify({t: token}).replace(/\//g, "\\u002f"));
   }
   const canvas = document.createElement("canvas");
   canvas.width = innerWidth * devicePixelRatio;
@@ -594,7 +597,7 @@ fn a_web_release_over_budget_and_without_fonts_is_not_uploadable() {
 
 /// The serve check's console in the run directory holds no secret the
 /// page logged: an app built with the value of a secret-named variable in
-/// icm's environment logs it plain and as JSON, and the console, Chrome's
+/// icm's environment logs it plain, as JSON and in URLs, and the console, Chrome's
 /// log, the events and the result have `<redacted>`, raw or escaped (the
 /// site itself, the release's own code, is in the dist directory).
 #[test]

@@ -13,12 +13,41 @@ fn escaped(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// A text percent-encoded for a URL: letters, digits and `keep` stay, a
+/// space is `space`, other bytes are `%XX`, or `%xx` when `lower`.
+fn encoded(text: &str, keep: &str, space: &str, lower: bool) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || keep.as_bytes().contains(&byte) {
+            out.push(char::from(byte));
+        } else if byte == b' ' && !space.is_empty() {
+            out.push_str(space);
+        } else if lower {
+            out.push_str(&format!("%{byte:02x}"));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 /// Logs the secret it was given (`ICM_TEST_API_TOKEN`) as apps do: plain,
-/// in a JSON line and in an `ICM_EVENT` warning.
+/// in a JSON line, in an `ICM_EVENT` warning, in URLs (form-urlencoded as
+/// the `form_urlencoded` crate writes it, and with lowercase hex) and as
+/// JSON with `\u` escapes after a log prefix.
 fn log_token() -> Option<String> {
     let token = std::env::var("ICM_TEST_API_TOKEN").ok()?;
     println!("signed in with {token}");
     eprintln!("{{\"token\":\"{}\"}}", escaped(&token));
+    eprintln!(
+        "GET https://api.example.com/v1?token={}&lower={}",
+        encoded(&token, "*-._", "+", false),
+        encoded(&token, "-_.~", "", true)
+    );
+    eprintln!(
+        "INFO fixture: payload {{\"t\":\"{}\"}}",
+        escaped(&token).replace('/', "\\u002f")
+    );
     event(&format!(
         r#"{{"v":1,"kind":"warning","code":"fixture.token","message":"token {}"}}"#,
         escaped(&token)

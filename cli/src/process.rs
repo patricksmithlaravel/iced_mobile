@@ -493,41 +493,114 @@ fn redact_bytes(bytes: Vec<u8>, secrets: &[String]) -> Vec<u8> {
     }
 }
 
-/// Replaces each of `secrets` (longest first) in a text.
+/// Replaces each of `secrets` (longest first) in a text, as it is and
+/// percent-encoded in any way ([`replace_encoded`]).
 pub fn redact_with(text: &str, secrets: &[String]) -> String {
-    let mut text = text.to_string();
+    redact_forms(text, secrets).unwrap_or_else(|| text.to_string())
+}
+
+/// [`redact_with`]; `None` when the text holds no secret.
+fn redact_forms(text: &str, secrets: &[String]) -> Option<String> {
+    let mut out: Option<String> = None;
     for secret in secrets {
-        if text.contains(secret.as_str()) {
-            text = text.replace(secret.as_str(), REDACTED);
+        let current = out.as_deref().unwrap_or(text);
+        if current.contains(secret.as_str()) {
+            out = Some(current.replace(secret.as_str(), REDACTED));
         }
     }
-    text
+    for secret in secrets {
+        let current = out.as_deref().unwrap_or(text);
+        if let Some(replaced) = replace_encoded(current, secret) {
+            out = Some(replaced);
+        }
+    }
+    out
+}
+
+/// `text` with `secret` replaced where some of its bytes are
+/// percent-encoded, in either hex case, and a space may be `+`: whatever
+/// encoded it for a URL (icm's own query encoder, `encodeURIComponent`,
+/// `URLSearchParams` and the `form_urlencoded` crate, which keep different
+/// characters, or an encoder that writes `%2f`), a URL an app logs carries
+/// it so. `None` when there is no such occurrence.
+fn replace_encoded(text: &str, secret: &str) -> Option<String> {
+    let want = secret.as_bytes();
+    let first = *want.first()?;
+    let plus = secret.contains(' ') && text.contains('+');
+    if !text.contains('%') && !plus {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let (mut copied, mut at, mut found) = (0, 0, false);
+    while at < bytes.len() {
+        let byte = bytes[at];
+        let start = byte == first || byte == b'%' || (plus && byte == b'+');
+        match start.then(|| match_encoded(bytes, at, want)).flatten() {
+            Some(end) => {
+                // A match starts at an ASCII byte or at the secret's first
+                // byte, and ends after an ASCII byte or the secret's last
+                // one: both are character boundaries.
+                out.push_str(&text[copied..at]);
+                out.push_str(REDACTED);
+                (copied, at, found) = (end, end, true);
+            }
+            None => at += 1,
+        }
+    }
+    found.then(|| {
+        out.push_str(&text[copied..]);
+        out
+    })
+}
+
+/// Where an occurrence of `want` that starts at `at` ends, each of its
+/// bytes as it is or as `%XX` (and a space as `+`).
+fn match_encoded(text: &[u8], mut at: usize, want: &[u8]) -> Option<usize> {
+    for &byte in want {
+        let got = *text.get(at)?;
+        let decoded = (got == b'%')
+            .then(|| text.get(at + 1..at + 3).and_then(hex_byte))
+            .flatten();
+        if decoded == Some(byte) {
+            at += 3;
+        } else if got == byte || (byte == b' ' && got == b'+') {
+            at += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(at)
+}
+
+/// Two hex digits, either case.
+fn hex_byte(pair: &[u8]) -> Option<u8> {
+    let digit = |byte: u8| char::from(byte).to_digit(16);
+    u8::try_from(digit(pair[0])? * 16 + digit(pair[1])?).ok()
 }
 
 /// Replaces each of `secrets` in the text of a file icm keeps: everywhere
 /// as text (in each form [`secret_values`] holds: raw, JSON-escaped,
-/// percent-encoded), then, in a line that is a JSON document with escapes
-/// (an NDJSON record, a line of `log show --style ndjson`), in its decoded
-/// strings, whatever escapes its encoder used. Such a line is written again
-/// as compact JSON.
+/// percent-encoded, and percent-encoded any other way), then, in each line
+/// with escapes, in the decoded JSON strings it holds, whatever escapes
+/// their encoder used (an NDJSON record, a line of `log show --style
+/// ndjson`, a JSON document after a log line's prefix): see
+/// [`redact_json_strings`].
 pub fn redact_text<'a>(text: &'a str, secrets: &[String]) -> Cow<'a, str> {
     if secrets.is_empty() {
         return Cow::Borrowed(text);
     }
-    let mut text = if secrets.iter().any(|secret| text.contains(secret.as_str())) {
-        Cow::Owned(redact_with(text, secrets))
-    } else {
-        Cow::Borrowed(text)
+    let mut text = match redact_forms(text, secrets) {
+        Some(redacted) => Cow::Owned(redacted),
+        None => Cow::Borrowed(text),
     };
     if text.contains('\\') {
         let mut out = String::with_capacity(text.len());
         let mut changed = false;
         for line in text.split_inclusive('\n') {
-            let body = line.trim_end_matches(['\n', '\r']);
-            match redact_json_line(body, secrets) {
-                Some(json) => {
-                    out.push_str(&json);
-                    out.push_str(&line[body.len()..]);
+            match redact_json_strings(line, secrets) {
+                Some(redacted) => {
+                    out.push_str(&redacted);
                     changed = true;
                 }
                 None => out.push_str(line),
@@ -540,34 +613,71 @@ pub fn redact_text<'a>(text: &'a str, secrets: &[String]) -> Cow<'a, str> {
     text
 }
 
-/// A JSON document with escapes (a line of a file, or a string holding
-/// one), redacted; `None` when it is not one or holds no secret.
-fn redact_json_line(line: &str, secrets: &[String]) -> Option<String> {
-    let line = line.trim();
-    if !line.contains('\\') || !(line.starts_with('{') || line.starts_with('[')) {
+/// A line's JSON string literals with escapes, redacted where one holds a
+/// secret once decoded: the string is decoded, redacted with
+/// [`redact_text`] (so a JSON document inside it is too, as in a raw `log`
+/// line that `icm logs ios-sim --raw` reports) and written again as serde
+/// writes it; the rest of the line stays as it is. A literal runs from a
+/// quote no backslash escapes to the next one; every such quote is tried as
+/// a start, so a stray quote before a JSON document (a log prefix) does not
+/// hide it. `None` when no literal holds a secret.
+fn redact_json_strings(line: &str, secrets: &[String]) -> Option<String> {
+    if !line.contains('\\') {
         return None;
     }
-    let mut value: Value = serde_json::from_str(line).ok()?;
-    redact_json(&mut value, secrets).then(|| value.to_string())
+    let bytes = line.as_bytes();
+    let mut quotes = Vec::new();
+    let mut backslashes = 0;
+    for (at, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'\\' => backslashes += 1,
+            b'"' if backslashes % 2 == 0 => {
+                quotes.push(at);
+                backslashes = 0;
+            }
+            _ => backslashes = 0,
+        }
+    }
+    let mut out = String::new();
+    let (mut copied, mut found, mut next) = (0, false, 0);
+    while next + 1 < quotes.len() {
+        let (open, close) = (quotes[next], quotes[next + 1]);
+        let literal = &line[open..=close];
+        let redacted = literal
+            .contains('\\')
+            .then(|| serde_json::from_str::<String>(literal).ok())
+            .flatten()
+            .and_then(|decoded| match redact_text(&decoded, secrets) {
+                Cow::Owned(redacted) => Some(Value::String(redacted).to_string()),
+                Cow::Borrowed(_) => None,
+            });
+        match redacted {
+            Some(redacted) => {
+                out.push_str(&line[copied..open]);
+                out.push_str(&redacted);
+                (copied, found, next) = (close + 1, true, next + 2);
+            }
+            None => next += 1,
+        }
+    }
+    found.then(|| {
+        out.push_str(&line[copied..]);
+        out
+    })
 }
 
-/// Replaces each of `secrets` in every string of a JSON value, and says
-/// whether it found one. A string that is itself a JSON document with
-/// escapes (a raw `log` line that `icm logs ios-sim --raw` reports) is
-/// redacted in its decoded strings too, and written again as compact JSON.
+/// Replaces each of `secrets` in every string of a JSON value
+/// ([`redact_text`], so also in the JSON strings a string holds), and says
+/// whether it found one.
 pub fn redact_json(value: &mut Value, secrets: &[String]) -> bool {
     match value {
-        Value::String(text) => {
-            let mut found = secrets.iter().any(|secret| text.contains(secret.as_str()));
-            if found {
-                *text = redact_with(text, secrets);
+        Value::String(text) => match redact_text(text, secrets) {
+            Cow::Owned(redacted) => {
+                *text = redacted;
+                true
             }
-            if let Some(json) = redact_json_line(text, secrets) {
-                *text = json;
-                found = true;
-            }
-            found
-        }
+            Cow::Borrowed(_) => false,
+        },
         Value::Array(items) => {
             let mut found = false;
             for item in items {
@@ -902,9 +1012,10 @@ pub fn redact_argv(argv: &[String]) -> Vec<String> {
     out
 }
 
-/// Replaces the secret values icm knows ([`secret_values`]).
+/// Replaces the secret values icm knows ([`secret_values`]) as
+/// [`redact_text`] does.
 pub fn redact_values(text: &str) -> String {
-    redact_with(text, &secret_values())
+    redact_text(text, &secret_values()).into_owned()
 }
 
 /// The secret values icm knows, longest first (so a secret containing
@@ -1447,6 +1558,106 @@ mod tests {
         let mut with = bytes.clone();
         with.extend_from_slice(b" tok/se\"kr\\it-123456");
         assert!(String::from_utf8_lossy(&redact_bytes(with, &secrets)).ends_with(" <redacted>"));
+    }
+
+    /// A percent-encoder for the tests: keeps letters, digits and `keep`,
+    /// writes a space as `space` and other bytes as `%XX` (or `%xx`).
+    fn encode(text: &str, keep: &str, space: &str, lower: bool) -> String {
+        let mut out = String::new();
+        for byte in text.bytes() {
+            if byte.is_ascii_alphanumeric() || keep.as_bytes().contains(&byte) {
+                out.push(char::from(byte));
+            } else if byte == b' ' && !space.is_empty() {
+                out.push_str(space);
+            } else if lower {
+                out.push_str(&format!("%{byte:02x}"));
+            } else {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        out
+    }
+
+    /// A secret an app logs in a URL is found whatever encoded it, and one
+    /// it logs as JSON wherever the JSON stands in a line, whatever escapes
+    /// its encoder used.
+    #[test]
+    fn secrets_are_found_in_every_url_and_json_encoding() {
+        let token = "Zq9XLEAKMARKERa1b2c3/Tok\"en\\Bk&y~z*w,v!(K) END7";
+        let base64 = "/9j4QSkZJRgDBMARKERq7w8+abc=";
+        let mut secrets = Vec::new();
+        add_secret(&mut secrets, token, 4);
+        add_secret(&mut secrets, base64, 4);
+
+        // form_urlencoded, serde_urlencoded and URLSearchParams.
+        let form = encode(token, "*-._", "+", false);
+        assert_eq!(
+            form,
+            "Zq9XLEAKMARKERa1b2c3%2FTok%22en%5CBk%26y%7Ez*w%2Cv%21%28K%29+END7"
+        );
+        let lines = [
+            format!("form=https://api.example.com/v1?token={form}&x=1"),
+            // encodeURIComponent.
+            format!("uri={}", encode(token, "-_.!~*'()", "", false)),
+            // Lowercase hex, of both secrets.
+            format!("lower={}", encode(token, "-_.~,", "", true)),
+            format!("db={}", encode(base64, "", "", true)),
+            // A JSON document after a log prefix, with \u escapes.
+            format!(
+                "INFO r1: payload {{\"t\":{}}}",
+                Value::String(token.into())
+                    .to_string()
+                    .replace('&', "\\u0026")
+                    .replace('/', "\\/")
+            ),
+            // A stray quote before it.
+            format!(
+                "5\" tall {{\"t\":\"{}\", \"n\": 1}}",
+                "Zq9XLEAKMARKERa1b2c3\\u002fTok\\\"en\\\\Bk\\u0026y~z*w,v!(K) END7"
+            ),
+            // A JSON string inside a JSON string, after a prefix.
+            format!(
+                "raw: {}",
+                Value::String(format!(
+                    "{{\"t\":{}}}",
+                    Value::String(token.into())
+                        .to_string()
+                        .replace('&', "\\u0026")
+                ))
+            ),
+        ];
+        for line in &lines {
+            let redacted = redact_text(line, &secrets);
+            assert!(
+                !redacted.contains("END7") && !redacted.contains("abc"),
+                "{line} -> {redacted}"
+            );
+            assert!(redacted.contains(REDACTED), "{redacted}");
+        }
+        assert_eq!(
+            redact_text(&lines[0], &secrets),
+            "form=https://api.example.com/v1?token=<redacted>&x=1"
+        );
+        assert_eq!(
+            redact_text(&lines[4], &secrets),
+            "INFO r1: payload {\"t\":\"<redacted>\"}"
+        );
+        assert_eq!(
+            redact_text(&lines[5], &secrets),
+            "5\" tall {\"t\":\"<redacted>\", \"n\": 1}"
+        );
+        // The reporter's redaction is the same.
+        let mut record = serde_json::json!({"msg": lines[2], "more": [lines[6]]});
+        assert!(redact_json(&mut record, &secrets));
+        assert!(!record.to_string().contains("END7"), "{record}");
+
+        // Text that only looks encoded stays as it is.
+        for text in ["a+b%2Fc%zz%", "{\"t\":\"x\\u0026y\"} \"", "50% off"] {
+            assert!(
+                matches!(redact_text(text, &secrets), Cow::Borrowed(_)),
+                "{text}"
+            );
+        }
     }
 
     #[test]
