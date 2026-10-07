@@ -82,7 +82,7 @@ pub fn build(ctx: &mut Ctx, args: &BuildArgs) -> Result<()> {
         abi.as_str()
     ));
     ctx.rep.next(
-        "icm run android --no-build",
+        "icm run android --no-build --json -q",
         "install and launch this build",
     );
     Ok(())
@@ -280,7 +280,27 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     if chosen.managed() {
         avd::prepare(&adb);
     }
-    ctx.rep.set("device", device::to_json(&chosen, &adb));
+    let device_json = device::to_json(&chosen, &adb);
+    ctx.rep.set("device", device_json.clone());
+    // "emulator-5580 (icm-api36, API 36)" for the summary.
+    let device_name = {
+        let mut about: Vec<String> = Vec::new();
+        if let Some(name) = chosen
+            .avd
+            .clone()
+            .or_else(|| device_json["model"].as_str().map(str::to_string))
+        {
+            about.push(name);
+        }
+        if let Some(api) = device_json["api"].as_u64() {
+            about.push(format!("API {api}"));
+        }
+        if about.is_empty() {
+            chosen.serial.clone()
+        } else {
+            format!("{} ({})", chosen.serial, about.join(", "))
+        }
+    };
 
     install(
         ctx,
@@ -312,7 +332,11 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     session.pid = pids.iter().next().copied();
 
     let mut result = outcome.and_then(|ready| {
-        report_ready(ctx, &project, &ready, launched);
+        let readiness = report_ready(ctx, &project, &ready, launched);
+        ctx.rep.summary(format!(
+            "{} ({app_id}) is running on {device_name}; {readiness}",
+            config.app.name
+        ));
         if !args.no_shot {
             std::thread::sleep(args.settle);
             let shot = capture(ctx, &adb, &dir, "screen", &app_id, args.expect_content)?;
@@ -389,7 +413,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     )?;
 
     ctx.rep.next(
-        "icm logs android --level warn",
+        "icm logs android --level warn --json",
         "read the app's warnings and errors",
     );
     ctx.rep.next(
@@ -721,7 +745,9 @@ fn top_resumed(adb: &Adb, app_id: &str) -> bool {
     .is_some_and(|text| text.contains(&format!("{app_id}/")))
 }
 
-fn report_ready(ctx: &Ctx, project: &Project, ready: &Ready, launched: Instant) {
+/// Reports `ready` and `run.ready`; returns how it got ready ("first frame
+/// 411x914@2.625 after 0.9 s (source: icm_event)").
+fn report_ready(ctx: &Ctx, project: &Project, ready: &Ready, launched: Instant) -> String {
     let window = ready.window.clone().unwrap_or(Value::Null);
     // Logical sizes are fractional on Android (1080 px / 2.625); one
     // decimal is plenty for a person.
@@ -753,14 +779,14 @@ fn report_ready(ctx: &Ctx, project: &Project, ready: &Ready, launched: Instant) 
         (Some(size), Some(scale)) => format!("first frame {size}@{scale}"),
         _ => "the app is up".to_string(),
     };
-    ctx.rep.check(Check::pass(
-        CheckId::RunReady,
-        format!(
-            "{what} after {} (source: {})",
-            crate::time::format_duration(Duration::from_millis(ms)),
-            ready.source
-        ),
-    ));
+    let detail = format!(
+        "{what} after {} (source: {})",
+        crate::time::format_duration(Duration::from_millis(ms)),
+        ready.source
+    );
+    ctx.rep
+        .check(Check::pass(CheckId::RunReady, detail.clone()));
+    detail
 }
 
 // ---- screenshots ---------------------------------------------------------------------
@@ -837,7 +863,10 @@ fn capture(
                     .evidence(Evidence::file(&png_path))
                     .fix(
                         "Compare with a headless render; read the logs.",
-                        &["icm shot --headless", "icm logs android --level warn"],
+                        &[
+                            "icm shot --headless --json -q",
+                            "icm logs android --level warn --json",
+                        ],
                     ),
             );
         }
@@ -894,7 +923,7 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
     }
     ctx.rep.set("device", json!({"serial": adb.serial}));
     ctx.rep.next(
-        "icm input android tap <x> <y>",
+        "icm input android tap <x> <y> --json -q",
         "act in screen.preview.png pixels",
     );
     Ok(())
@@ -1156,7 +1185,7 @@ fn describe_recreation(
             "Android relaunched the activity {after} after launch, and an iced app freezes when its activity is recreated (it stops drawing and answering input): {why} (run.activity_recreated)"
         ),
         fix: fix.to_string(),
-        commands: vec!["icm run android".to_string()],
+        commands: vec!["icm run android --json -q".to_string()],
         evidence: None,
     };
     Some((detail, recreated))
@@ -1240,7 +1269,7 @@ fn attach_evidence(error: &mut IcmError, collected: &Collected, project: &Projec
         error
             .fix
             .commands
-            .push("icm logs android --level warn".to_string());
+            .push("icm logs android --level warn --json".to_string());
     }
 }
 
@@ -1274,7 +1303,10 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
                         adb.serial
                     ),
                 )
-                .fix_commands(["icm run android", "icm logs android --since 10m"])
+                .fix_commands([
+                    "icm run android --json -q",
+                    "icm logs android --since 10m --json",
+                ])
             })?
     } else {
         let ago = crate::time::parse_duration(&args.since).map_err(|error| {
@@ -1657,7 +1689,7 @@ pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
     }
     ctx.rep.set("input", what);
     ctx.rep.summary(format!("{line} on {}", adb.serial));
-    ctx.rep.next("icm shot android", "see the result");
+    ctx.rep.next("icm shot android --json -q", "see the result");
     Ok(())
 }
 

@@ -110,18 +110,8 @@ fn prelude(ctx: &mut Ctx) -> Result<(Project, Xcode)> {
             ),
         ));
     }
-    if project.config.config.id_is_placeholder() {
-        ctx.rep.check(
-            Check::warn(
-                CheckId::AppIdPlaceholder,
-                format!(
-                    "`[app] id` is {}, a placeholder; fine for development",
-                    project.config.config.app.id
-                ),
-            )
-            .evidence(project.config.evidence("app.id")),
-        );
-    }
+    // A placeholder `[app] id` is fine for development: `icm check` and
+    // `icm new` report it, the dev platforms' commands do not.
     Ok((project, xcode))
 }
 
