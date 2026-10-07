@@ -1053,7 +1053,7 @@ Release also writes:
 
 ### 10.1 desktop
 1. `cargo build -p <pkg> --bin <bin> [--release] --message-format=json-render-diagnostics`. The exe path comes from the `compiler-artifact` message. On macOS, `MACOSX_DEPLOYMENT_TARGET=<desktop.macos.min_os>`.
-2. Spawn the app detached, in its own process group: stdout to `runs/<id>/app.stdout`, stderr to `runs/<id>/app.stderr`. The env adds `RUST_LOG`, `ICM_RUN_ID`, and `ICM_EVENTS=1` for `--release`. Record the pid in the session file.
+2. Spawn the app detached, in its own process group: stdout to `runs/<id>/app.stdout`, stderr to `runs/<id>/app.stderr`. The env adds `RUST_LOG`, `ICM_RUN_ID`, and `ICM_EVENTS=1` for every build (Appendix C 27). Record the pid in the session file.
 3. Ready means `ICM_EVENT ready` in `app.stderr` within `--wait-ready`. The fallback is that the pid is alive after 3 s and owns a window: `CGWindowListCopyWindowInfo` filtered by pid (objc2-core-graphics, in-process).
 4. Screenshot:
    - **macOS:** `CGPreflightScreenCaptureAccess()` first.
@@ -1111,7 +1111,7 @@ Release also writes:
    xcrun simctl launch --terminate-running-process --stdout=<run>/app.stdout --stderr=<run>/app.stderr <udid> <id>
    ```
 
-   The env carries `SIMCTL_CHILD_RUST_BACKTRACE=1`, `SIMCTL_CHILD_RUST_LOG=<level>`, `SIMCTL_CHILD_ICM_RUN_ID` and `SIMCTL_CHILD_ICM_EVENTS=1` (release), plus `--env` values with the prefix added. Parse `<id>: <pid>`.
+   The env carries `SIMCTL_CHILD_RUST_BACKTRACE=1`, `SIMCTL_CHILD_RUST_LOG=<level>`, `SIMCTL_CHILD_ICM_RUN_ID` and `SIMCTL_CHILD_ICM_EVENTS=1` (every build, Appendix C 27), plus `--env` values with the prefix added. Parse `<id>: <pid>`.
 10. Ready:
     - **Primary:** `ICM_EVENT ready` in `app.stderr`.
     - **Fallback:** `xcrun simctl spawn <udid> launchctl list` shows `UIKitApplication:<id>` with a numeric pid on 3 consecutive polls a second apart. `simctl launch` exiting 0 proves nothing.
@@ -1560,10 +1560,17 @@ Viewport presets:
 - `icm-ice <file> --report PATH` writes a result for each instruction.
 - The harness prints `ICM_HARNESS {"protocol":1}` first.
 
+As built (`test/src/agent.rs`, whose module docs are the reference):
+- `--viewport` also takes the presets of §13.1 (`iphone-17`, the default, `iphone-se`, `pixel-9`, `web-mobile`, `desktop`); `--scale` defaults to the preset's. `icm-tree` also takes `--preset` and `--wait-ms`, and each widget has `visible` (its on-screen rectangle, or null when scrolled or clipped away) and, for text inputs and focusables, `focused`. `icm-ice` also takes `--timeout-ms` (default 30 s); a failed step carries `reason` and the visible `texts`.
+- Every command ends with `ICM_HARNESS_RESULT <json>`: `{"protocol":1,"kind":"shot|tree|ice|flows","ok":…}` plus the kind's fields. The `--report`/`--out` files hold the same object.
+- Exit codes: 0 everything passed, 1 a flow failed, 2 usage error or a file that cannot be read or written.
+- With no command, libtest's `--list`, `--ignored`, `--skip` and name filters apply to the flow names `flows::<stem>`, so nextest can list them.
+- It draws with tiny-skia unless `ICED_TEST_BACKEND` names another backend (`Emulator::with_backend`, `iced_test::run_with_backend` and `screenshot_with_backend`, Appendix C 7), and `Font::DEFAULT` is Fira Sans.
+
 icm runs it as `ICED_TEST_BACKEND=tiny-skia cargo test -p <pkg> --test icm -- <subcommand> …`. That powers `icm shot --headless`, `icm ui --headless tree|find|ice` and `icm test --host`. It needs no device, no OS permission and no GPU, and it runs in CI.
 
 ### 13.3 Readiness and logs
-**`ICM_EVENT` protocol v1 (framework F3).** Events are emitted when `debug_assertions` is on, or when opted in: `ICM_EVENTS=1` env (desktop, ios-sim through `SIMCTL_CHILD_`), sysprop `debug.icm.events=1` (Android), or `?icm_events=1` (web). Each event is one line:
+**`ICM_EVENT` protocol v1 (framework F3, `iced_winit::icm`).** Events are emitted only when the run opts in (Appendix C 27; `1` and `true` count): `ICM_EVENTS=1` env (desktop, ios-sim through `SIMCTL_CHILD_`), sysprop `debug.icm.events=1` (Android), or `?icm_events=1` (web). Each event is one line:
 
 | Platform | Where the line goes |
 |---|---|
@@ -1581,6 +1588,8 @@ Each JSON object starts with `"v":1,"kind":"<kind>"`, for example `ICM_EVENT {"v
 | `panic` | `message`, `location`, `thread` |
 | `warning` | `code` (e.g. `font.default_missing`, `compositor.fallback`) |
 | `exit` | `code` |
+
+As built: `ready` also carries `window.physical`, `adapter` and `api` (`Metal`, `Vulkan`, `BrowserWebGpu` or `tiny-skia`), for example `{"v":1,"kind":"ready","ms":652,"window":{"size":[1024,768],"physical":[2048,1536],"scale":2},"backend":"wgpu","adapter":"Apple M4 Max","api":"Metal"}`. `start` has `pid: null` on the web and `bridge: null` until phase 6. `exit` is never sent on iOS or the web, where winit's run does not return. A panic inside winit's callbacks on macOS cascades into more panics and an abort (134), so several `panic` events can arrive: report the first. On the web, the first `ready` gives the canvas attribute size, which can differ from the page's. On Android, the sysprop `debug.iced.backend` chooses the renderer when `ICED_BACKEND` is unset.
 
 If no event arrives, icm uses platform probes and reports `ready.source = "probe"`. This covers today's Tawara pin and release builds that have not opted in. If no ready signal arrives while the app is alive, the result is `run.not_ready` (10).
 
@@ -1849,9 +1858,9 @@ Estimates are focused engineer-days with agent help. The acceptance scripts live
 
 **Acceptance:**
 ```sh
-cargo check -p iced_winit --target aarch64-apple-ios-sim && cargo check -p iced_winit --target aarch64-linux-android
+cargo check -p iced --target aarch64-apple-ios-sim && cargo check -p iced --target aarch64-linux-android   # iced_winit alone enables no Android activity
 cargo build -p app
-./target/debug/app 2> "$ACCEPT/ev.log" & P=$!                                         # debug desktop emits ready
+ICM_EVENTS=1 ./target/debug/app 2> "$ACCEPT/ev.log" & P=$!                           # events are opt-in (Appendix C 27)
 for i in $(seq 60); do grep -q '^ICM_EVENT {"v":1,"kind":"ready"' "$ACCEPT/ev.log" && break; sleep 1; done; kill "$P"
 grep -q '^ICM_EVENT {"v":1,"kind":"ready"' "$ACCEPT/ev.log"
 ICED_TEST_BACKEND=tiny-skia cargo test -p app --test icm                            # runs tests/flows/*.ice
