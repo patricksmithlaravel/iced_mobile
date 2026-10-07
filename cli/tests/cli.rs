@@ -147,6 +147,62 @@ fn version_line() {
     assert!(rest.chars().next().unwrap().is_ascii_digit(), "{text}");
 }
 
+/// `--help` and `--version` keep the `--json` contract: NDJSON on stdout
+/// whose last line is the result, with the text in a field.
+#[test]
+fn help_and_version_answer_json_with_a_result() {
+    let sandbox = Sandbox::new();
+
+    let output = sandbox.run(&["--json", "--version"]);
+    let events = ndjson(&output);
+    assert_eq!(events[0]["type"], "start", "{events:?}");
+    let version = events.last().unwrap();
+    assert_eq!(version["exit"], 0, "{version}");
+    assert_eq!(version["command"], "version");
+    let line = version["version"].as_str().unwrap();
+    assert!(line.starts_with("icm 0.14.1-mobile."), "{version}");
+    assert_eq!(version["summary"], line);
+
+    // -q: the result line alone; -V is --version.
+    let events = ndjson(&sandbox.run(&["-V", "--json", "-q"]));
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["version"], line);
+
+    let help = result(&sandbox.run(&["--json", "-q", "--help"]));
+    assert_eq!(help["exit"], 0, "{help}");
+    assert_eq!(help["command"], "help");
+    let text = help["help"].as_str().unwrap();
+    assert!(text.contains("Usage: icm [OPTIONS] <COMMAND>"), "{text}");
+    assert!(!text.contains('\u{1b}'), "styled help: {text:?}");
+
+    // A subcommand's help, -h, and ICM_JSON=1.
+    let help = result(&sandbox.run(&["run", "--help", "--json"]));
+    assert_eq!(help["target"], "run", "{help}");
+    assert!(
+        help["help"]
+            .as_str()
+            .unwrap()
+            .contains("Usage: icm run [OPTIONS] <PLATFORM>"),
+        "{help}"
+    );
+    let output = sandbox
+        .command(&["stop", "-h"])
+        .env("ICM_JSON", "1")
+        .output()
+        .unwrap();
+    let help = result(&output);
+    assert!(
+        help["help"].as_str().unwrap().contains("Usage: icm stop"),
+        "{help}"
+    );
+
+    // Human mode is unchanged: the text, exit 0.
+    let output = sandbox.run(&["run", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout(&output).starts_with("Build, install, launch"));
+    assert!(!sandbox.runs().exists());
+}
+
 #[test]
 fn usage_errors_exit_two_with_a_result() {
     let sandbox = Sandbox::new();

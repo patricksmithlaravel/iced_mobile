@@ -321,26 +321,28 @@ pub fn usage_detail(rendered: &str) -> String {
     text.trim().trim_start_matches("error: ").to_string()
 }
 
-/// A parse failure: help and version print and exit 0; anything else is a
-/// usage error with a result object (exit 2).
+/// A parse failure: help and version exit 0 (under `--json` as a result
+/// object, [`help_or_version`]); anything else is a usage error with a
+/// result object (exit 2).
 fn usage_error(error: &clap::Error, argv: &[String]) -> Exit {
     use clap::error::ErrorKind;
+    let args = &argv[1.min(argv.len())..];
+    let json = args.iter().any(|a| a == "--json") || env_flag("ICM_JSON");
+    let quiet = args.iter().any(|a| is_quiet_flag(a));
+    let subcommand = args.iter().find(|arg| !arg.starts_with('-')).cloned();
+
     if matches!(
         error.kind(),
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
     ) {
-        let _ = error.print();
-        return Exit::Ok;
+        if !json {
+            let _ = error.print();
+            return Exit::Ok;
+        }
+        return help_or_version(error, argv, subcommand, quiet);
     }
 
-    let args = &argv[1.min(argv.len())..];
-    let json = args.iter().any(|a| a == "--json") || env_flag("ICM_JSON");
-    let quiet = args.iter().any(|a| is_quiet_flag(a));
-    let command = args
-        .iter()
-        .find(|arg| !arg.starts_with('-'))
-        .cloned()
-        .unwrap_or_else(|| "icm".to_string());
+    let command = subcommand.unwrap_or_else(|| "icm".to_string());
 
     let rep = Reporter::new(
         Mode {
@@ -370,6 +372,52 @@ fn usage_error(error: &clap::Error, argv: &[String]) -> Exit {
     };
     rep.finish(Err(IcmError::new(CheckId::UsageBadArgs, detail)
         .fix("Read the command's help.", &["icm --help"])))
+}
+
+/// `--help` or `--version` under `--json`: stdout stays NDJSON whose last
+/// line is the result (design §4), and the text clap would have printed is
+/// the result's `help` or `version` (exit 0). `command` is `help` or
+/// `version`; a subcommand's help names it in `target`.
+fn help_or_version(
+    error: &clap::Error,
+    argv: &[String],
+    subcommand: Option<String>,
+    quiet: bool,
+) -> Exit {
+    let version = error.kind() == clap::error::ErrorKind::DisplayVersion;
+    let (command, target) = if version {
+        ("version", None)
+    } else {
+        ("help", subcommand)
+    };
+    let rep = Reporter::new(
+        Mode {
+            json: true,
+            quiet,
+            ..Mode::default()
+        },
+        RunInfo {
+            run: rundir::new_run_id(command, target.as_deref()),
+            command: command.to_string(),
+            target: target.clone(),
+            argv: argv.to_vec(),
+            save: false,
+        },
+    );
+    rep.start();
+    // `Display` drops clap's styling.
+    let text = error.render().to_string().trim_end().to_string();
+    if version {
+        rep.set("version", serde_json::json!(text));
+        rep.summary(text);
+    } else {
+        rep.set("help", serde_json::json!(text));
+        rep.summary(match target {
+            Some(target) => format!("the help of `icm {target}`"),
+            None => "icm's help".to_string(),
+        });
+    }
+    rep.finish(Ok(()))
 }
 
 #[cfg(test)]
