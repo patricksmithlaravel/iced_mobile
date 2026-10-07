@@ -22,6 +22,54 @@ use crate::platform::{desktop, ios_sim};
 
 /// Runs a command.
 pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
+    // ios-sim and android match their own signatures in the system log and
+    // logcat; the desktop and web pipelines leave it to this.
+    let run_platform = match &command {
+        Command::Run(args) if matches!(args.platform, Platform::Desktop | Platform::Web) => {
+            Some(args.platform)
+        }
+        _ => None,
+    };
+    let result = route(ctx, command);
+    match run_platform {
+        Some(platform) => result.map_err(|error| with_signatures(error, platform)),
+        None => result,
+    }
+}
+
+/// A failed `icm run desktop|web`: the known failure signatures
+/// (design §13.4, [`crate::signatures`]) in the text files its evidence
+/// names (the app's stderr, logcat, the console, crash reports) become
+/// likely causes. The panic itself is left to the platform, which already
+/// names its location.
+fn with_signatures(mut error: IcmError, platform: Platform) -> IcmError {
+    let facts = crate::signatures::Facts {
+        platform: Some(platform.as_str()),
+        panicked: error.id == CheckId::RunAppPanicked.id(),
+        ..crate::signatures::Facts::default()
+    };
+    let mut seen: Vec<std::path::PathBuf> = Vec::new();
+    for evidence in &error.evidence {
+        let path = std::path::PathBuf::from(&evidence.path);
+        let text_like = !path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| matches!(ext, "png" | "jpg" | "jpeg" | "apk" | "so" | "wasm"));
+        if text_like && path.is_file() && !seen.contains(&path) {
+            seen.push(path);
+        }
+    }
+    for path in seen {
+        for found in crate::signatures::scan_file(&path, &facts) {
+            if found.name != "panic" && !error.likely_causes.contains(&found.cause) {
+                error.likely_causes.push(found.cause);
+            }
+        }
+    }
+    error
+}
+
+fn route(ctx: &mut Ctx, command: Command) -> Result<()> {
     let android = Some(Platform::Android);
     match command {
         Command::Explain(args) => explain::run(ctx, &args),
@@ -139,4 +187,36 @@ fn external(args: &[String]) -> Result<()> {
     }
     Err(IcmError::new(CheckId::UsageBadArgs, detail)
         .fix("Run `icm --help` for the commands.", &["icm --help"]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Evidence;
+
+    #[test]
+    fn failed_runs_get_the_signatures_in_their_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("app.stderr");
+        std::fs::write(
+            &log,
+            "thread 'main' panicked at src/main.rs:3:5:\nNo Unix display server backend is available\n",
+        )
+        .unwrap();
+        let error = IcmError::new(CheckId::RunAppPanicked, "the app panicked")
+            .evidence(Evidence::file(&log))
+            .evidence(Evidence::file(dir.path().join("missing.txt")));
+        let error = with_signatures(error, Platform::Desktop);
+        // The display-server cause, and not a second panic cause.
+        assert_eq!(error.likely_causes.len(), 1, "{:?}", error.likely_causes);
+        assert!(error.likely_causes[0].contains("x11 or wayland"));
+
+        // Nothing known: nothing added.
+        std::fs::write(&log, "all quiet\n").unwrap();
+        let quiet = with_signatures(
+            IcmError::new(CheckId::RunAppDied, "x").evidence(Evidence::file(&log)),
+            Platform::Web,
+        );
+        assert!(quiet.likely_causes.is_empty());
+    }
 }
