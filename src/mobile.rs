@@ -302,6 +302,58 @@
 //! - Web: the browser's console. The page's `rust_log` query parameter
 //!   takes the same directives (`?rust_log=debug`).
 //!
+//! # Clipboard
+//!
+//! [`clipboard::read`](crate::clipboard::read) and
+//! [`clipboard::write`](crate::clipboard::write) work on phones: they read
+//! and write the system's clipboard as text, through `ClipboardManager` on
+//! Android and `UIPasteboard` on iOS. The clipboard needs no window there,
+//! so a task from the boot function works too. Each system adds rules of
+//! its own:
+//!
+//! - Android 10 and later let only the app with the input focus read the
+//!   clipboard: a read in the background gives `None`. Android 12 and later
+//!   show a toast when an app reads what another app copied, and 13 and
+//!   later confirm a copy with an overlay. An item without text (a URI or an
+//!   `Intent`) reads as `None`, unless the clip says it is text.
+//! - iOS 16 and later ask the user ("Allow Paste") when an app reads text
+//!   that another app copied, unless they allowed it in Settings. The read
+//!   waits for the answer, and gives `None` when they decline.
+//!
+//! So read only when the user asked to paste, never at launch or on a
+//! timer. `clipboard::read_primary` gives `None` and
+//! `clipboard::write_primary` does nothing: phones have no primary
+//! selection. There is no long-press edit menu: give the fields that need
+//! it Copy and Paste buttons.
+//!
+//! ```no_run
+//! use iced::Task;
+//!
+//! #[derive(Default)]
+//! struct App {
+//!     address: String,
+//!     draft: String,
+//! }
+//!
+//! #[derive(Debug, Clone)]
+//! enum Message {
+//!     Copy,
+//!     Paste,
+//!     Pasted(Option<String>),
+//! }
+//!
+//! fn update(app: &mut App, message: Message) -> Task<Message> {
+//!     match message {
+//!         Message::Copy => iced::clipboard::write(app.address.clone()),
+//!         Message::Paste => iced::clipboard::read().map(Message::Pasted),
+//!         Message::Pasted(text) => {
+//!             app.draft = text.unwrap_or_default();
+//!             Task::none()
+//!         }
+//!     }
+//! }
+//! ```
+//!
 //! # Events for launchers
 //!
 //! A launcher such as `icm` learns that the app started, drew its first
@@ -579,6 +631,10 @@
 //! - **One window on Android.** Android gives an app one native window, so
 //!   a second `window::open` is refused with an error in the log, and its
 //!   task ends without an id.
+//! - **No edit menu.** A long press in a text field shows no menu and no
+//!   selection handles, and the copy, cut and paste shortcuts of text
+//!   fields never fire on phones. The [clipboard](#clipboard) itself works:
+//!   offer Copy and Paste buttons where they matter.
 //! - **Android activity destruction** ends the application, which starts
 //!   over in the next Activity ([Activity
 //!   destruction](#android-activity-destruction)). The manifest settings
@@ -594,7 +650,6 @@
 //!   fall back to Hiragino Sans, which lacks many simplified Chinese
 //!   characters (这, 们, ...); those show the missing-glyph box. Embed a font
 //!   for Chinese text.
-//! - **Not yet available on mobile:** the clipboard.
 //! - **Dark mode and the system bars.** On Android a dark-mode switch while
 //!   the app runs leaves the bars' icons as the launch theme had them, and
 //!   on iOS the status bar follows the system's mode even when the app

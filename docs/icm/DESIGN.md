@@ -903,7 +903,7 @@ Input on a device: `icm input android tap X Y`, `icm input web tap X Y`, `icm in
 - No signing assets? `icm release <target> --sign none` checks everything else.
 
 ## Known limitations of iced_mobile {{framework_tag}}
-{{docs/agents/limitations.md of that tag: safe area only from a running app; clipboard stub on mobile; Android IME
+{{docs/agents/limitations.md of that tag: safe area only from a running app; no edit menu on mobile; Android IME
 is key events only (no composition, accents and CJK input unreliable); a drag starting on a button does not
 scroll; text_editor and rich-text links ignore touch; dark-mode switches keep Android's bar icons; Lifecycle::Suspended
 means "inactive" on iOS and "window lost" on Android, so don't lock on it alone; one window on Android;

@@ -31,10 +31,10 @@ not upstream.
 | iOS (iPhone) | UIKit scene life cycle (required with the iOS 27 SDK), suspend/resume hook, logging to the unified log, Fira Sans by default with fallback to system fonts. `icm run ios-sim` builds the `.app`, installs and launches it on a managed simulator, screenshots it and reads its logs. `icm release ios` builds a signed, store-checked `.ipa` with its dSYM and the owner's upload commands; `icm run ios-device` installs and launches on an iPhone through `devicectl`. | Device runs and signed releases need the owner's certificates and profiles, and device runs are tested with stand-in tools only so far. No input on a physical iPhone. No tap, swipe, text, key or rotate input on the simulator yet (appearance, font scale, background and foreground work), so test the UI with `.ice` flows and `icm ui --headless`. No iPad. |
 | Android | `NativeActivity` (no Java code), suspend/resume, a destroyed Activity (the app starts over in the next one), logging to logcat, Fira Sans with system-font fallback. `icm run android` builds and signs a debug APK and runs it on a managed emulator or a device connected over adb, with screenshots, logs and tap, swipe, text and key input. `icm release android` builds, signs (with the owner's upload key, passwords from environment variables), gates and smoke-tests the Google Play `.aab`, and `icm test --on android --lifecycle` checks rotation, dark mode, font scale, Home, Back and a process kill. | Text input gets key events only (no composition). One window. |
 
-Both phones: `iced::mobile::safe_area()` reports the insets and the keyboard, and apps follow the
-system's dark mode; no clipboard yet. Apps cannot quit themselves, and some touch interactions
-differ from the desktop. The full list, with workarounds, is in
-[docs/agents/limitations.md](docs/agents/limitations.md).
+Both phones: `iced::mobile::safe_area()` reports the insets and the keyboard, apps follow the
+system's dark mode, and `iced::clipboard` reads and writes the system's clipboard. Apps cannot quit
+themselves, and some touch interactions differ from the desktop. The full list, with workarounds,
+is in [docs/agents/limitations.md](docs/agents/limitations.md).
 
 ## Quick start with icm
 
@@ -219,8 +219,8 @@ crates keep upstream's version numbers.
 - **Releases:** phases 2 to 5 (design §11 and §18) are in. Still to come: icm on Windows hosts,
   which the `.msi` and NSIS installers need, the lifecycle suite on the iOS Simulator and
   `icm ci init`. The owner's first uploads will show whether the stores accept icm's artifacts.
-- **Framework:** the clipboard on Android and iOS. The template padded with the device's safe
-  area, once headless runs can give each viewport its insets.
+- **Framework:** the template padded with the device's safe area, once headless runs can give
+  each viewport its insets.
 - **Agent bridge** (phase 6): tap, type and read the widget tree of a running app on every platform.
 - **CI:** the fork's workflows are in `.github/workflows` (design §17), but GitHub Actions does
   not run on this fork yet: they start once the owner enables Actions.
