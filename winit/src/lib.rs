@@ -1217,6 +1217,12 @@ async fn run_instance<P>(
                             continue;
                         }
 
+                        // Android: the system asks for a redraw when the
+                        // display turns by half a circle, which moves the
+                        // bars and the cutout without resizing the window.
+                        #[cfg(target_os = "android")]
+                        safe_area.redrawn();
+
                         let physical_size = window.state.physical_size();
                         let mut logical_size = window.state.logical_size();
 

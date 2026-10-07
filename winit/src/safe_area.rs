@@ -7,7 +7,9 @@
 //!
 //! - Android: the root view's `WindowInsets`, read through JNI, and the
 //!   content rect `NativeActivity` reports, which stands in for them while
-//!   they cannot be read (`safe_area/android.rs`).
+//!   they cannot be read (`safe_area/android.rs`). A turn of the display by
+//!   half a circle changes no size and no configuration, so a redraw makes
+//!   the shell compare the display's rotation as well.
 //! - iOS: winit's safe-area frame against the window's bounds, and the
 //!   keyboard's frame from UIKit's notification (`safe_area/ios.rs`).
 //! - Elsewhere: [`SafeArea::ZERO`], once.
@@ -99,7 +101,27 @@ impl Shell {
         self.read(window);
 
         #[cfg(target_os = "android")]
-        self.polls.changed(Instant::now());
+        {
+            self.polls.changed(Instant::now());
+
+            // The rotation this area belongs to, for `redrawn`.
+            if let Some(rotation) = android::rotation() {
+                let _ = self.polls.rotated(rotation);
+            }
+        }
+    }
+
+    /// Android: a window is about to be drawn.
+    ///
+    /// Turning the display by half a circle (from one landscape to the
+    /// other) moves the bars and the cutout to the other edges, but resizes
+    /// no window and changes no configuration: Android only asks for a
+    /// redraw. So after a redraw the next [`poll`](Self::poll) compares the
+    /// display's rotation with the last one, at most every 250 ms, and reads
+    /// the safe area again when it turned.
+    #[cfg(target_os = "android")]
+    pub(crate) fn redrawn(&mut self) {
+        self.polls.redrawn(Instant::now());
     }
 
     /// Reads again what may have changed since the event loop last turned,
@@ -112,7 +134,9 @@ impl Shell {
     /// - Android: when a poll is due: over the 600 ms after a change, and
     ///   every 250 ms while a window asks for the keyboard and for a second
     ///   after, since the keyboard moves no window and sends no event once
-    ///   the system draws edge to edge.
+    ///   the system draws edge to edge. And after a redraw, when the
+    ///   display's rotation differs from the last one read
+    ///   ([`redrawn`](Self::redrawn)).
     /// - Elsewhere: nothing.
     ///
     /// Called before the event loop's idle check, so that a poll is
@@ -162,7 +186,19 @@ impl Shell {
 
             self.polls.typing(typing, now);
 
-            if self.polls.due(now) {
+            let mut due = self.polls.due(now);
+
+            if self.polls.turn_due(now)
+                && let Some(rotation) = android::rotation()
+                && self.polls.rotated(rotation)
+            {
+                log::debug!("Safe area: the display turned ({rotation})");
+
+                self.polls.changed(now);
+                due = true;
+            }
+
+            if due {
                 for (_id, window) in windows.iter_mut() {
                     if window.surface.is_some() {
                         self.read(window);
@@ -393,6 +429,12 @@ struct Polls {
     typing: bool,
     /// The last keyboard read after every window let the keyboard go.
     typed_until: Option<Instant>,
+    /// After a redraw: when to compare the display's rotation.
+    turn: Option<Instant>,
+    /// When it was compared last.
+    compared: Option<Instant>,
+    /// The display's rotation, as read last.
+    rotation: Option<i32>,
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -405,6 +447,8 @@ impl Polls {
     const KEYBOARD_EVERY: Duration = Duration::from_millis(250);
     /// For how long after the last window let it go: it slides away.
     const KEYBOARD_AFTER: Duration = Duration::from_secs(1);
+    /// How often a redraw may compare the display's rotation.
+    const TURN_EVERY: Duration = Duration::from_millis(250);
 
     /// Something changed at `now`: read again while it settles.
     fn changed(&mut self, now: Instant) {
@@ -457,14 +501,47 @@ impl Polls {
         due
     }
 
-    /// When the next read is due, if one is.
+    /// A window was drawn at `now`: compare the display's rotation soon, no
+    /// sooner than [`TURN_EVERY`](Self::TURN_EVERY) after the last time.
+    fn redrawn(&mut self, now: Instant) {
+        if self.turn.is_none() {
+            let earliest = self
+                .compared
+                .map_or(now, |compared| compared + Self::TURN_EVERY);
+
+            self.turn = Some(earliest.max(now));
+        }
+    }
+
+    /// Whether the display's rotation is to be compared at `now`.
+    fn turn_due(&mut self, now: Instant) -> bool {
+        match self.turn {
+            Some(at) if at <= now => {
+                self.turn = None;
+                self.compared = Some(now);
+
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The display's rotation is `rotation`: whether it turned since the
+    /// last one read.
+    fn rotated(&mut self, rotation: i32) -> bool {
+        self.rotation
+            .replace(rotation)
+            .is_some_and(|last| last != rotation)
+    }
+
+    /// When the next read or comparison is due, if one is.
     fn next(&self) -> Option<Instant> {
         let settle = self.settle.map(|(next, _last)| next);
 
-        match (settle, self.keyboard) {
-            (Some(settle), Some(keyboard)) => Some(settle.min(keyboard)),
-            (settle, keyboard) => settle.or(keyboard),
-        }
+        [settle, self.keyboard, self.turn]
+            .into_iter()
+            .flatten()
+            .min()
     }
 }
 
@@ -614,6 +691,39 @@ mod tests {
 
         assert_eq!(reads, 6);
         assert!(now <= at(600));
+    }
+
+    #[test]
+    fn android_polls_compare_the_rotation_after_a_redraw() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut polls = Polls::default();
+
+        // The rotation of the first read is no turn.
+        assert!(!polls.rotated(1));
+
+        // A redraw compares at once, the first time.
+        polls.redrawn(start);
+        assert_eq!(polls.next(), Some(start));
+        assert!(polls.turn_due(start));
+        assert!(!polls.rotated(1));
+        assert_eq!(polls.next(), None);
+
+        // Frames 16 ms apart compare once every 250 ms.
+        polls.redrawn(at(16));
+        assert_eq!(polls.next(), Some(at(250)));
+        assert!(!polls.turn_due(at(32)));
+        polls.redrawn(at(32));
+        assert_eq!(polls.next(), Some(at(250)));
+        assert!(polls.turn_due(at(250)));
+
+        // From ROTATION_90 to ROTATION_270: a turn, once.
+        assert!(polls.rotated(3));
+        assert!(!polls.rotated(3));
+
+        // A redraw long after compares at once again.
+        polls.redrawn(at(2000));
+        assert!(polls.turn_due(at(2000)));
     }
 
     #[test]

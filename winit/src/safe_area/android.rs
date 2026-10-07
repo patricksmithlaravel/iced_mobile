@@ -6,7 +6,8 @@
 //! last, an immutable object, and checks no thread. It is read when an event
 //! announces a change and while a poll is due, never per frame. Until it can
 //! be read (no view yet, a Java exception), the content rect stands in for
-//! the bars.
+//! the bars. The display's rotation, which a redraw makes the shell compare
+//! at most every 250 ms, takes three calls (`Display.getRotation`).
 
 // JNI is reached only through `jni`'s calls; each unsafe one says why it is
 // sound.
@@ -78,6 +79,42 @@ pub(super) fn read(window: &winit::window::Window) -> Option<Physical> {
         [content.left, content.top, content.right, content.bottom],
         root,
     )
+}
+
+/// The rotation of the Activity's display, `Surface.ROTATION_0` to
+/// `ROTATION_270` (0 to 3), or `None` when it cannot be read.
+///
+/// `Display.getRotation` answers from the display information the process
+/// keeps, which the system updates before it asks the window to redraw for
+/// the new rotation.
+pub(super) fn rotation() -> Option<i32> {
+    let rotation = with_activity(|env, activity| {
+        let manager = env
+            .call_method(
+                activity,
+                jni_str!("getWindowManager"),
+                jni_sig!("()Landroid/view/WindowManager;"),
+                &[],
+            )?
+            .l()?;
+
+        let display = env
+            .call_method(
+                &manager,
+                jni_str!("getDefaultDisplay"),
+                jni_sig!("()Landroid/view/Display;"),
+                &[],
+            )?
+            .l()?;
+
+        int(env, &display, jni_str!("getRotation"))
+    });
+
+    rotation
+        .inspect_err(|error| {
+            log::debug!("Safe area: the display's rotation: {error}");
+        })
+        .ok()
 }
 
 /// The insets of the Activity's root view, or `None` before the view is
