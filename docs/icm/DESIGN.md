@@ -2,7 +2,7 @@
 
 # icm: the iced_mobile app tool and template (final design)
 
-Design only, 2026-10-06. Nothing in `/Users/patrickzweil/iced_mobile`, `~/Tawara-mobile` or any other repo was changed.
+Since then, phases 0 and 1 (the framework prerequisites and the dev loop) have been built and released as `v0.14.1-mobile.1`. Phases 2 to 5 (releases) are still plans.
 
 **Evidence tags.** **[V]** means verified on this Mac, by the research brief, by a judge or during this synthesis. **[S]** means it comes from a source cited in the research brief. **[I]** means inference that has not been tested yet. Every [I] has a spike or CI check in §18.
 
@@ -14,13 +14,13 @@ Design only, 2026-10-06. Nothing in `/Users/patrickzweil/iced_mobile`, `~/Tawara
 
 Every error the judges found is fixed. Appendix A lists each one and where it is resolved.
 
-**State of the fork today [V].** Local `main` at `4ed24aa73` already contains:
+**State of the fork when this was written [V].** Local `main` at `4ed24aa73` already contained:
 - the P0 floors: winit 0.30.13, softbuffer 0.4.7, and the display-server exemption;
 - NativeActivity by default, plus `iced::mobile::{init_logger, set_android_app, on_lifecycle, AndroidApp}` and `iced::android_main!` (`33a00d56c`);
 - Fira Sans as the default font on Android and iOS (`4ba8c1edd`), with a fallback to system fonts (`5802255ff`);
 - the keep-alive guards (`476dff628`) and iOS Return/Tab mapping (`4ed24aa73`).
 
-None of this is pushed. The remote has only `tawara/0.14-mobile`, and no `v0.14.1-mobile.*` tag exists yet [V]. Phase 0 pushes it.
+None of this was pushed then: the remote had only `tawara/0.14-mobile`, and no `v0.14.1-mobile.*` tag existed [V]. Since then, `main` and the tag `v0.14.1-mobile.1` are on the remote.
 
 ---
 

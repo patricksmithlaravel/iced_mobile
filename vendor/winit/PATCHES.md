@@ -12,8 +12,9 @@ Rules:
 - Every patch is also kept as a file in `vendor/patches/`, so the tree can be
   rebuilt from a clean upstream tag.
 - Apps must not depend on crates.io `winit` themselves: two copies of winit in
-  one binary clash (duplicate Objective-C classes on iOS, two android-activity
-  glues on Android). Use the re-export `iced_winit::winit` instead.
+  one binary clash (duplicate Objective-C classes on iOS, and on Android a
+  second winit whose types iced never sees; only `AndroidApp` is shared). Use
+  the re-export `iced_winit::winit` instead.
 
 ## Patches
 
