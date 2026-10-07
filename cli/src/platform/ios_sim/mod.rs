@@ -34,6 +34,7 @@ pub mod macho;
 pub mod plist;
 pub mod session;
 pub mod simctl;
+pub mod store;
 
 use crate::cargo::{Invocation, Select};
 use crate::catalogue::CheckId;
@@ -448,8 +449,12 @@ fn choose_target(
             "icm doctor ios-sim --fix --yes   # xcodebuild -downloadPlatform iOS, about 8 GB",
         ])
     })?;
-    let device_type = simctl::choose_device_type(runtime, host.ios.simulator_type.as_deref())
-        .map_err(|detail| IcmError::new(CheckId::IosSimNotFound, detail))?;
+    let device_type = if args.store {
+        store::device_type(runtime)
+    } else {
+        simctl::choose_device_type(runtime, host.ios.simulator_type.as_deref())
+    }
+    .map_err(|detail| IcmError::new(CheckId::IosSimNotFound, detail))?;
 
     let existing = if args.fresh {
         None
@@ -1252,7 +1257,9 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         plan(
             &project,
             &xcode,
-            args.sim.as_deref().or(args.device.as_deref()),
+            args.sim.as_deref().or(args.device.as_deref()).or(args
+                .store
+                .then_some("<the store-size simulator: the newest iPhone Pro Max>")),
             true,
         )
         .report(ctx);
@@ -1891,11 +1898,16 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
             &[(
                 "ios-sim.screenshot",
                 format!(
-                    "xcrun simctl io <the session's simulator> screenshot into {}",
+                    "xcrun simctl io <the session's simulator> screenshot into {}{}",
                     args.out
                         .as_deref()
                         .map(crate::paths::display)
-                        .unwrap_or_else(|| "the run directory".to_string())
+                        .unwrap_or_else(|| "the run directory".to_string()),
+                    if args.store {
+                        "; --store: kept as an opaque PNG in target/icm/store/ios/ when App Store Connect takes its size"
+                    } else {
+                        ""
+                    }
                 ),
             )],
         );
@@ -1951,6 +1963,15 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
             )
         })?;
         ctx.rep.artifact("out", out);
+    }
+    if args.store {
+        let _ = store::keep(
+            ctx,
+            &project,
+            &run_dir.join(format!("{name}.png")),
+            &name,
+            &session.device.name,
+        )?;
     }
     let alive = session.app_alive();
     ctx.rep.set(

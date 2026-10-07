@@ -86,7 +86,10 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
   ignored, or a `std::sync::Once`. A second `env_logger::init()` panics, and the app crashes.
 
 ## Releases belong to the owner
-- This icm builds and runs development builds. Store packages come with a later icm.
+- `icm release ios --sign none --json -q` builds and checks the App Store `.ipa` without the
+  owner's certificates; a signed release, `UPLOAD.md` and `upload.sh` are the owner's. App Store
+  screenshots: `icm run ios-sim --store`, then `icm shot ios-sim --store --name <screen>`. The
+  other stores' packages come with a later icm.
 - NEVER upload, publish or notarize anything, and never run `altool`, `notarytool`, `fastlane`,
   `wrangler` or any other command that does.
 - Signing identities, profiles, keystores and their passwords are the owner's. Don't create or guess them.

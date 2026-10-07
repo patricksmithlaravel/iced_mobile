@@ -397,3 +397,82 @@ fn usage_environment_and_dry_runs() {
     );
     assert!(!fake.xcrun_log().contains("launch"));
 }
+
+#[test]
+fn store_screenshots_need_a_store_size_simulator() {
+    let fake = Fake::new();
+    let iphone = |name: &str| {
+        json!({"name": name, "productFamily": "iPhone",
+               "identifier": format!("com.apple.CoreSimulator.SimDeviceType.{}", name.replace(' ', "-"))})
+    };
+    let types = [
+        iphone("iPhone 17"),
+        iphone("iPhone 17 Pro Max"),
+        iphone("iPhone 16 Pro Max"),
+    ];
+    write_json(
+        &fake.state.join("runtimes.json"),
+        &json!({"runtimes": [{
+            "isAvailable": true, "version": "27.0", "buildversion": "24A434", "platform": "iOS",
+            "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0", "name": "iOS 27.0",
+            "supportedDeviceTypes": types
+        }]}),
+    );
+    write_json(
+        &fake.state.join("devicetypes.json"),
+        &json!({"devicetypes": types}),
+    );
+    write_json(
+        &fake.state.join("devices-created.json"),
+        &json!({"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
+            {"udid": "FAKE-UDID", "name": "icm-iphone-17-pro-max-ios-27.0", "state": "Shutdown", "isAvailable": true,
+             "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max",
+             "dataPath": fake.state.join("device-data").display().to_string()}
+        ]}}),
+    );
+    let mut screen = image::Rgba::filled(1320, 2868, [255, 255, 255, 255]);
+    for y in 300..420 {
+        for x in 100..1200 {
+            screen.set(x, y, [80, 90, 240, 255]);
+        }
+    }
+    image::write_png(&fake.state.join("screen.png"), &screen, true).unwrap();
+
+    let run = fake.result("ok", &["run", "ios-sim", "--store", "--json", "-q"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(run["device"]["name"], "icm-iphone-17-pro-max-ios-27.0");
+    assert!(fake.xcrun_log().contains(
+        "simctl create icm-iphone-17-pro-max-ios-27.0 com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max"
+    ));
+
+    let shot = fake.result(
+        "ok",
+        &[
+            "shot", "ios-sim", "--store", "--name", "home", "--json", "-q",
+        ],
+    );
+    assert_eq!(shot["exit"], 0, "{shot}");
+    assert_eq!(shot["store"]["class"], "6.9-inch");
+    let kept = fake.path(&shot["artifacts"]["store_screenshot"]);
+    assert!(
+        kept.ends_with("target/icm/store/ios/home-1320x2868.png"),
+        "{}",
+        kept.display()
+    );
+    // An RGB PNG: IHDR's colour type (byte 25) is 2, no alpha channel.
+    assert_eq!(std::fs::read(&kept).unwrap()[25], 2);
+
+    // A screen App Store Connect does not take.
+    let small = image::Rgba::filled(1206, 2622, [255, 255, 255, 255]);
+    image::write_png(&fake.state.join("screen.png"), &small, false).unwrap();
+    let refused = fake.result("ok", &["shot", "ios-sim", "--store", "--json", "-q"]);
+    assert_eq!(refused["exit"], 7, "{refused}");
+    assert_eq!(refused["errors"][0]["id"], "ios.shot.store_size");
+    assert!(
+        refused["errors"][0]["fix"]["commands"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("icm run ios-sim --store")
+    );
+    let _ = fake.result("ok", &["stop", "ios-sim", "--json", "-q"]);
+}

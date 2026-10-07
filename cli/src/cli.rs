@@ -516,6 +516,9 @@ pub struct RunArgs {
     /// Android: install through an .aab and bundletool
     #[arg(long)]
     pub from_aab: bool,
+    /// iOS Simulator: a store-size iPhone (the newest Pro Max), for `icm shot ios-sim --store`
+    #[arg(long)]
+    pub store: bool,
 }
 
 /// `icm stop`.
@@ -573,6 +576,9 @@ pub struct ShotArgs {
     /// Where headless renders go
     #[arg(long)]
     pub out_dir: Option<PathBuf>,
+    /// iOS Simulator: keep the capture as an App Store screenshot (needs `icm run ios-sim --store`)
+    #[arg(long)]
+    pub store: bool,
 }
 
 /// A theme.
