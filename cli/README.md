@@ -54,6 +54,10 @@ cargo test
 | `preview.rs` | after a capture: PNG decode, `screen.preview.png`, blank detection (`run.screen_blank`) |
 | `sessions.rs` | `target/icm/sessions/<platform>.json` records: write (mode 0600), list, alive (pid plus a command-line marker), terminate |
 | `web/` | the web platform: build, wasm-bindgen and the site (`site.rs`); the detached session host (`host.rs`) with its std server (`server.rs`), headless Chrome over `--remote-debugging-pipe` (`cdp.rs`) and console capture (`console.rs`); the control client (`client.rs`); viewports (`viewport.rs`) |
+| `raster.rs` | screenshots as pixels: PNG decode/encode, the preview, blank detection (`raster::examine` for every capture) |
+| `harness/` | the app's headless harness (`tests/icm.rs`, protocol 1): build it, run `icm-shot`/`icm-tree`/`icm-ice`, judge the answer; `libtest.rs` reads `cargo test` output |
+| `signatures.rs` | known failure signatures (design §13.4) → `likely_causes`; `signatures::annotate(error, text, &Facts)` |
+| `hooks.rs` | project hooks, `[checks] <platform>` scripts; `run` calls `hooks::run(ctx, &HookContext)` after a launch |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
 | `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices`/`doctor` for Android: APK pipeline, managed AVD, adb, logcat, session (`android/mod.rs` has the module map) |
 
@@ -101,7 +105,11 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   wasm32 target.
 - `icm __test <scenario>` (hidden) exercises the core end to end: `sleep`
   (timeouts, signals, `--detach`), `panic`, `fail <id>`, `checks`, `plan`,
-  `project`, `lock`, `deployment`, `busy` (the signal watchdog).
+  `project`, `lock`, `deployment`, `busy` (the signal watchdog), `hooks
+  <platform>` (the project's `[checks]` scripts, without a device).
+- Harness commands (`test`, `shot --headless`, `ui`) run against a fake
+  cargo and a fake harness in `tests/harness.rs`; the real one is the
+  template's.
 - Fake tools: `ICM_TOOL_<NAME>=/path/to/script` replaces any external tool
   (`xcrun`, `adb`, `cargo`, ...).
 - `tests/project.rs` covers `new`, `check`, `doctor`, `stop`/`ps` and
@@ -122,5 +130,6 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 | `ICM_TOOL_<NAME>` | the path of an external tool |
 | `ICM_CHROME` | the Chrome executable |
 | `ANDROID_USER_HOME`, `ANDROID_AVD_HOME` | where the debug keystore and AVDs live (default `~/.android`, `~/.android/avd`); tests point them at a temp dir |
+| `ICED_TEST_BACKEND` | the backend the app's harness draws with (default `tiny-skia`) |
 | `ICM_BUILD_FRAMEWORK` | at build time: force the default framework pin (`tag:`/`rev:`/`path:`) |
 | `ICM_RUN_ID`, `ICM_RUN_DIR`, `ICM_RUN_ROOT`, `ICM_DETACHED` | internal: a detached child's run |

@@ -321,7 +321,10 @@ impl Command {
 
     /// Whether the command prints content on stdout in human mode.
     pub fn is_content(&self) -> bool {
-        matches!(self, Command::Explain(_) | Command::Print(_) | Command::Ps)
+        matches!(
+            self,
+            Command::Explain(_) | Command::Print(_) | Command::Ps | Command::Ui(_)
+        )
     }
 }
 
@@ -881,6 +884,12 @@ pub enum Scenario {
         #[arg(value_parser = duration)]
         duration: Duration,
     },
+    /// Run the project's [checks] hooks for a platform, as `run` does after a launch
+    Hooks {
+        /// The platform
+        #[arg(value_enum)]
+        platform: Platform,
+    },
 }
 
 impl Scenario {
@@ -896,6 +905,7 @@ impl Scenario {
             Scenario::Lock { .. } => "lock",
             Scenario::Deployment { .. } => "deployment",
             Scenario::Busy { .. } => "busy",
+            Scenario::Hooks { .. } => "hooks",
         }
     }
 }

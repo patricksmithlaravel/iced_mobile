@@ -5,10 +5,12 @@ pub mod check;
 pub mod detach;
 pub mod doctor;
 pub mod explain;
+pub mod headless;
 pub mod new;
 pub mod print;
 pub mod selftest;
 pub mod stop;
+pub mod test;
 pub mod wait;
 
 use crate::catalogue::CheckId;
@@ -91,11 +93,12 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
         Command::Stop(args) => stop::stop(ctx, &args),
         Command::Ps => stop::ps(ctx),
         Command::Devices(_) => not_implemented("devices"),
+        Command::Shot(args) if args.headless => headless::shot(ctx, &args),
         Command::Shot(_) => not_implemented("shot"),
         Command::Logs(_) => not_implemented("logs"),
         Command::Input(_) => not_implemented("input"),
-        Command::Ui(_) => not_implemented("ui"),
-        Command::Test(_) => not_implemented("test"),
+        Command::Ui(args) => headless::ui(ctx, &args),
+        Command::Test(args) => test::run(ctx, &args),
         Command::Clean(_) => not_implemented("clean"),
     }
 }

@@ -97,6 +97,23 @@ pub fn run(ctx: &mut Ctx, args: SelfTestArgs) -> Result<()> {
             }
             Ok(())
         }
+        Scenario::Hooks { platform } => {
+            // What `run` hands the hooks, with icm's own pid standing in for
+            // the app's.
+            let context = crate::hooks::HookContext {
+                platform: platform.as_str().to_string(),
+                pid: Some(std::process::id()),
+                ..crate::hooks::HookContext::default()
+            };
+            let reports = crate::hooks::run(ctx, &context)?;
+            if reports.is_empty() {
+                ctx.rep.summary(format!(
+                    "no [checks] hooks for {} in icm.toml",
+                    platform.as_str()
+                ));
+            }
+            Ok(())
+        }
         Scenario::Deployment { min_os } => {
             let project = ctx.project()?.clone();
             let package = project.package.name.clone();

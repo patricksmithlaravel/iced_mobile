@@ -677,6 +677,12 @@ catalogue! {
     InputUnsupported = "input.unsupported", Usage, Fail, Agent,
         "Input is not supported on that platform in this build",
         "Use `icm ui --headless` for desktop, or a platform that supports input.";
+    TestPassed = "test.passed", Ok, Pass, Agent,
+        "Tests passed",
+        "Nothing to fix.";
+    UiSelectorNotFound = "ui.selector_not_found", CheckFailed, Fail, Agent,
+        "No widget in the headless view matches the selector",
+        "Read `icm ui --headless tree` and match a widget's exact text or `#id`.";
 
     // ---- release ---------------------------------------------------------------------
     StoreNoAgentBridge = "store.no_agent_bridge", CheckFailed, Fail, Agent,
