@@ -543,8 +543,12 @@
 //! would crash on every relaunch that reuses it (after Back, say).
 //!
 //! [`android_main!`](crate::android_main) does steps 3 and 4 for you. The
-//! process ends instead after a panic, and when the application stops on
-//! its own while its Activity is still on screen.
+//! process ends instead after a panic on the thread that runs the
+//! application (`update`, `view` and the shell run there), and when the
+//! application stops on its own while its Activity is still on screen. A
+//! panic on another thread, such as the executor's, which runs tasks and
+//! subscriptions, ends that thread or task alone: the hook logs it, and the
+//! application goes on (see [`android_main!`](crate::android_main)).
 //!
 //! Launching the app again a moment after Back, before Android has destroyed
 //! the Activity it finished, starts a second Activity while the first one
@@ -1062,12 +1066,25 @@ fn log_panics() {
 ///    its location, go to logcat under the tag `iced` (`adb logcat -s
 ///    iced`), and panics to stderr (`RustStdoutStderr`) as well;
 /// 2. hands its `AndroidApp` to the shell with `mobile::set_android_app`;
-/// 3. calls your function, catching a panic, and logs how it ended;
+/// 3. calls your function, catching a panic on the thread that runs it, and
+///    logs how it ended;
 /// 4. returns if the Activity was destroyed, and otherwise ends the process
 ///    with `_exit`: status 0 when your function returned `Ok`, 1 when it
 ///    returned an error or panicked. `std::process::exit` would run the
 ///    process's exit handlers, which destroy what Android's renderer threads
 ///    still use, and those threads would abort with SIGABRT.
+///
+/// Step 3 catches only a panic on the thread of `android_main`, where your
+/// function runs the application: its boot function, `update`, `view`, the
+/// `subscription` function and the shell. A panic on any other thread (the
+/// executor's threads, which run tasks and subscription streams, or a thread
+/// the application spawned) is not caught there and does not end the
+/// process. The panic hook logs it, and only that thread unwinds (with
+/// `tokio`, only that task): the application goes on without what it was
+/// doing, so a task's message never arrives, or a subscription sends no
+/// more. Where such a panic must not pass unnoticed, catch it where it
+/// happens (`iced::futures::FutureExt::catch_unwind` on the task's future)
+/// and turn it into a message.
 ///
 /// Android calls `android_main` once per Activity, on a thread of its own,
 /// and may call it again in the same process when it starts a new Activity
@@ -1083,8 +1100,8 @@ fn log_panics() {
 /// the application could not go on (no usable graphics backend, for
 /// example), since `iced::exit` and closing the last window are ignored on
 /// Android, or your function did not run it. The process ends then, as it
-/// does after a panic, which may have left process-wide state (locks, the
-/// font system) half-updated for the next Activity.
+/// does after a panic that step 3 caught, which may have left process-wide
+/// state (locks, the font system) half-updated for the next Activity.
 ///
 /// To install a logger of your own (another tag, a filter, a `tracing`
 /// bridge), write `iced::android_main!(run, logger = false)`: step 1 then
@@ -1171,9 +1188,11 @@ pub fn __android_main(
 
     set_android_app(app);
 
-    // The hook has logged the panic. It may have left process-wide state
-    // (a poisoned lock, a half-updated font system) to the next Activity,
-    // so the process ends.
+    // A panic of this thread, which runs the event loop. The hook has
+    // logged it. It may have left process-wide state (a poisoned lock, a
+    // half-updated font system) to the next Activity, so the process ends.
+    // Other threads' panics never reach this: the hook logs them, and they
+    // end only their own thread.
     let Ok(result) = std::panic::catch_unwind(run) else {
         log::error!("the application panicked; ending the process");
         end_process(1);
