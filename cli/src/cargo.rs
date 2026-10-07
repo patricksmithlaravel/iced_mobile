@@ -471,6 +471,8 @@ pub struct Invocation {
     pub locked: bool,
     /// A separate `--target-dir`.
     pub target_dir: Option<PathBuf>,
+    /// More flags before `--`, e.g. `--no-run` or `--no-fail-fast`.
+    pub flags: Vec<String>,
     /// Arguments after `--`.
     pub trailing: Vec<String>,
     /// `--config <KEY=VALUE>` settings, e.g. icm's profiles
@@ -492,6 +494,7 @@ impl Invocation {
             offline: false,
             locked: false,
             target_dir: None,
+            flags: Vec::new(),
             trailing: Vec::new(),
             config: Vec::new(),
         }
@@ -535,6 +538,7 @@ impl Invocation {
         if let Some(dir) = &self.target_dir {
             args.extend(["--target-dir".to_string(), dir.display().to_string()]);
         }
+        args.extend(self.flags.iter().cloned());
         args.push("--message-format=json".to_string());
         if !self.trailing.is_empty() {
             args.push("--".to_string());
