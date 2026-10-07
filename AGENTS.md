@@ -109,6 +109,12 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
   - It creates the managed `icm-iphone-<n>-pro-max-ios-<version>` simulator when it is missing and
     shuts it down. The owner's signed release, upload and a physical iPhone are SKIP
     (`ICM_ACCEPT_DEVICE=1` runs on a connected, provisioned iPhone).
+- **`cli/tests/accept/phase3.sh`** covers the Google Play release and the lifecycle suite: a signed
+  release of the template with a throwaway upload key (random password in `ICM_TEST_STOREPASS`)
+  and its smoke install, the unset-password owner exit, `--sign none --apk`, the universal APK
+  installed on the managed emulator, `verify`, `run --from-aab`, `diagnose play` and
+  `test --on android --lifecycle`. Its setup and isolation are phase1.sh's; the owner's Play
+  Console uploads are SKIPs. It builds two ABIs in release, so run it in the background.
 
 ## Rules
 

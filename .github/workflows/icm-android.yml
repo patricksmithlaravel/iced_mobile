@@ -1,0 +1,150 @@
+# icm on a real Android emulator (docs/icm/DESIGN.md §17, the
+# "ubuntu-latest + KVM" job): doctor, the dev run, the lifecycle suite and
+# the Google Play release of the template with a throwaway upload key.
+# Nothing is uploaded: icm never uploads, and this job holds no store
+# credential.
+name: icm android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cli/**"
+      - "examples/app/**"
+      - "src/**"
+      - "winit/**"
+      - "vendor/**"
+      - ".github/workflows/icm-android.yml"
+  pull_request:
+    paths:
+      - "cli/**"
+      - "examples/app/**"
+      - "src/**"
+      - "winit/**"
+      - "vendor/**"
+      - ".github/workflows/icm-android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: icm-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ICM_CACHE_DIR: ${{ github.workspace }}/../icm-cache
+      ICM_HOST_CONFIG: ${{ github.workspace }}/../icm-host/host.toml
+      ANDROID_USER_HOME: ${{ github.workspace }}/../android-home
+      ANDROID_AVD_HOME: ${{ github.workspace }}/../android-home/avd
+      DEMO: ${{ github.workspace }}/../demo
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+
+      # The emulator needs hardware acceleration: the runner's /dev/kvm,
+      # opened to the runner user.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install icm from this checkout
+        run: |
+          cargo install --locked --path cli --root "$RUNNER_TEMP/icm"
+          echo "$RUNNER_TEMP/icm/bin" >> "$GITHUB_PATH"
+
+      - name: New app from the template
+        run: |
+          mkdir -p "$ICM_CACHE_DIR" "$(dirname "$ICM_HOST_CONFIG")" "$ANDROID_AVD_HOME"
+          icm new "$DEMO" --id dev.ci.demo --framework "path:$GITHUB_WORKSPACE" --json -q | tee new.json
+          jq -e '.ok' new.json
+
+      # The runner image's Android SDK has its licences accepted, so
+      # `--fix --yes` may install the NDK, the platform, the emulator, the
+      # x86_64 system image and bundletool (pinned, sha256-checked). A
+      # runner image without accepted licences needs the owner's decision
+      # here (`sdkmanager --licenses`), which this workflow does not make.
+      - name: Doctor
+        working-directory: ${{ env.DEMO }}
+        run: |
+          icm doctor android --fix --yes --json -q | tee "$RUNNER_TEMP/doctor.json"
+          jq -e '.exit == 0' "$RUNNER_TEMP/doctor.json"
+
+      - name: Run on the managed emulator (x86_64 image)
+        working-directory: ${{ env.DEMO }}
+        run: |
+          icm run android --timeout 30m --json -q | tee "$RUNNER_TEMP/run.json"
+          jq -e '.ok and .process.ready.source == "icm_event"' "$RUNNER_TEMP/run.json"
+
+      - name: Lifecycle suite
+        working-directory: ${{ env.DEMO }}
+        run: |
+          icm test --on android --lifecycle --timeout 15m --json -q | tee "$RUNNER_TEMP/lifecycle.json"
+          jq -e '.ok and .lifecycle.failed == 0' "$RUNNER_TEMP/lifecycle.json"
+
+      - name: Unsigned release with a universal APK
+        working-directory: ${{ env.DEMO }}
+        run: |
+          # Not the template's placeholder icon: a plain 1024 px square.
+          python3 - <<'EOF'
+          import struct, zlib
+          size = 1024
+          row = b"\x00" + bytes([30, 90, 200, 255]) * size
+          def chunk(kind, data):
+              return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+          png += chunk(b"IDAT", zlib.compress(row * size, 9)) + chunk(b"IEND", b"")
+          open("assets/icon.png", "wb").write(png)
+          EOF
+          icm release android --sign none --apk --allow-dirty --timeout 45m --json -q | tee "$RUNNER_TEMP/release-unsigned.json"
+          jq -e '.ok and (.artifacts.aab | endswith("-unsigned.aab"))' "$RUNNER_TEMP/release-unsigned.json"
+
+      # A throwaway upload key: its password is random and lives only in
+      # this step's environment.
+      - name: Signed release with a throwaway upload key
+        working-directory: ${{ env.DEMO }}
+        run: |
+          ICM_TEST_STOREPASS="$(openssl rand -hex 16)"
+          export ICM_TEST_STOREPASS
+          keytool -genkeypair -keystore "$RUNNER_TEMP/up.jks" -storetype PKCS12 -alias upload -keyalg RSA -keysize 2048 \
+            -validity 365 -dname CN=test -storepass:env ICM_TEST_STOREPASS -keypass:env ICM_TEST_STOREPASS </dev/null
+          printf '\n[android.signing]\nupload = { keystore = "%s", alias = "upload", store_pass_env = "ICM_TEST_STOREPASS" }\n' "$RUNNER_TEMP/up.jks" >> icm.toml
+          icm release android --apk --allow-dirty --timeout 45m --json -q | tee "$RUNNER_TEMP/release.json"
+          jq -e '.ok and .release.signed and ((.checks.failed | length) == 0)' "$RUNNER_TEMP/release.json"
+          icm verify android --json -q | tee "$RUNNER_TEMP/verify.json"
+          jq -e '.ok' "$RUNNER_TEMP/verify.json"
+          if grep -rqF "$ICM_TEST_STOREPASS" target/icm "$RUNNER_TEMP"/*.json; then
+            echo "the store password was written to a file"
+            exit 1
+          fi
+          env -u ICM_TEST_STOREPASS icm release android --allow-dirty --no-smoke --json -q > "$RUNNER_TEMP/release-no-pass.json" || true
+          jq -e '.exit == 9 and .errors[0].id == "android.keystore.password_env_unset"' "$RUNNER_TEMP/release-no-pass.json"
+
+      - name: Stop everything
+        if: always()
+        working-directory: ${{ env.DEMO }}
+        run: icm stop --all --shutdown --json -q || true
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icm-android
+          path: |
+            ${{ runner.temp }}/*.json
+            ${{ env.DEMO }}/target/icm/latest/
+            ${{ env.DEMO }}/target/icm/runs/*/*.png
+            ${{ env.DEMO }}/target/icm/dist/latest/android/UPLOAD.md
+            ${{ env.DEMO }}/target/icm/dist/latest/android/artifacts.json
+          if-no-files-found: ignore
