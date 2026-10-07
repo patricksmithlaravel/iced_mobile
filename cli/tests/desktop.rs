@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "support/secret.rs"]
+mod secret;
+
 const BIN: &str = env!("CARGO_BIN_EXE_icm");
 
 struct Sandbox {
@@ -29,6 +32,11 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with(args, &[])
+    }
+
+    /// [`Sandbox::run`] with more variables in icm's environment.
+    fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
         let mut command = Command::new(BIN);
         let _ = command
             .args(args)
@@ -36,6 +44,7 @@ impl Sandbox {
             .env("ICM_CACHE_DIR", self.cache.path())
             .env("ICM_HOST_CONFIG", self.cache.path().join("no-host.toml"))
             .env("CARGO_TARGET_DIR", self.project.path().join("target"))
+            .envs(env.iter().copied())
             .stdin(Stdio::null());
         for var in [
             "ICM_JSON",
@@ -53,9 +62,14 @@ impl Sandbox {
 
     /// The result line of a `--json -q` run.
     fn result(&self, args: &[&str]) -> Value {
+        self.result_with(args, &[])
+    }
+
+    /// [`Sandbox::result`] with more variables in icm's environment.
+    fn result_with(&self, args: &[&str], env: &[(&str, &str)]) -> Value {
         let mut full = args.to_vec();
         full.extend(["--json", "-q"]);
-        let output = self.run(&full);
+        let output = self.run_with(&full, env);
         let text = String::from_utf8_lossy(&output.stdout).into_owned();
         let last = text.lines().last().unwrap_or_else(|| {
             panic!(
@@ -342,6 +356,68 @@ fn panics_exits_and_hangs_fail_with_exit_ten() {
     // A bad --env is a usage error.
     let bad = sandbox.result(&["run", "desktop", "--env", "NOEQUALS", "--no-build"]);
     assert_eq!(bad["exit"], 2);
+}
+
+/// What a command keeps in its run directory holds no secret the app
+/// logged: the value of a secret-named variable in icm's environment, which
+/// the app inherits and logs plain, in a JSON line, in an `ICM_EVENT` and in
+/// a panic, is `<redacted>` in the copies of its stdout and stderr, in
+/// `app.log` and `logs.ndjson`, the step logs, events and results, raw or
+/// escaped. The live files in `target/icm/sessions` are the app's own
+/// output and keep it.
+#[test]
+fn run_directories_keep_no_secret() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps(Vec::new());
+    let env = [(secret::NAME, secret::TOKEN)];
+    let icm = sandbox.project.path().join("target/icm");
+
+    let run = sandbox.result_with(&["run", "desktop", "--settle", "200ms"], &env);
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(pid);
+    let app_log = std::fs::read_to_string(sandbox.path(&run["artifacts"]["app_log"])).unwrap();
+    assert!(app_log.contains("signed in with <redacted>"), "{app_log}");
+    assert!(app_log.contains("{\"token\":\"<redacted>\"}"), "{app_log}");
+    let stderr = std::fs::read_to_string(sandbox.path(&run["artifacts"]["stderr"])).unwrap();
+    assert!(stderr.contains("token <redacted>"), "{stderr}");
+    let live = icm
+        .join("sessions/desktop")
+        .join(run["run"].as_str().unwrap());
+    assert!(secret::holds(&live.join("app.stdout")));
+    assert!(secret::holds(&live.join("app.stderr")));
+
+    let logs = sandbox.result_with(&["logs", "desktop"], &env);
+    assert_eq!(logs["exit"], 0, "{logs}");
+    assert!(
+        logs.to_string().contains("signed in with <redacted>"),
+        "{logs}"
+    );
+    assert_eq!(sandbox.result_with(&["stop", "desktop"], &env)["exit"], 0);
+    wait_dead(pid);
+
+    let leaked = sandbox.result_with(&["run", "desktop", "--env", "ICM_FIXTURE=leak"], &env);
+    assert_eq!(leaked["exit"], 10, "{leaked}");
+    assert_eq!(leaked["errors"][0]["id"], "run.app_panicked");
+    assert!(
+        leaked["errors"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("rejected token <redacted>"),
+        "{leaked}"
+    );
+    let stderr =
+        std::fs::read_to_string(sandbox.path(&leaked["errors"][0]["evidence"][0]["path"])).unwrap();
+    assert!(stderr.contains("rejected token <redacted>"), "{stderr}");
+
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    secret::assert_kept_nowhere(&icm.join("latest"));
+    let last = std::fs::read_to_string(icm.join("last.json")).unwrap();
+    assert!(
+        secret::forms()
+            .iter()
+            .all(|form| !last.contains(form.as_str()))
+    );
 }
 
 #[test]

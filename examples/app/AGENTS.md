@@ -50,7 +50,9 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 - Info.plist, AndroidManifest.xml, PrivacyInfo.xcprivacy and index.html are GENERATED from icm.toml on
   every build. Never create them; change icm.toml.
 - Outputs: `target/icm/latest/<platform>/` (screen.png, screen.preview.png, app.log, result.json); the
-  newest result of any command is `target/icm/last.json`.
+  newest result of any command is `target/icm/last.json`. Values of secret-named variables
+  (`*TOKEN*`, `*KEY*`, `*SECRET*`, `*PASS*`, `*PRIVATE*`) read `<redacted>` there and on stdout; the
+  live files icm reads in `target/icm/sessions/` are the app's own output, unredacted.
 - Flows: `tests/flows/*.ice`. A header, a `-----` line, then one instruction per line:
   ```
   viewport: 402x874

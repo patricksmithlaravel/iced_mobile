@@ -265,8 +265,19 @@ impl Drop for Running {
 }
 
 /// Runs the check. An `Err` is a failure of the check itself (no port,
-/// no Chrome, a DevTools error), not of the site.
+/// no Chrome, a DevTools error), not of the site. The console and Chrome's
+/// log it leaves in `options.dir` (a run directory) have the secret values
+/// icm knows redacted, whatever the outcome.
 pub fn run(target: &Target, options: &Options) -> Result<Report, String> {
+    let report = drive(target, options);
+    for name in ["console.ndjson", "chrome.log"] {
+        crate::process::redact_in_place(&options.dir.join(name));
+    }
+    report
+}
+
+/// [`run`] up to Chrome's exit.
+fn drive(target: &Target, options: &Options) -> Result<Report, String> {
     std::fs::create_dir_all(&options.dir)
         .map_err(|error| format!("cannot create {}: {error}", options.dir.display()))?;
     let console_path = options.dir.join("console.ndjson");

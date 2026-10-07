@@ -2,8 +2,9 @@
 //! process `icm run web` starts (design §3 "Sessions", §10.2 step 5).
 //!
 //! It serves the site on loopback, drives headless Chrome over the
-//! DevTools pipe, writes the page's console to `console.ndjson`, and
-//! answers icm's control requests (status, screenshot, input, stop) on
+//! DevTools pipe, writes the page's console to `console.ndjson` (as the
+//! page logged it; the copies icm keeps in run directories are redacted),
+//! and answers icm's control requests (status, screenshot, input, stop) on
 //! `POST /__icm/control`. It runs until `icm stop web`, a newer `icm run
 //! web` for the project, a signal, or Chrome exiting; then it closes Chrome
 //! and removes its session record.
@@ -106,17 +107,10 @@ pub fn page_url(port: u16, query: &[(String, String)], base_query: &str) -> Stri
     url
 }
 
-/// Percent-encodes a query component.
+/// Percent-encodes a query component ([`crate::process::url_encoded`],
+/// which the secret values' forms share).
 pub fn encode_component(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-_.~,".contains(&byte) {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
+    crate::process::url_encoded(text)
 }
 
 /// A random hex token from the system's random source.

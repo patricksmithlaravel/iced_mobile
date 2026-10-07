@@ -9,10 +9,12 @@
 //! stdout and stderr going to `app.stdout` and `app.stderr` in
 //! `target/icm/sessions/desktop/<run>/` (outside the run directories, so
 //! pruning never removes files the app still writes; the run directory
-//! gets a copy). It is ready on `ICM_EVENT ready`; an app that sends no events
-//! is ready when it is alive after 3 s and owns a window (`source:
-//! "probe"`). A panic, an exit or no first frame within `--wait-ready`
-//! fails the run (exit 10) and stops the app.
+//! gets a copy). The live files are the app's own output, unredacted; the
+//! copies, `app.log` and `logs.ndjson` have the secret values icm knows
+//! redacted ([`process::copy_redacted`]). It is ready on `ICM_EVENT
+//! ready`; an app that sends no events is ready when it is alive after 3 s
+//! and owns a window (`source: "probe"`). A panic, an exit or no first
+//! frame within `--wait-ready` fails the run (exit 10) and stops the app.
 //!
 //! The screenshot on macOS is `screencapture -l <window id>` after the
 //! Screen Recording preflight ([`macos`]); without that permission, or
@@ -181,7 +183,9 @@ fn prune_files(project: &Project, keep: &str) {
     }
 }
 
-/// Copies the app's live stdout and stderr into its run directory.
+/// Copies the app's live stdout and stderr into its run directory, with
+/// the secret values icm knows redacted (the live files stay the app's own
+/// output).
 fn snapshot(session: &Session) {
     for (from, name) in [
         (&session.stdout, "app.stdout"),
@@ -189,7 +193,7 @@ fn snapshot(session: &Session) {
     ] {
         let to = session.run_dir.join(name);
         if *from != to {
-            let _ = std::fs::copy(from, to);
+            let _ = process::copy_redacted(from, &to);
         }
     }
 }
@@ -1544,7 +1548,7 @@ fn read_records(session: &Session) -> (Vec<Record>, [Tail; 2]) {
 }
 
 /// Copies the app's output into the run directory and writes `app.log`
-/// and `logs.ndjson` there.
+/// and `logs.ndjson` there, all redacted.
 fn write_logs(ctx: &Ctx, session: &Session) {
     snapshot(session);
     let (records, _) = read_records(session);
@@ -1558,10 +1562,10 @@ fn write_logs(ctx: &Ctx, session: &Session) {
         lines.push_str(&record.to_json(Some(session.pid)).to_string());
         lines.push('\n');
     }
-    if std::fs::write(&app_log, text).is_ok() {
+    if process::write_redacted(&app_log, &text).is_ok() {
         ctx.rep.artifact("app_log", &app_log);
     }
-    if std::fs::write(&ndjson, lines).is_ok() {
+    if process::write_redacted(&ndjson, &lines).is_ok() {
         ctx.rep.artifact("logs", &ndjson);
     }
 }

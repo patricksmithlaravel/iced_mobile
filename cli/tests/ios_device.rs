@@ -14,6 +14,9 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[path = "support/secret.rs"]
+mod secret;
+
 const BIN: &str = env!("CARGO_BIN_EXE_icm");
 const TEAM: &str = "ABCDE12345";
 const UDID: &str = "00008150-001A2B3C4D5E6F70";
@@ -377,6 +380,67 @@ fn a_panic_on_the_device_is_reported() {
             .as_str()
             .unwrap()
             .contains("panicked at src/lib.rs:7:5")
+    );
+}
+
+/// What a command keeps in its run directory holds no secret the app
+/// logged on the device's console: the value of a secret-named variable in
+/// icm's environment, logged plain, as JSON, in an `ICM_EVENT` and in a
+/// panic, is `<redacted>` in the console's copy (which the evidence names),
+/// `app.log`, `logs.ndjson`, events and results. The session's console in
+/// `target/icm/sessions` is the app's own output and keeps it.
+#[test]
+fn run_directories_keep_no_secret() {
+    let mut device = Device::new();
+    device.set(secret::NAME, secret::TOKEN);
+    device.set("ICM_FAKE_SCENARIO", "leak");
+    let icm = device.dir().join("target/icm");
+
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let app_log = std::fs::read_to_string(device.abs(&run["artifacts"]["app_log"])).unwrap();
+    for line in [
+        "signed in with <redacted>",
+        "{\"token\":\"<redacted>\"}",
+        "token <redacted>",
+    ] {
+        assert!(app_log.contains(line), "{line}: {app_log}");
+    }
+    let live = icm
+        .join("sessions/ios-device")
+        .join(run["run"].as_str().unwrap());
+    assert!(secret::holds(&live.join("console.log")));
+
+    let logs = device.json(&["logs", "ios-device"]);
+    assert_eq!(logs["exit"], 0, "{logs}");
+    assert!(
+        logs["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["msg"] == "signed in with <redacted>"),
+        "{logs}"
+    );
+    assert_eq!(device.json(&["stop", "ios-device"])["exit"], 0);
+
+    device.set("ICM_FAKE_SCENARIO", "leak-panic");
+    let died = device.json(&["run", "ios-device"]);
+    assert_eq!(died["exit"], 10, "{died}");
+    assert_eq!(died["errors"][0]["id"], "run.app_panicked");
+    let evidence = device.abs(&died["errors"][0]["evidence"][0]["path"]);
+    assert!(
+        evidence.starts_with(device.abs(&died["run_dir"])),
+        "{evidence:?}"
+    );
+    let console = std::fs::read_to_string(&evidence).unwrap();
+    assert!(console.contains("rejected token <redacted>"), "{console}");
+
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    let last = std::fs::read_to_string(icm.join("last.json")).unwrap();
+    assert!(
+        secret::forms()
+            .iter()
+            .all(|form| !last.contains(form.as_str()))
     );
 }
 

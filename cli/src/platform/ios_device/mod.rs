@@ -22,6 +22,11 @@
 //!    three `devicectl device info processes` polls showing the app.
 //! 4. `devicectl device capture screenshot`, the preview, the session.
 //!
+//! The console in `target/icm/sessions/ios-device/<run>/` is the app's own
+//! output, unredacted. The run directory's `console.log` (which the
+//! evidence names), `app.log`, `logs.ndjson` and devicectl's `install.json`
+//! have the secret values icm knows redacted.
+//!
 //! Nothing here ever touches a simulator: devicectl's simulator entries are
 //! left out of the device list.
 
@@ -862,7 +867,7 @@ fn capture(ctx: &Ctx, xcode: &Xcode, udid: &str, png: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Writes `app.log` and `logs.ndjson` for the console into `dir`.
+/// Writes `app.log` and `logs.ndjson` for the console into `dir`, redacted.
 fn write_logs(files: &Path, dir: &Path, launched: &str, pid: Option<i32>) -> Vec<records::Record> {
     let mut parser = records::Parser::new(true, launched);
     let records = parser.parse(&console(files));
@@ -874,8 +879,8 @@ fn write_logs(files: &Path, dir: &Path, launched: &str, pid: Option<i32>) -> Vec
         .iter()
         .map(|r| format!("{}\n", record_json(r, pid)))
         .collect();
-    let _ = std::fs::write(dir.join("app.log"), log);
-    let _ = std::fs::write(dir.join("logs.ndjson"), ndjson);
+    let _ = process::write_redacted(&dir.join("app.log"), &log);
+    let _ = process::write_redacted(&dir.join("logs.ndjson"), &ndjson);
     records
 }
 
@@ -947,6 +952,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
             .arg(run_dir.join("install.json"))
             .timeout(Duration::from_secs(600)),
     )?;
+    process::redact_in_place(&run_dir.join("install.json"));
     if !outcome.success() {
         return Err(ctx.step_failure(
             "devicectl.install",
@@ -1005,13 +1011,21 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         .and_then(|start| start["pid"].as_i64())
         .map(|pid| pid as i32);
     let records = write_logs(&files, &run_dir, &launched, app_pid);
-    let _ = std::fs::copy(files.join("console.log"), run_dir.join("console.log"));
+    let console_copy = run_dir.join("console.log");
+    let _ = process::copy_redacted(&files.join("console.log"), &console_copy);
     ctx.rep.artifact("app_log", &run_dir.join("app.log"));
     ctx.rep.artifact("logs", &run_dir.join("logs.ndjson"));
 
     let ready = match ready {
         Ok(ready) => ready,
-        Err(error) => {
+        Err(mut error) => {
+            // The evidence names the redacted copy, not the live console.
+            let live = crate::paths::display(&files.join("console.log"));
+            for evidence in &mut error.evidence {
+                if evidence.path == live {
+                    evidence.path = crate::paths::display(&console_copy);
+                }
+            }
             let _ = session::terminate(console_pid, Duration::from_secs(3));
             ctx.rep.set(
                 "process",

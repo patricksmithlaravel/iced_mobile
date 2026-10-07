@@ -4,15 +4,19 @@
 //! cargo and wasm-bindgen are fakes (`ICM_TOOL_CARGO`,
 //! `ICM_TOOL_WASM_BINDGEN`): the fake wasm-bindgen writes a small
 //! JavaScript "app" that speaks the `ICM_EVENT` protocol, draws a canvas
-//! and logs the pointer and key events it receives, so the tests cover
-//! icm's server, session, DevTools pipe, readiness, screenshots and input
-//! in seconds without compiling iced. The Chrome tests skip (and say so)
-//! on a machine without Chrome or the wasm32 target.
+//! and logs the pointer and key events it receives (and an `api_token` its
+//! URL carries), so the tests cover icm's server, session, DevTools pipe,
+//! readiness, screenshots and input in seconds without compiling iced. The
+//! Chrome tests skip (and say so) on a machine without Chrome or the wasm32
+//! target.
 
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+#[path = "support/secret.rs"]
+mod secret;
 
 const BIN: &str = env!("CARGO_BIN_EXE_icm");
 
@@ -56,8 +60,16 @@ export default async function init() {
   const event = (json) => console.log("ICM_EVENT " + JSON.stringify(json));
   if (query.get("noready") === "1") return;
   event({v: 1, kind: "start", protocol: 1, framework: "test", pid: null, platform: "web", bridge: null});
+  const token = query.get("api_token");
+  if (token) {
+    console.log("signed in with " + token);
+    console.log(JSON.stringify({token}));
+    console.warn("token " + token);
+    event({v: 1, kind: "warning", code: "fixture.token", message: "token " + token});
+  }
   if (query.get("panic") === "1") {
-    event({v: 1, kind: "panic", message: "test panic", location: "src/lib.rs:7:5", thread: "main"});
+    const message = token ? "rejected token " + token : "test panic";
+    event({v: 1, kind: "panic", message, location: "src/lib.rs:7:5", thread: "main"});
     return;
   }
   const canvas = document.createElement("canvas");
@@ -138,9 +150,18 @@ impl Sandbox {
 
     /// Runs icm with `--json -q` and returns the result object.
     fn result(&self, args: &[&str]) -> Value {
+        self.result_with(args, &[])
+    }
+
+    /// [`Sandbox::result`] with more variables in icm's environment.
+    fn result_with(&self, args: &[&str], env: &[(&str, &str)]) -> Value {
         let mut full = args.to_vec();
         full.extend(["--json", "-q"]);
-        let output: Output = self.command(&full).output().unwrap();
+        let output: Output = self
+            .command(&full)
+            .envs(env.iter().copied())
+            .output()
+            .unwrap();
         let text = String::from_utf8_lossy(&output.stdout).into_owned();
         let result: Value = serde_json::from_str(text.trim()).unwrap_or_else(|error| {
             panic!(
@@ -420,6 +441,82 @@ fn run_web_reports_panics_and_pages_that_never_draw() {
 
     let stop = sandbox.result(&["stop", "web"]);
     assert_eq!(stop["exit"], 0);
+}
+
+/// What a command keeps in its run directory holds no secret the page
+/// logged: the value of a secret-named variable in icm's environment,
+/// handed to the page with `--env` (so percent-encoded in its URL) and
+/// logged plain, as JSON, in an `ICM_EVENT` warning and in a panic, is
+/// `<redacted>` in the console's copy, `logs.ndjson`, `app.log`, events
+/// and results, raw or escaped. The session's live console in
+/// `target/icm/sessions/web` is the page's own output and keeps it.
+#[test]
+fn run_directories_keep_no_secret() {
+    if let Some(reason) = skip_reason() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let env = [(secret::NAME, secret::TOKEN)];
+    let pair = format!("API_TOKEN={}", secret::TOKEN);
+    let icm = sandbox.project.path().join("target/icm");
+
+    let run = sandbox.result_with(
+        &[
+            "run", "web", "--port", "0", "--settle", "200ms", "--env", &pair,
+        ],
+        &env,
+    );
+    assert_eq!(run["exit"], 0, "{run}");
+    assert!(
+        run["artifacts"]["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("api_token=<redacted>"),
+        "{run}"
+    );
+    let app_log = std::fs::read_to_string(sandbox.path(&run["artifacts"]["app_log"])).unwrap();
+    assert!(app_log.contains("signed in with <redacted>"), "{app_log}");
+    assert!(app_log.contains("{\"token\":\"<redacted>\"}"), "{app_log}");
+    assert!(secret::holds(&icm.join("sessions/web/console.ndjson")));
+
+    let logs = sandbox.result_with(&["logs", "web", "--grep", "signed in|token"], &env);
+    assert_eq!(logs["exit"], 0, "{logs}");
+    assert_eq!(
+        logs["records"][0]["msg"], "signed in with <redacted>",
+        "{logs}"
+    );
+    let logs_file = std::fs::read_to_string(sandbox.path(&logs["artifacts"]["logs"])).unwrap();
+    assert!(logs_file.contains("token <redacted>"), "{logs_file}");
+
+    let panic = sandbox.result_with(
+        &[
+            "run",
+            "web",
+            "--no-build",
+            "--port",
+            "0",
+            "--env",
+            "PANIC=1",
+            "--env",
+            &pair,
+        ],
+        &env,
+    );
+    assert_eq!(panic["exit"], 10, "{panic}");
+    assert_eq!(
+        panic["errors"][0]["detail"],
+        "panicked at src/lib.rs:7:5: rejected token <redacted>"
+    );
+    assert_eq!(sandbox.result_with(&["stop", "web"], &env)["exit"], 0);
+
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    let last = std::fs::read_to_string(icm.join("last.json")).unwrap();
+    assert!(
+        secret::forms()
+            .iter()
+            .all(|form| !last.contains(form.as_str()))
+    );
 }
 
 #[test]

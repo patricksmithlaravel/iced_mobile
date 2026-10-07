@@ -12,10 +12,14 @@
 //! - is logged with its argv and environment delta, secrets redacted.
 //!
 //! The secret values icm knows ([`secret_values`]) are also what the
-//! reporter redacts from every event and result.
+//! reporter redacts from every event and result, and what every file icm
+//! keeps from a tool's or an app's output is redacted of
+//! ([`write_redacted`], [`copy_redacted`], [`redact_in_place`]).
 
 use crate::signals;
 use crate::time::{Utc, format_duration};
+use serde_json::Value;
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -476,12 +480,17 @@ fn secrets_for(cmd: &Cmd) -> Vec<String> {
     secret_values()
 }
 
+/// [`redact_text`] for bytes: bytes that are not UTF-8 stay as they are
+/// unless the text holds a secret.
 fn redact_bytes(bytes: Vec<u8>, secrets: &[String]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(&bytes);
-    if !secrets.iter().any(|secret| text.contains(secret.as_str())) {
+    if secrets.is_empty() {
         return bytes;
     }
-    redact_with(&text, secrets).into_bytes()
+    let text = String::from_utf8_lossy(&bytes);
+    match redact_text(&text, secrets) {
+        Cow::Borrowed(_) => bytes,
+        Cow::Owned(text) => text.into_bytes(),
+    }
 }
 
 /// Replaces each of `secrets` (longest first) in a text.
@@ -495,17 +504,109 @@ pub fn redact_with(text: &str, secrets: &[String]) -> String {
     text
 }
 
+/// Replaces each of `secrets` in the text of a file icm keeps: everywhere
+/// as text (in each form [`secret_values`] holds: raw, JSON-escaped,
+/// percent-encoded), then, in a line that is a JSON document with escapes
+/// (an NDJSON record, a line of `log show --style ndjson`), in its decoded
+/// strings, whatever escapes its encoder used. Such a line is written again
+/// as compact JSON.
+pub fn redact_text<'a>(text: &'a str, secrets: &[String]) -> Cow<'a, str> {
+    if secrets.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    let mut text = if secrets.iter().any(|secret| text.contains(secret.as_str())) {
+        Cow::Owned(redact_with(text, secrets))
+    } else {
+        Cow::Borrowed(text)
+    };
+    if text.contains('\\') {
+        let mut out = String::with_capacity(text.len());
+        let mut changed = false;
+        for line in text.split_inclusive('\n') {
+            let body = line.trim_end_matches(['\n', '\r']);
+            match redact_json_line(body, secrets) {
+                Some(json) => {
+                    out.push_str(&json);
+                    out.push_str(&line[body.len()..]);
+                    changed = true;
+                }
+                None => out.push_str(line),
+            }
+        }
+        if changed {
+            text = Cow::Owned(out);
+        }
+    }
+    text
+}
+
+/// A JSON document with escapes (a line of a file, or a string holding
+/// one), redacted; `None` when it is not one or holds no secret.
+fn redact_json_line(line: &str, secrets: &[String]) -> Option<String> {
+    let line = line.trim();
+    if !line.contains('\\') || !(line.starts_with('{') || line.starts_with('[')) {
+        return None;
+    }
+    let mut value: Value = serde_json::from_str(line).ok()?;
+    redact_json(&mut value, secrets).then(|| value.to_string())
+}
+
+/// Replaces each of `secrets` in every string of a JSON value, and says
+/// whether it found one. A string that is itself a JSON document with
+/// escapes (a raw `log` line that `icm logs ios-sim --raw` reports) is
+/// redacted in its decoded strings too, and written again as compact JSON.
+pub fn redact_json(value: &mut Value, secrets: &[String]) -> bool {
+    match value {
+        Value::String(text) => {
+            let mut found = secrets.iter().any(|secret| text.contains(secret.as_str()));
+            if found {
+                *text = redact_with(text, secrets);
+            }
+            if let Some(json) = redact_json_line(text, secrets) {
+                *text = json;
+                found = true;
+            }
+            found
+        }
+        Value::Array(items) => {
+            let mut found = false;
+            for item in items {
+                found |= redact_json(item, secrets);
+            }
+            found
+        }
+        Value::Object(map) => {
+            let mut found = false;
+            for item in map.values_mut() {
+                found |= redact_json(item, secrets);
+            }
+            found
+        }
+        _ => false,
+    }
+}
+
 /// Writes a text file icm keeps for reading later (a log, a copy of a
 /// device's output) with the secret values icm knows ([`secret_values`])
-/// replaced, as the reporter replaces them in every event and result: a
-/// file in the run directory must not keep what stdout hides.
+/// replaced ([`redact_text`]), as the reporter replaces them in every event
+/// and result: a file in the run directory must not keep what stdout hides.
 pub fn write_redacted(path: &Path, text: &str) -> io::Result<()> {
-    let secrets = secret_values();
-    if secrets.iter().any(|secret| text.contains(secret.as_str())) {
-        std::fs::write(path, redact_with(text, &secrets))
-    } else {
-        std::fs::write(path, text)
-    }
+    std::fs::write(path, redact_text(text, &secret_values()).as_bytes())
+}
+
+/// Copies a file into the run directory as [`write_redacted`] writes one:
+/// the copy of an app's live output, a crash report. A file that is not
+/// UTF-8 is copied byte for byte unless its text holds a secret.
+pub fn copy_redacted(from: &Path, to: &Path) -> io::Result<()> {
+    let bytes = std::fs::read(from)?;
+    std::fs::write(to, redact_bytes(bytes, &secret_values()))
+}
+
+/// Replaces the secret values icm knows in a file that a tool or a browser
+/// wrote into the run directory itself (devicectl's `--json-output`,
+/// Chrome's log).
+pub fn redact_in_place(path: &Path) {
+    redact_file(path, &secret_values());
 }
 
 fn redact_file(path: &Path, secrets: &[String]) {
@@ -523,7 +624,12 @@ fn redact_file(path: &Path, secrets: &[String]) {
 /// Starts a long-lived process in its own session (setsid), with stdin on
 /// `/dev/null` and its output appended to files. Returns its pid. icm does
 /// not wait for it; `icm stop` or the caller ends it.
+///
+/// The files are the process's own output, unredacted; the secret-named
+/// values it is given are remembered ([`secret_values`]), so the copies icm
+/// keeps of that output ([`copy_redacted`]) and the reporter leave them out.
 pub fn spawn_detached(cmd: &Cmd, stdout: &Path, stderr: &Path) -> io::Result<u32> {
+    remember_secrets(cmd);
     for path in [stdout, stderr] {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -806,6 +912,11 @@ pub fn redact_values(text: &str) -> String {
 /// environment (at least 6 bytes, not a path), and those it has handed to
 /// a child under a secret name (at least 4 bytes). A multi-line value also
 /// counts line by line, since output is read and reported by the line.
+/// Each also counts JSON-escaped, once and twice (a JSON line inside a JSON
+/// record), as serde and JavaScript write it and as Apple's `log` writes it
+/// (`/` as `\/`), since a line of an app's output or a tool's NDJSON can
+/// carry it that way, and percent-encoded, as a URL carries it
+/// ([`url_encoded`]).
 pub fn secret_values() -> Vec<String> {
     secret_registry()
         .lock()
@@ -850,19 +961,70 @@ fn remember_secrets(cmd: &Cmd) {
     }
 }
 
+/// Remembers a value icm hands to an app some other way than its
+/// environment (the web page's query) as a secret, when its name is a
+/// secret's (at least 4 bytes, as for a child's environment).
+pub fn remember_secret(name: &str, value: &str) {
+    if is_secret_name(name) {
+        let mut values = secret_registry()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        add_secret(&mut values, value, 4);
+    }
+}
+
 /// Adds a secret (and the lines of a multi-line one) at least `min` bytes
-/// long, keeping the list longest first.
+/// long, with their JSON-escaped and percent-encoded forms, keeping the
+/// list longest first.
 fn add_secret(values: &mut Vec<String>, value: &str, min: usize) {
     let lines = value
         .lines()
         .map(str::trim)
         .filter(|_| value.contains('\n'));
     for text in std::iter::once(value).chain(lines) {
-        if text.len() >= min && !values.iter().any(|known| known == text) {
-            values.push(text.to_string());
+        if text.len() < min {
+            continue;
+        }
+        // Escaped once (a JSON string) and twice (a JSON line inside a JSON
+        // record, a raw `log` line in a log), each also with `\/`.
+        let once = json_escaped(text);
+        let twice = json_escaped(&once);
+        let forms = [
+            text.to_string(),
+            once.replace('/', "\\/"),
+            twice.replace('/', "\\/"),
+            once,
+            twice,
+            url_encoded(text),
+        ];
+        for form in forms {
+            if !values.contains(&form) {
+                values.push(form);
+            }
         }
     }
     values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+}
+
+/// A text as it stands inside a JSON string (serde's escapes).
+fn json_escaped(text: &str) -> String {
+    let quoted = Value::String(text.to_string()).to_string();
+    quoted[1..quoted.len() - 1].to_string()
+}
+
+/// A text percent-encoded as a URL's query component (every byte but
+/// letters, digits and `-_.~,`), as icm writes the web page's query: a
+/// secret in a URL a result, a tool or an app's log names is in this form.
+pub fn url_encoded(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.~,".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// Quotes an argument for display in a POSIX shell.
@@ -1121,8 +1283,14 @@ mod tests {
             "-----BEGIN KEY-----\nAAAABBBBCCCC\r\nab\n-----END KEY-----",
             6,
         );
-        assert_eq!(values.len(), 4, "{values:?}");
-        assert!(values[0].contains('\n'));
+        // The value, escaped once and twice and percent-encoded, and its
+        // three long lines (two of them percent-encoded too).
+        assert_eq!(values.len(), 9, "{values:?}");
+        assert!(values.contains(&"-----BEGIN%20KEY-----".to_string()));
+        assert!(values.iter().any(|value| value.contains('\n')));
+        assert!(values.contains(
+            &"-----BEGIN KEY-----\\nAAAABBBBCCCC\\r\\nab\\n-----END KEY-----".to_string()
+        ));
         assert!(values.contains(&"AAAABBBBCCCC".to_string()));
         assert!(!values.contains(&"ab".to_string()));
         assert_eq!(
@@ -1137,6 +1305,69 @@ mod tests {
         add_secret(&mut values, "abcdef", 6);
         assert_eq!(values, ["abcdefghij", "abcdef"]);
         assert_eq!(redact_with("abcdefghij", &values), "<redacted>");
+    }
+
+    /// A secret that JSON escapes is found raw, escaped as serde and
+    /// JavaScript escape it, with `/` as `\/` (Apple's `log`), in a URL, and
+    /// in a JSON line under any other escape; other lines and bytes stay as
+    /// they are.
+    #[test]
+    fn escaped_secrets_are_redacted_in_files() {
+        let mut secrets = Vec::new();
+        add_secret(&mut secrets, "tok/se\"kr\\it-123456", 6);
+        assert_eq!(secrets.len(), 6, "{secrets:?}");
+        assert!(secrets.contains(&"tok\\/se\\\\\\\"kr\\\\\\\\it-123456".to_string()));
+        let text = concat!(
+            "raw: tok/se\"kr\\it-123456\n",
+            "ICM_EVENT {\"msg\":\"tok/se\\\"kr\\\\it-123456\"}\n",
+            "{\"eventMessage\":\"a tok\\/se\\\"kr\\\\it-123456 b\",\"n\":1}\n",
+            "{\"msg\":\"tok\\u002fse\\u0022kr\\u005cit-123456\"}\r\n",
+            "{\"msg\":\"fine \\/ here\"}\n",
+            "GET /?api_token=tok%2Fse%22kr%5Cit-123456&x=1\n",
+            "raw log line: {\"msg\":\"{\\\"t\\\":\\\"tok\\/se\\\\\\\"kr\\\\\\\\it-123456\\\"}\"}\n",
+            "the end",
+        );
+        let redacted = redact_text(text, &secrets);
+        assert_eq!(
+            redacted,
+            concat!(
+                "raw: <redacted>\n",
+                "ICM_EVENT {\"msg\":\"<redacted>\"}\n",
+                "{\"eventMessage\":\"a <redacted> b\",\"n\":1}\n",
+                "{\"msg\":\"<redacted>\"}\r\n",
+                "{\"msg\":\"fine \\/ here\"}\n",
+                "GET /?api_token=<redacted>&x=1\n",
+                "raw log line: {\"msg\":\"{\\\"t\\\":\\\"<redacted>\\\"}\"}\n",
+                "the end",
+            )
+        );
+        assert!(matches!(
+            redact_text("nothing here \\/", &secrets),
+            Cow::Borrowed(_)
+        ));
+
+        // A record whose string is a raw `log` line (`logs ios-sim --raw`)
+        // of a message in which the app wrote the secret as JSON: escaped
+        // three times in the file.
+        let app = format!(
+            "{{\"token\":{}}}",
+            Value::String("tok/se\"kr\\it-123456".into())
+        );
+        let line = serde_json::json!({ "eventMessage": app })
+            .to_string()
+            .replace('/', "\\/");
+        let record = format!("{}\n", serde_json::json!({ "msg": line }));
+        let redacted = redact_text(&record, &secrets);
+        assert!(!redacted.contains("it-123456"), "{redacted}");
+        let msg: Value = serde_json::from_str(&redacted).unwrap();
+        let line: Value = serde_json::from_str(msg["msg"].as_str().unwrap()).unwrap();
+        assert_eq!(line["eventMessage"], "{\"token\":\"<redacted>\"}");
+
+        let bytes = b"\xff\xfe binary \x00".to_vec();
+        assert_eq!(redact_bytes(bytes.clone(), &secrets), bytes);
+        let mut with = bytes.clone();
+        with.extend_from_slice(b" tok/se\"kr\\it-123456");
+        assert!(String::from_utf8_lossy(&redact_bytes(with, &secrets)).ends_with(" <redacted>"));
     }
 
     #[test]

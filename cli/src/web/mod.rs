@@ -28,6 +28,14 @@
 //! `icm shot web`, `icm input web`, `icm logs web` and `icm stop web` talk
 //! to the session; see [`client`]. With `--dry-run` each command prints
 //! its plan instead ([`plan`]) and starts nothing.
+//!
+//! The session's live files in `target/icm/sessions/web/` (`console.ndjson`,
+//! `chrome.log`, `session.log`) are the page's, Chrome's and the host's own
+//! output, unredacted. What a command keeps in its run directory (the
+//! console's copy, `logs.ndjson`, `app.log`; the serve check's console and
+//! Chrome log, [`smoke`]) has the secret values icm knows redacted, and a
+//! secret-named `--env` value, which reaches the page in its URL, is one of
+//! them.
 
 pub mod cdp;
 pub mod client;
@@ -46,7 +54,7 @@ use crate::catalogue::CheckId;
 use crate::cli::{BuildArgs, InputAction, InputArgs, Key, LogsArgs, RunArgs, ShotArgs, Theme};
 use crate::context::{Ctx, Project};
 use crate::error::{Check, Evidence, IcmError, Result};
-use crate::process::Cmd;
+use crate::process::{self, Cmd};
 use crate::screen::Space;
 use crate::tools::{self, Found};
 use client::Session;
@@ -794,7 +802,8 @@ fn wait_ready(ctx: &Ctx, session: &Session, wait: Duration) -> Result<Ready> {
 }
 
 /// Copies the session's console into the run directory as `console.ndjson`,
-/// `logs.ndjson` and the readable `app.log`; returns the copy.
+/// `logs.ndjson` and the readable `app.log`, redacted (the live console
+/// stays the page's own output); returns the copy.
 fn snapshot_console(ctx: &Ctx, session: &Session) -> Option<PathBuf> {
     let (Some(run_dir), Some(console_path)) = (ctx.rep.run_dir(), session.console()) else {
         return None;
@@ -808,9 +817,9 @@ fn snapshot_console(ctx: &Ctx, session: &Session) -> Option<PathBuf> {
         .iter()
         .map(|r| format!("{}\n", console::line(r)))
         .collect();
-    let _ = std::fs::write(run_dir.join("console.ndjson"), &ndjson);
-    let _ = std::fs::write(run_dir.join("logs.ndjson"), &ndjson);
-    let _ = std::fs::write(run_dir.join("app.log"), &log);
+    let _ = process::write_redacted(&run_dir.join("console.ndjson"), &ndjson);
+    let _ = process::write_redacted(&run_dir.join("logs.ndjson"), &ndjson);
+    let _ = process::write_redacted(&run_dir.join("app.log"), &log);
     ctx.rep.artifact("logs", &run_dir.join("logs.ndjson"));
     ctx.rep.artifact("app_log", &run_dir.join("app.log"));
     ctx.rep.artifact("console", &console_path);
@@ -889,6 +898,11 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     let viewport =
         Viewport::parse(args.viewport.as_deref().unwrap_or(viewport::DEFAULT)).map_err(bad_args)?;
     let query = env_query(&args.env)?;
+    // A secret-named pair reaches the page in its URL: its value is
+    // redacted from what the run keeps, as a child's environment is.
+    for (key, value) in &query {
+        process::remember_secret(key, value);
+    }
     let host = ctx.host()?.clone();
     let chrome = tools::chrome(&host, &ctx.env)?;
     let _lock = ctx.lock_platform(PLATFORM)?;
@@ -1324,8 +1338,8 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
             .iter()
             .map(|r| format!("{}\n", console::line(r)))
             .collect();
-        let _ = std::fs::write(run_dir.join("logs.ndjson"), ndjson);
-        let _ = std::fs::write(run_dir.join("app.log"), log);
+        let _ = process::write_redacted(&run_dir.join("logs.ndjson"), &ndjson);
+        let _ = process::write_redacted(&run_dir.join("app.log"), &log);
         ctx.rep.artifact("logs", &run_dir.join("logs.ndjson"));
         ctx.rep.artifact("app_log", &run_dir.join("app.log"));
     }

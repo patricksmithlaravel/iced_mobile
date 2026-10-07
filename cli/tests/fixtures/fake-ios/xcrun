@@ -2,18 +2,33 @@
 # A fake `xcrun` for icm's ios-sim tests: actool and the simctl subcommands
 # icm uses, with state in $ICM_FAKE_STATE. $ICM_FAKE_SCENARIO picks what the
 # launched "app" does: `ok` (draws), `panic` (panics and exits) or `silent`
-# (runs but sends no ICM_EVENT lines).
+# (runs but sends no ICM_EVENT lines). `leak` draws and `leak-panic` panics
+# like them, logging the secret in $ICM_TEST_API_TOKEN everywhere an app's
+# output goes: stdout, stderr (plain and as JSON), an ICM_EVENT warning,
+# the unified log (`log stream` and `log show`, which write `/` as `\/`)
+# and, for `leak-panic`, a crash report in ~/Library/Logs/DiagnosticReports.
 #
 # For the iOS release and ios-device tests it also fakes dsymutil (the
 # dSYM's DWARF file is a copy of the executable, so its LC_UUID matches;
 # ICM_FAKE_DSYM=empty writes no line table), dwarfdump --debug-line,
 # strip, assetutil (ICM_FAKE_ICON=clear reports a transparent icon) and
-# devicectl (devices from $S/devicectl-devices.json).
+# devicectl (devices from $S/devicectl-devices.json; `leak` and
+# `leak-panic` log the secret on the console too).
 S="$ICM_FAKE_STATE"
 {
   echo "$*"
   env | grep '^SIMCTL_CHILD_\|^DEVICECTL_CHILD_' | sort | sed 's/^/  env /'
 } >> "$S/xcrun.log"
+# The secret JSON-escaped, and as Apple's `log` writes it; and the app's
+# JSON line `{"token":"<secret>"}` as `log` writes it.
+tok_json=$(printf '%s' "${ICM_TEST_API_TOKEN:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+tok_log=$(printf '%s' "$tok_json" | sed -e 's/\//\\\//g')
+json_log=$(printf '{"token":"%s"}' "$tok_json" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\//\\\//g')
+# One unified-log line of the app; $2 is its message as `log` writes it.
+oslog_line() {
+  printf '{"eventType":"logEvent","subsystem":"iced","category":"app","messageType":"Default","processID":%s,"processImagePath":"\\/data\\/Fixture.app\\/fixture-app","timestamp":"%s","eventMessage":"%s"}\n' \
+    "${1:-0}" "$(date '+%Y-%m-%d %H:%M:%S.000000%z')" "$2"
+}
 
 tool="$1"
 shift
@@ -64,9 +79,16 @@ simctl)
     shift
     case "$1" in
     log)
+      case "$ICM_FAKE_SCENARIO" in leak*) leak=1 ;; *) leak="" ;; esac
       if [ "$2" = stream ]; then
         echo 'Filtering the log data using "fake"'
+        if [ -n "$leak" ]; then
+          oslog_line 0 "signed in with $tok_log"
+          oslog_line 0 "$json_log"
+        fi
         exec sleep 20
+      elif [ "$2" = show ] && [ -n "$leak" ]; then
+        oslog_line "$(cat "$S/app.pid" 2> /dev/null)" "the system saw $tok_log"
       fi
       ;;
     launchctl)
@@ -96,6 +118,37 @@ simctl)
     silent)
       nohup sleep 30 > /dev/null 2>&1 &
       pid=$!
+      ;;
+    leak | leak-panic)
+      if [ "$ICM_FAKE_SCENARIO" = leak ]; then
+        nohup sleep 30 > /dev/null 2>&1 &
+      else
+        sleep 1 > /dev/null 2>&1 &
+      fi
+      pid=$!
+      printf 'signed in with %s\n' "$ICM_TEST_API_TOKEN" > "$out"
+      {
+        printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":%s}\n' "$pid"
+        printf '{"token":"%s"}\n' "$tok_json"
+        printf 'ICM_EVENT {"v":1,"kind":"warning","code":"fixture.token","message":"token %s"}\n' "$tok_json"
+        if [ "$ICM_FAKE_SCENARIO" = leak ]; then
+          printf 'ICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n'
+        else
+          printf "\nthread 'main' panicked at src/lib.rs:7:5:\nrejected token %s\n" "$ICM_TEST_API_TOKEN"
+        fi
+      } > "$err"
+      if [ "$ICM_FAKE_SCENARIO" = leak-panic ]; then
+        reports="$HOME/Library/Logs/DiagnosticReports"
+        mkdir -p "$reports"
+        {
+          echo '{"app_name":"fixture-app","bundleID":"com.acme.fixture","platform":7}'
+          echo '{'
+          printf '  "pid" : %s,\n' "$pid"
+          echo '  "exception" : {"type":"EXC_CRASH","signal":"SIGABRT"},'
+          printf '  "asi" : {"libsystem_c.dylib":["abort() called","rejected token %s"]}\n' "$tok_log"
+          echo '}'
+        } > "$reports/fixture-app-2026-10-07-120000.ips"
+      fi
       ;;
     *)
       nohup sleep 30 > /dev/null 2>&1 &
@@ -164,6 +217,20 @@ devicectl)
       panic)
         printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":4242}\n\nthread '"'"'main'"'"' panicked at src/lib.rs:7:5:\nboom\n'
         exit 0
+        ;;
+      leak-panic)
+        printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":4242}\n'
+        printf 'signed in with %s\n{"token":"%s"}\n' "$ICM_TEST_API_TOKEN" "$tok_json"
+        printf "\nthread 'main' panicked at src/lib.rs:7:5:\nrejected token %s\n" "$ICM_TEST_API_TOKEN"
+        exit 0
+        ;;
+      leak)
+        echo $$ > "$S/device-app.pid"
+        printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":4242}\n'
+        printf 'signed in with %s\n{"token":"%s"}\n' "$ICM_TEST_API_TOKEN" "$tok_json"
+        printf 'ICM_EVENT {"v":1,"kind":"warning","code":"fixture.token","message":"token %s"}\n' "$tok_json"
+        printf 'ICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n'
+        exec sleep 30
         ;;
       *)
         echo $$ > "$S/device-app.pid"

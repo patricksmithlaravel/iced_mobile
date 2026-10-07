@@ -25,6 +25,13 @@
 //! `logs` re-reads the live sources ([`logs`]); `shot` captures the running
 //! simulator; `stop` terminates the app and the collector (`--shutdown`
 //! also shuts icm's simulator down; a `--fresh` one is deleted).
+//!
+//! The live files in `target/icm/sessions/ios-sim/<run>/` (the app's
+//! stdout and stderr, the collector's `oslog.ndjson`) are the app's and
+//! `log`'s own output, unredacted. What a command keeps in its run
+//! directory (their copies, `app.log`, `logs.ndjson`, `system.ndjson`, the
+//! crash reports) has the secret values icm knows redacted
+//! ([`process::write_redacted`], [`process::copy_redacted`]).
 
 pub mod bundle;
 pub mod image;
@@ -1109,7 +1116,8 @@ fn system_log(
     }
 }
 
-/// Writes `app.log` (readable) and `logs.ndjson` into a directory.
+/// Writes `app.log` (readable) and `logs.ndjson` into a directory,
+/// redacted.
 fn write_records(dir: &Path, records: &[logs::Record]) -> (PathBuf, PathBuf) {
     let app_log = dir.join("app.log");
     let ndjson = dir.join("logs.ndjson");
@@ -1121,18 +1129,19 @@ fn write_records(dir: &Path, records: &[logs::Record]) -> (PathBuf, PathBuf) {
         lines.push_str(&serde_json::to_string(record).unwrap_or_default());
         lines.push('\n');
     }
-    let _ = std::fs::write(&app_log, text);
-    let _ = std::fs::write(&ndjson, lines);
+    let _ = process::write_redacted(&app_log, &text);
+    let _ = process::write_redacted(&ndjson, &lines);
     (app_log, ndjson)
 }
 
-/// A snapshot of the session's logs into the run directory.
+/// A snapshot of the session's logs into the run directory, redacted (the
+/// live files stay the app's own output).
 fn snapshot_logs(ctx: &Ctx, session: &Session, run_dir: &Path) {
     for (from, name) in [
         (&session.logs.stdout, "app.stdout"),
         (&session.logs.stderr, "app.stderr"),
     ] {
-        let _ = std::fs::copy(from, run_dir.join(name));
+        let _ = process::copy_redacted(from, &run_dir.join(name));
     }
     let (records, _) = collect_records(ctx, None, session, false, false);
     let (app_log, ndjson) = write_records(run_dir, &records);
@@ -1195,7 +1204,7 @@ fn died(
         let _ = std::fs::create_dir_all(&crash_dir);
         if let Some(name) = report.file_name() {
             let target = crash_dir.join(name);
-            if std::fs::copy(report, &target).is_ok() {
+            if process::copy_redacted(report, &target).is_ok() {
                 copied.push(target);
             }
         }
@@ -1215,7 +1224,7 @@ fn died(
 
     let system_path = run_dir.join("system.ndjson");
     let system = system_log(ctx, xcode, session, true).unwrap_or_default();
-    let _ = std::fs::write(&system_path, &system);
+    let _ = process::write_redacted(&system_path, &system);
     if !system.is_empty() {
         ctx.rep.artifact("system_log", &system_path);
     }

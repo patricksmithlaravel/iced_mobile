@@ -19,6 +19,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+#[path = "support/secret.rs"]
+mod secret;
+
 const BIN: &str = env!("CARGO_BIN_EXE_icm");
 
 const FAKE_CARGO: &str = r#"#!/bin/sh
@@ -51,12 +54,19 @@ done
 mkdir -p "$out"
 printf '\000asm\001\000\000\000' > "$out/app_bg.wasm"
 head -c "$(( ${FAKE_WASM_KB:-1} * 1024 ))" /dev/urandom >> "$out/app_bg.wasm"
-cat > "$out/app.js" <<'EOF'
+# An app built with a secret (ICM_TEST_API_TOKEN), which it logs.
+token=$(printf '%s' "${ICM_TEST_API_TOKEN:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+printf 'const token = "%s";\n' "$token" > "$out/app.js"
+cat >> "$out/app.js" <<'EOF'
 export default async function init(options) {
   const event = (json) => console.log("ICM_EVENT " + JSON.stringify(json));
   const response = await fetch(options.module_or_path);
   await response.arrayBuffer();
   event({v: 1, kind: "start", protocol: 1, framework: "test", pid: null, platform: "web", bridge: null});
+  if (token) {
+    console.log("signed in with " + token);
+    console.log(JSON.stringify({token}));
+  }
   const canvas = document.createElement("canvas");
   canvas.width = innerWidth * devicePixelRatio;
   canvas.height = innerHeight * devicePixelRatio;
@@ -580,6 +590,33 @@ fn a_web_release_over_budget_and_without_fonts_is_not_uploadable() {
     );
     // The serve check still ran, and passed.
     assert!(checks(&app, &release, "pass").contains(&"web.serve_smoke".to_string()));
+}
+
+/// The serve check's console in the run directory holds no secret the
+/// page logged: an app built with the value of a secret-named variable in
+/// icm's environment logs it plain and as JSON, and the console, Chrome's
+/// log, the events and the result have `<redacted>`, raw or escaped (the
+/// site itself, the release's own code, is in the dist directory).
+#[test]
+fn the_serve_check_keeps_no_secret() {
+    if let Some(reason) = skip_reason() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let mut app = App::new();
+    app.set(secret::NAME, secret::TOKEN);
+    let release = app.json(&["release", "web", "--allow-dirty"]);
+    assert_eq!(release["exit"], 0, "{release}");
+    assert!(checks(&app, &release, "pass").contains(&"web.serve_smoke".to_string()));
+    let run_dir = app.abs(&release["run_dir"]);
+    let console = std::fs::read_to_string(run_dir.join("smoke/console.ndjson")).unwrap();
+    assert!(console.contains("signed in with <redacted>"), "{console}");
+    assert!(
+        console.contains("{\\\"token\\\":\\\"<redacted>\\\"}"),
+        "{console}"
+    );
+    secret::assert_kept_nowhere(&run_dir);
+    assert!(secret::leaks(&app.abs(&release["artifacts"]["site"])).len() == 1);
 }
 
 #[test]

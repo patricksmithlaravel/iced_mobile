@@ -10,6 +10,9 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+#[path = "support/secret.rs"]
+mod secret;
+
 const BIN: &str = env!("CARGO_BIN_EXE_icm");
 
 struct Fake {
@@ -123,6 +126,11 @@ impl Fake {
     }
 
     fn run(&self, scenario: &str, args: &[&str]) -> Output {
+        self.run_with(scenario, args, &[])
+    }
+
+    /// [`Fake::run`] with more variables in icm's environment.
+    fn run_with(&self, scenario: &str, args: &[&str], env: &[(&str, &str)]) -> Output {
         let fakes = fixtures().join("fake-ios");
         let home = std::env::var("HOME").unwrap_or_default();
         let mut command = Command::new(BIN);
@@ -162,7 +170,8 @@ impl Fake {
             // `stop --all` also asks Android: an adb with no device online,
             // so no test reaches the host's real adb.
             .env("ICM_TOOL_ADB", self.state.join("adb"))
-            .env("ICM_TOOL_EMULATOR", fakes.join("ok"));
+            .env("ICM_TOOL_EMULATOR", fakes.join("ok"))
+            .envs(env.iter().copied());
         for var in [
             "ICM_JSON",
             "ICM_CONFIG",
@@ -178,7 +187,12 @@ impl Fake {
     }
 
     fn result(&self, scenario: &str, args: &[&str]) -> Value {
-        let output = self.run(scenario, args);
+        self.result_with(scenario, args, &[])
+    }
+
+    /// [`Fake::result`] with more variables in icm's environment.
+    fn result_with(&self, scenario: &str, args: &[&str], env: &[(&str, &str)]) -> Value {
+        let output = self.run_with(scenario, args, env);
         let text = String::from_utf8_lossy(&output.stdout);
         let last = text.lines().last().unwrap_or_else(|| {
             panic!(
@@ -405,6 +419,85 @@ fn a_panic_exits_ten_with_the_location() {
     assert_eq!(evidence["line"], 3);
     assert_eq!(run["process"]["alive"], false);
     assert!(fake.path(&evidence["path"]).is_file());
+}
+
+/// What a command keeps in its run directory holds no secret the app
+/// logged: the value of a secret-named variable in icm's environment,
+/// logged on stdout and stderr (plain, as JSON, in an `ICM_EVENT`), in the
+/// unified log (as `log` escapes it, `/` as `\/`), in a panic and in a crash
+/// report, is `<redacted>` in the copies of stdout and stderr, `app.log`,
+/// `logs.ndjson`, `system.ndjson`, the crash report's copy, events and
+/// results. The live files in `target/icm/sessions` are the app's and
+/// `log`'s own output and keep it.
+#[test]
+fn run_directories_keep_no_secret() {
+    let fake = Fake::new();
+    let env = [(secret::NAME, secret::TOKEN)];
+    let icm = fake.project.join("target/icm");
+
+    let run = fake.result_with("leak", &["run", "ios-sim", "--json", "-q"], &env);
+    assert_eq!(run["exit"], 0, "{run}");
+    let app_log = std::fs::read_to_string(fake.path(&run["artifacts"]["app_log"])).unwrap();
+    for line in [
+        "signed in with <redacted>",
+        "{\"token\":\"<redacted>\"}",
+        "token <redacted>",
+    ] {
+        assert!(app_log.contains(line), "{line}: {app_log}");
+    }
+    let live = icm
+        .join("sessions/ios-sim")
+        .join(run["run"].as_str().unwrap());
+    for file in ["app.stdout", "app.stderr", "oslog.ndjson"] {
+        assert!(secret::holds(&live.join(file)), "{file}");
+    }
+
+    let logs = fake.result_with("leak", &["logs", "ios-sim", "--json", "-q"], &env);
+    assert_eq!(logs["exit"], 0, "{logs}");
+    let oslog = logs["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["source"] == "oslog")
+        .unwrap_or_else(|| panic!("{logs}"));
+    assert_eq!(oslog["msg"], "signed in with <redacted>");
+    // Raw `log` lines: the app's JSON line escaped twice in each, and once
+    // more in the result.
+    let raw = fake.result_with("leak", &["logs", "ios-sim", "--raw", "--json", "-q"], &env);
+    assert_eq!(raw["exit"], 0, "{raw}");
+    let lines: Vec<Value> = raw["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["source"] == "oslog")
+        .map(|record| serde_json::from_str(record["msg"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{raw}");
+    assert_eq!(lines[1]["eventMessage"], "{\"token\":\"<redacted>\"}");
+    assert!(!raw.to_string().contains(secret::TAIL), "{raw}");
+    assert_eq!(
+        fake.result_with("leak", &["stop", "ios-sim", "--json", "-q"], &env)["exit"],
+        0
+    );
+
+    let died = fake.result_with("leak-panic", &["run", "ios-sim", "--json", "-q"], &env);
+    assert_eq!(died["exit"], 10, "{died}");
+    assert_eq!(
+        died["errors"][0]["detail"],
+        "panicked at src/lib.rs:7:5: rejected token <redacted>"
+    );
+    let crash = std::fs::read_to_string(fake.path(&died["artifacts"]["crash"])).unwrap();
+    assert!(crash.contains("rejected token <redacted>"), "{crash}");
+    let system = std::fs::read_to_string(fake.path(&died["artifacts"]["system_log"])).unwrap();
+    assert!(system.contains("the system saw <redacted>"), "{system}");
+
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    let last = std::fs::read_to_string(icm.join("last.json")).unwrap();
+    assert!(
+        secret::forms()
+            .iter()
+            .all(|form| !last.contains(form.as_str()))
+    );
 }
 
 #[test]

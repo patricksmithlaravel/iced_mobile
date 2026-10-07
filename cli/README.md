@@ -103,8 +103,13 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 - `tests/cli.rs` runs the binary. Each test sets `ICM_CACHE_DIR` and
   `ICM_HOST_CONFIG` to a temp dir and copies fixtures from `tests/fixtures/`.
 - `tests/desktop.rs` runs, logs, captures and stops `fixtures/desktop`, a
-  windowless stand-in app (`--env ICM_FIXTURE=ready|panic|exit|hang`), and
-  kills whatever it started.
+  windowless stand-in app (`--env ICM_FIXTURE=ready|panic|leak|exit|hang`),
+  and kills whatever it started.
+- Each platform's `run_directories_keep_no_secret` test (and web release's
+  `the_serve_check_keeps_no_secret`) puts a token in icm's environment
+  that the app logs in every way an app can, then searches every file of
+  the run directories for it raw, JSON-escaped and percent-encoded
+  (`tests/support/secret.rs`, included with `#[path]`).
 - `tests/web.rs` drives the web pipeline against real headless Chrome with
   a fake cargo and wasm-bindgen (`ICM_TOOL_CARGO`, `ICM_TOOL_WASM_BINDGEN`)
   whose JavaScript "app" speaks `ICM_EVENT`; it skips without Chrome or the

@@ -12,9 +12,12 @@
 //!   and in the result, progress and content has the secret values icm
 //!   knows replaced with `<redacted>` ([`crate::process::secret_values`]),
 //!   whatever produced it (a hook's CHECK line, a tool's output, an app's
-//!   log). Step logs are redacted by the runner, and the logs a pipeline
-//!   saves as artifacts go through [`crate::process::write_redacted`] (and
-//!   [`redact`] for JSON records).
+//!   log). Step logs are redacted by the runner, and every file a pipeline
+//!   keeps in the run directory from a tool's or an app's output goes
+//!   through [`crate::process::write_redacted`],
+//!   [`crate::process::copy_redacted`] or [`crate::process::redact_in_place`]
+//!   (JSON lines in their decoded strings). The live files an app or a
+//!   session host writes in `target/icm/sessions` are its own output, raw.
 //!
 //! Exit-code rules (§4.4): the first blocking failure (the error a command
 //! returns) sets the exit code and is `errors[0]`; non-blocking FAILs set
@@ -904,28 +907,7 @@ fn first_line(text: &str) -> &str {
 pub fn redact(value: &mut Value) {
     let secrets = crate::process::secret_values();
     if !secrets.is_empty() {
-        redact_strings(value, &secrets);
-    }
-}
-
-fn redact_strings(value: &mut Value, secrets: &[String]) {
-    match value {
-        Value::String(text) => {
-            if secrets.iter().any(|secret| text.contains(secret.as_str())) {
-                *text = crate::process::redact_with(text, secrets);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                redact_strings(item, secrets);
-            }
-        }
-        Value::Object(map) => {
-            for (_, item) in map.iter_mut() {
-                redact_strings(item, secrets);
-            }
-        }
-        _ => {}
+        let _ = crate::process::redact_json(value, &secrets);
     }
 }
 
