@@ -204,10 +204,10 @@
 //! # Safe area
 //!
 //! A phone application fills the screen: it draws under the status bar, the
-//! notch or Dynamic Island, and the home indicator or navigation bar.
-//! [`safe_area()`] reports what covers each edge, as a [`SafeArea`] in the
-//! same logical pixels as the layout, and [`SafeArea::padding`] turns it
-//! into the padding of the root container:
+//! notch or Dynamic Island, the home indicator or navigation bar, and the
+//! on-screen keyboard. [`safe_area()`] reports what covers each edge, as a
+//! [`SafeArea`] in the same logical pixels as the layout, and
+//! [`SafeArea::padding`] turns it into the padding of the root container:
 //!
 //! ```no_run
 //! use iced::mobile::{self, SafeArea};
@@ -232,7 +232,8 @@
 //!     }
 //!
 //!     fn view(&self) -> Element<'_, Message> {
-//!         // 16 around the content, beside what the system covers.
+//!         // 16 around the content, beside what the system covers; the
+//!         // bottom rises with the keyboard.
 //!         container(text("Hello"))
 //!             .padding(self.safe_area.padding(16))
 //!             .width(Fill)
@@ -253,23 +254,27 @@
 //! ```
 //!
 //! - **iOS:** the window's safe-area insets (the status bar, the Dynamic
-//!   Island or notch, the home indicator).
-//! - **Android:** the system bars and the display cutout, from the root
-//!   view's `WindowInsets` (read through JNI). On Android 15 and later an
-//!   app that targets SDK 35 or later is drawn edge to edge, under both
-//!   bars.
+//!   Island or notch, the home indicator), and the keyboard's height from
+//!   UIKit's keyboard notifications.
+//! - **Android:** the system bars and the display cutout, and the
+//!   keyboard's height, from the root view's `WindowInsets` (read through
+//!   JNI). On Android 15 and later an app that targets SDK 35 or later is
+//!   drawn edge to edge, under both bars.
 //! - **Desktop and web:** [`SafeArea::ZERO`], once. A mobile browser's
 //!   notch is not reported.
 //!
 //! The first value arrives when the window opens, then one per change:
-//! rotation, a new display cutout. On Android a change can take a few
-//! tenths of a second to settle: the shell reads again while the system
-//! bars settle. On iOS the window can report zero insets for a frame, under
-//! the launch screen, before it is in its scene. On phones every window
-//! fills the screen, so they share one safe area.
+//! rotation, a new display cutout, the keyboard showing or hiding. On
+//! Android a change can take a few tenths of a second to settle: the shell
+//! reads again while the system bars settle, and every quarter of a second
+//! while a text input has the focus, since the keyboard sends no event of
+//! its own when the app draws edge to edge. On iOS the window can report
+//! zero insets for a frame, under the launch screen, before it is in its
+//! scene. On phones every window fills the screen, so they share one safe
+//! area.
 //!
-//! [`SafeArea::keyboard`] is always 0 for now: the keyboard's height is not
-//! reported yet, and the keyboard covers the lower half of the screen.
+//! [`SafeArea::keyboard`] is measured from the bottom edge, so it covers the
+//! bottom inset: [`SafeArea::padding`] takes the larger of the two.
 //!
 //! Headless runs (`iced_test`, and `icm`'s `.ice` flows, `shot --headless`
 //! and `ui --headless`) have no shell, and [`safe_area()`] reports nothing

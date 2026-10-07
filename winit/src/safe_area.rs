@@ -6,8 +6,8 @@
 //! - Android: the root view's `WindowInsets`, read through JNI, and the
 //!   content rect `NativeActivity` reports, which stands in for them while
 //!   they cannot be read (`safe_area/android.rs`).
-//! - iOS: winit's safe-area frame against the window's bounds
-//!   (`safe_area/ios.rs`).
+//! - iOS: winit's safe-area frame against the window's bounds, and the
+//!   keyboard's frame from UIKit's notification (`safe_area/ios.rs`).
 //! - Elsewhere: [`SafeArea::ZERO`], once.
 use crate::Control;
 use crate::broadcast::Broadcast;
@@ -45,7 +45,6 @@ pub struct SafeArea {
     ///
     /// It is measured from the bottom edge, so it includes the bottom inset
     /// it covers: take the larger of the two, as [`SafeArea::padding`] does.
-    /// The shell does not report the keyboard yet: it is always 0.
     pub keyboard: f32,
 }
 
@@ -89,8 +88,8 @@ impl SafeArea {
 /// The safe area: the current one as soon as the shell knows it, then every
 /// change.
 ///
-/// Android and iOS report it once the window exists and again on rotation
-/// and a cutout change; the desktop and the web report
+/// Android and iOS report it once the window exists and again on rotation,
+/// a cutout change and the keyboard; the desktop and the web report
 /// [`SafeArea::ZERO`] once. Headless tests (`iced_test`) have no shell and
 /// report nothing. On phones every window fills the screen, so they share
 /// one safe area: the one of the window that changed last.
@@ -143,6 +142,9 @@ impl Drop for Shell {
 
 impl Shell {
     pub(crate) fn new() -> Self {
+        #[cfg(target_os = "ios")]
+        ios::observe_keyboard();
+
         Self {
             windows: Vec::new(),
             published: None,
@@ -178,8 +180,12 @@ impl Shell {
     ///
     /// - iOS: every window, at every turn. These are a few property reads,
     ///   and UIKit may change the safe area without resizing the window (as
-    ///   it moves it into its scene).
-    /// - Android: when a poll is due, over the 600 ms after a change.
+    ///   it moves it into its scene), or announce the keyboard's frame in a
+    ///   notification that only wakes the loop.
+    /// - Android: when a poll is due: over the 600 ms after a change, and
+    ///   every 250 ms while a window asks for the keyboard and for a second
+    ///   after, since the keyboard moves no window and sends no event once
+    ///   the system draws edge to edge.
     /// - Elsewhere: nothing.
     ///
     /// Called before the event loop's idle check, so that a poll is
@@ -210,9 +216,15 @@ impl Shell {
             self.forget_closed(windows);
 
             let now = Instant::now();
-            let drawable = windows
-                .iter_mut()
-                .any(|(_id, window)| window.surface.is_some());
+            let mut drawable = false;
+            let mut typing = false;
+
+            for (_id, window) in windows.iter_mut() {
+                if window.surface.is_some() {
+                    drawable = true;
+                    typing |= window.ime_requested();
+                }
+            }
 
             // The native window is gone: nothing to read until it is back,
             // and `Resumed` reads it then.
@@ -220,6 +232,8 @@ impl Shell {
                 self.polls = Polls::default();
                 return;
             }
+
+            self.polls.typing(typing, now);
 
             if self.polls.due(now) {
                 for (_id, window) in windows.iter_mut() {
@@ -364,12 +378,33 @@ fn frame_insets(outer: Frame, inner: Frame) -> [f32; 4] {
     .map(|inset| inset.max(0.0) as f32)
 }
 
+/// iOS: how far `keyboard` reaches up into `window` from its bottom edge,
+/// or 0 when it is off screen or beside it.
+#[cfg(any(target_os = "ios", test))]
+fn keyboard_overlap(window: Frame, keyboard: Frame) -> f32 {
+    let beside = keyboard.x >= window.x + window.width
+        || keyboard.x + keyboard.width <= window.x
+        || keyboard.width <= 0.0
+        || keyboard.height <= 0.0;
+
+    if beside {
+        return 0.0;
+    }
+
+    let bottom = window.y + window.height;
+    let top = keyboard.y.max(window.y);
+
+    (bottom - top).clamp(0.0, window.height) as f32
+}
+
 /// Android: the root view's insets, in physical pixels.
 #[cfg(any(target_os = "android", test))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct RootInsets {
     /// The system bars and the display cutout: top, right, bottom, left.
     bars: [i32; 4],
+    /// The keyboard, from the bottom edge.
+    keyboard: i32,
 }
 
 /// Android: the safe area of a `width` × `height` native window, from the
@@ -378,9 +413,11 @@ struct RootInsets {
 ///
 /// The content rect is where `NativeActivity`'s content view sits: inside
 /// the bars on a system that does not draw edge to edge (before Android 15,
-/// or below targetSdk 35), the whole window when it does. While the screen
-/// rotates it can still have the old orientation's size: a rect that does
-/// not fit in the window is such a stale one, and unknown.
+/// or below targetSdk 35), the whole window when it does. It stands in for
+/// the bars only. On such a system the content view also makes room for the
+/// keyboard, which the rect cannot tell from a bar, and while the screen
+/// rotates the rect can still have the old orientation's size: a rect that
+/// does not fit in the window is such a stale one, and unknown.
 #[cfg(any(target_os = "android", test))]
 fn android_area(
     width: u32,
@@ -395,7 +432,7 @@ fn android_area(
     if let Some(root) = root {
         return Some(Physical {
             insets: root.bars.map(|inset| inset.max(0) as f32),
-            keyboard: 0.0,
+            keyboard: root.keyboard.max(0) as f32,
         });
     }
 
@@ -425,6 +462,12 @@ fn android_area(
 struct Polls {
     /// After a change: the next read, and the last one.
     settle: Option<(Instant, Instant)>,
+    /// For the keyboard: the next read.
+    keyboard: Option<Instant>,
+    /// Whether a window asks for the keyboard.
+    typing: bool,
+    /// The last keyboard read after every window let the keyboard go.
+    typed_until: Option<Instant>,
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -433,32 +476,70 @@ impl Polls {
     const SETTLE_EVERY: Duration = Duration::from_millis(100);
     /// For how long, after a change.
     const SETTLE_FOR: Duration = Duration::from_millis(600);
+    /// How often to read while a window asks for the keyboard.
+    const KEYBOARD_EVERY: Duration = Duration::from_millis(250);
+    /// For how long after the last window let it go: it slides away.
+    const KEYBOARD_AFTER: Duration = Duration::from_secs(1);
 
     /// Something changed at `now`: read again while it settles.
     fn changed(&mut self, now: Instant) {
         self.settle = Some((now + Self::SETTLE_EVERY, now + Self::SETTLE_FOR));
     }
 
-    /// Whether a read is due at `now`. A poll that is due moves on to its
-    /// next read, or ends.
-    fn due(&mut self, now: Instant) -> bool {
-        let Some((next, last)) = self.settle else {
-            return false;
-        };
-
-        if next > now {
-            return false;
+    /// Whether a window asks for the keyboard, at `now`.
+    fn typing(&mut self, typing: bool, now: Instant) {
+        if typing == self.typing {
+            return;
         }
 
-        let next = now + Self::SETTLE_EVERY;
-        self.settle = (next <= last).then_some((next, last));
+        self.typing = typing;
 
-        true
+        if typing {
+            self.typed_until = None;
+            self.keyboard = Some(now + Self::SETTLE_EVERY);
+        } else {
+            self.typed_until = Some(now + Self::KEYBOARD_AFTER);
+            self.keyboard = self.keyboard.or(Some(now + Self::KEYBOARD_EVERY));
+        }
+    }
+
+    /// Whether a read is due at `now`. Each poll that is due moves on to its
+    /// next read, or ends.
+    fn due(&mut self, now: Instant) -> bool {
+        let mut due = false;
+
+        if let Some((next, last)) = self.settle
+            && next <= now
+        {
+            due = true;
+
+            let next = now + Self::SETTLE_EVERY;
+            self.settle = (next <= last).then_some((next, last));
+        }
+
+        if let Some(next) = self.keyboard
+            && next <= now
+        {
+            due = true;
+
+            let next = now + Self::KEYBOARD_EVERY;
+            let wanted = self.typing
+                || self.typed_until.is_some_and(|until| next <= until);
+
+            self.keyboard = wanted.then_some(next);
+        }
+
+        due
     }
 
     /// When the next read is due, if one is.
     fn next(&self) -> Option<Instant> {
-        self.settle.map(|(next, _last)| next)
+        let settle = self.settle.map(|(next, _last)| next);
+
+        match (settle, self.keyboard) {
+            (Some(settle), Some(keyboard)) => Some(settle.min(keyboard)),
+            (settle, keyboard) => settle.or(keyboard),
+        }
     }
 }
 
@@ -538,9 +619,39 @@ mod tests {
     }
 
     #[test]
+    fn the_ios_keyboard_counts_where_it_covers_the_window() {
+        let frame = |x, y, width, height| Frame {
+            x,
+            y,
+            width,
+            height,
+        };
+        let window = frame(0.0, 0.0, 402.0, 874.0);
+
+        assert_eq!(
+            keyboard_overlap(window, frame(0.0, 538.0, 402.0, 336.0)),
+            336.0
+        );
+
+        // Hidden: below the screen.
+        assert_eq!(
+            keyboard_overlap(window, frame(0.0, 874.0, 402.0, 336.0)),
+            0.0
+        );
+
+        // Beside the window, or empty.
+        assert_eq!(
+            keyboard_overlap(window, frame(402.0, 538.0, 402.0, 336.0)),
+            0.0
+        );
+        assert_eq!(keyboard_overlap(window, frame(0.0, 0.0, 0.0, 0.0)), 0.0);
+    }
+
+    #[test]
     fn android_takes_the_root_insets_and_falls_back_to_the_content_rect() {
         let root = RootInsets {
             bars: [142, 0, 63, 0],
+            keyboard: 0,
         };
 
         // Edge to edge: the content rect is the whole window.
@@ -549,6 +660,20 @@ mod tests {
             Some(Physical {
                 insets: [142.0, 0.0, 63.0, 0.0],
                 keyboard: 0.0,
+            })
+        );
+
+        // Typing: the root insets have the keyboard; a content view that
+        // made room for it changes nothing.
+        let typing = RootInsets {
+            bars: [142, 0, 126, 0],
+            keyboard: 883,
+        };
+        assert_eq!(
+            android_area(1080, 2424, [0, 142, 1080, 1541], Some(typing)),
+            Some(Physical {
+                insets: [142.0, 0.0, 126.0, 0.0],
+                keyboard: 883.0,
             })
         );
 
@@ -591,5 +716,36 @@ mod tests {
 
         assert_eq!(reads, 6);
         assert!(now <= at(600));
+    }
+
+    #[test]
+    fn android_polls_follow_the_keyboard_and_end_after_it() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut polls = Polls::default();
+
+        polls.typing(true, start);
+        assert_eq!(polls.next(), Some(at(100)));
+
+        // Every 250 ms for as long as a window asks for it.
+        assert!(polls.due(at(100)));
+        assert_eq!(polls.next(), Some(at(350)));
+        assert!(polls.due(at(350)));
+        assert_eq!(polls.next(), Some(at(600)));
+
+        // Let go at 500 ms: a second more, then nothing.
+        polls.typing(false, at(500));
+
+        let mut now = at(500);
+        while let Some(next) = polls.next() {
+            now = next;
+            assert!(polls.due(now));
+        }
+
+        assert!(now > at(1250) && now <= at(1500), "{:?}", now - start);
+
+        // Asking again starts over.
+        polls.typing(true, at(2000));
+        assert_eq!(polls.next(), Some(at(2100)));
     }
 }

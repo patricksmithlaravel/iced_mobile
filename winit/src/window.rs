@@ -269,6 +269,13 @@ where
         }
     }
 
+    /// Whether the window asks for the on-screen keyboard: a text input has
+    /// the focus.
+    #[cfg(target_os = "android")]
+    pub fn ime_requested(&self) -> bool {
+        self.ime_state.is_some()
+    }
+
     pub fn draw_preedit(&mut self) {
         if let Some(preedit) = &self.preedit {
             preedit.draw(

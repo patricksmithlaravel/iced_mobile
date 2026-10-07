@@ -8,16 +8,18 @@ this file in the commit that fixes or finds a limitation.
 <!-- icm: AGENTS.md embeds everything below this line -->
 
 - **The safe area comes from a running app only** (iOS, Android). The app
-  draws under the status bar, the notch or Dynamic Island and the home
+  draws under the status bar, the notch or Dynamic Island, the home
   indicator or navigation bar (Android draws edge to edge from targetSdk
-  35). `iced::mobile::safe_area()` reports what covers each edge; pad the
-  root with `SafeArea::padding`. Headless runs (`.ice` flows, `icm shot
-  --headless`, `icm ui --headless`, unit tests) report nothing, so keep a
-  padding of your own until a value arrives. The template pads phones a
-  fixed 64 top and 48 bottom (`safe_area()` in `src/lib.rs`), which keeps
-  its headless layouts the same as the phone's but does not follow the
-  device. The desktop and the web report zero, a phone browser's notch
-  included. Keep controls away from the rounded corners.
+  35) and the keyboard. `iced::mobile::safe_area()` reports what covers
+  each edge and the keyboard's height; pad the root with
+  `SafeArea::padding`. Headless runs (`.ice` flows, `icm shot --headless`,
+  `icm ui --headless`, unit tests) report nothing, so keep a padding of your
+  own until a value arrives. The template pads phones a fixed 64 top and 48
+  bottom (`safe_area()` in `src/lib.rs`), which keeps its headless layouts
+  the same as the phone's but follows neither the device nor the keyboard.
+  On Android the keyboard's height can arrive a quarter of a second after
+  the keyboard. The desktop and the web report zero, a phone browser's
+  notch included. Keep controls away from the rounded corners.
 - **No clipboard on phones.** Reads return nothing and writes only log a
   warning. There is no long-press edit menu, and the Cmd/Ctrl shortcuts of
   text fields never fire. Do not build a feature on copy and paste there.
@@ -27,8 +29,10 @@ this file in the commit that fixes or finds a limitation.
     map (many accented letters, all CJK) can be lost. iOS has no marked
     text, so CJK input methods do not compose either. Do not promise
     non-ASCII input on Android, and type into the app on a device.
-  - iced does not know how tall the keyboard is, so it covers fields in the
-    lower half of the screen. Put text fields near the top.
+  - The keyboard covers fields in the lower half of the screen unless the
+    root is padded with `SafeArea::padding` from `iced::mobile::safe_area()`,
+    whose bottom rises with it. The template's fixed padding does not, so
+    its field is at the top.
   - If the user hides the keyboard while a field keeps the focus, tapping
     the field does not bring it back until the field has lost the focus
     once.

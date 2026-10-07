@@ -126,9 +126,11 @@ fn root_insets(sdk: i32) -> jni::errors::Result<Option<RootInsets>> {
         if sdk >= TYPES {
             let bars = type_mask(env, jni_str!("systemBars"))?
                 | type_mask(env, jni_str!("displayCutout"))?;
+            let ime = type_mask(env, jni_str!("ime"))?;
 
             Ok(Some(RootInsets {
                 bars: insets_of(env, &insets, bars)?,
+                keyboard: insets_of(env, &insets, ime)?[2],
             }))
         } else {
             let mut bars = [
@@ -162,8 +164,16 @@ fn root_insets(sdk: i32) -> jni::errors::Result<Option<RootInsets>> {
                 }
             }
 
-            // The stable insets: the bars, which the keyboard is not.
-            Ok(Some(RootInsets { bars }))
+            // `NativeActivity` asks for `SOFT_INPUT_ADJUST_RESIZE`, so the
+            // system-window insets include the keyboard, from the bottom
+            // edge; the stable ones never do.
+            let system =
+                int(env, &insets, jni_str!("getSystemWindowInsetBottom"))?;
+
+            Ok(Some(RootInsets {
+                bars,
+                keyboard: if system > bars[2] { system } else { 0 },
+            }))
         }
     })
 }
