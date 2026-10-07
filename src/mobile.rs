@@ -531,7 +531,9 @@
 //!   [`system::theme_changes`](crate::system::theme_changes) reports it once
 //!   at start and again on every switch, for an application that picks its
 //!   own themes. A theme set with `.theme(..)` is drawn as it is, whatever
-//!   the system's mode:
+//!   the system's mode. A theme function that returns `Option<Theme>` lets
+//!   the system decide again with `None` (a System choice beside Light and
+//!   Dark), and the default theme for the system's mode is drawn at once:
 //!
 //! ```no_run,standalone_crate
 //! use iced::widget::text;

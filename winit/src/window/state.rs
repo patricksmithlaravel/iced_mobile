@@ -226,36 +226,84 @@ where
             .unwrap_or_default();
 
         if self.theme_mode != new_mode {
-            #[cfg(not(target_os = "linux"))]
-            {
-                window.set_theme(conversion::window_theme(new_mode));
+            if new_mode == theme::Mode::None {
+                let (shown, guess) = release(
+                    self.theme_mode,
+                    theme::Base::mode(&self.default_theme),
+                    TOLD_EVERY_SYSTEM_CHANGE,
+                );
 
-                // Assume the old mode matches the system one
-                // We will be notified otherwise
-                if new_mode == theme::Mode::None {
+                window.set_theme(conversion::window_theme(shown));
+
+                if let Some(guess) = guess {
                     self.default_theme =
-                        <P::Theme as theme::Base>::default(self.theme_mode);
+                        <P::Theme as theme::Base>::default(guess);
 
                     if self.theme.is_none() {
                         self.style = program.style(&self.default_theme);
                     }
                 }
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                // mundy always notifies system theme changes, so we
-                // just restore the default theme mode.
-                let new_mode = if new_mode == theme::Mode::None {
-                    theme::Base::mode(&self.default_theme)
-                } else {
-                    new_mode
-                };
-
+            } else {
                 window.set_theme(conversion::window_theme(new_mode));
             }
 
             self.theme_mode = new_mode;
         }
+    }
+}
+
+/// Whether every window is told each change of the system's light or dark
+/// mode, whatever theme the application forces: Linux by mundy's stream, and
+/// Android and iOS by the runner's reads (`appearance`), both through
+/// `NotifyTheme`. A window's default theme is then always the system's.
+///
+/// Elsewhere winit reports the window's own theme, which follows a forced
+/// one, and after `set_theme(None)` sends `ThemeChanged` only when the
+/// system's mode differs from the forced one.
+const TOLD_EVERY_SYSTEM_CHANGE: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "ios"
+));
+
+/// What a window does when the application stops forcing a theme of mode
+/// `forced` and lets the system decide, while its default theme has mode
+/// `default`: the mode to give the window, and the mode to rebuild the
+/// default theme with, if it must be guessed.
+///
+/// When the window is `told` every system change, its default theme is the
+/// system's already and stays. Otherwise the forced mode is the guess: the
+/// window followed it, and winit says so if the system's mode differs.
+fn release(
+    forced: theme::Mode,
+    default: theme::Mode,
+    told: bool,
+) -> (theme::Mode, Option<theme::Mode>) {
+    if told {
+        (default, None)
+    } else {
+        (theme::Mode::None, Some(forced))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_released_theme_follows_the_system_where_every_change_is_told() {
+        // A phone in light mode: the app forced Dark, then lets the system
+        // decide. The default theme stays the system's Light.
+        assert_eq!(
+            release(theme::Mode::Dark, theme::Mode::Light, true),
+            (theme::Mode::Light, None)
+        );
+
+        // macOS or Windows: the window followed the forced Dark, so Dark is
+        // the guess until winit reports the system's mode.
+        assert_eq!(
+            release(theme::Mode::Dark, theme::Mode::Light, false),
+            (theme::Mode::None, Some(theme::Mode::Dark))
+        );
     }
 }
