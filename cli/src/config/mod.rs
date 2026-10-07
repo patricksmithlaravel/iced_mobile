@@ -1407,7 +1407,31 @@ pub fn validate(loaded: &Loaded) -> Vec<IcmError> {
         }
     }
 
+    unquote_secret_lines(&mut problems);
     problems
+}
+
+/// A line that holds a secret is never quoted, whichever key's problem
+/// points at it: an inline table (`upload = { keystore = "", …,
+/// store_pass_env = "<secret>" }`) or `sign_command` keeps several values
+/// on one line, and only the secret's own finding knew to hide it.
+fn unquote_secret_lines(problems: &mut [IcmError]) {
+    let lines: Vec<(String, u32)> = problems
+        .iter()
+        .filter(|problem| problem.fix.summary == SECRET_FIX)
+        .flat_map(|problem| problem.evidence.iter())
+        .filter_map(|evidence| evidence.line.map(|line| (evidence.path.clone(), line)))
+        .collect();
+    for evidence in problems
+        .iter_mut()
+        .flat_map(|problem| problem.evidence.iter_mut())
+    {
+        if let Some(line) = evidence.line
+            && lines.contains(&(evidence.path.clone(), line))
+        {
+            evidence.excerpt = None;
+        }
+    }
 }
 
 /// Whether `name` is an environment variable name in the form icm requires
@@ -1423,41 +1447,73 @@ pub fn is_env_name(name: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// The fix of a finding about a value that may be a secret.
+const SECRET_FIX: &str = "Keep secrets out of icm.toml: put the value in an environment variable (or the keychain) and name the variable here.";
+
 /// A finding about a value that may be a secret: it points at the line but
-/// never quotes it.
+/// never quotes it (nor does any other finding on that line,
+/// [`unquote_secret_lines`]).
 fn invalid_secret(loaded: &Loaded, key: &str, message: &str) -> IcmError {
-    let mut evidence = loaded.evidence(key);
-    evidence.excerpt = None;
-    let location = match evidence.line {
-        Some(line) => format!("{}:{line}", evidence.path),
-        None => evidence.path.clone(),
-    };
-    IcmError::new(
-        CheckId::ConfigInvalid,
-        format!("{location}: `{key}` {message}"),
-    )
-    .evidence(evidence)
-    .fix(
-        "Keep secrets out of icm.toml: put the value in an environment variable (or the keychain) and name the variable here.",
-        &[],
-    )
+    invalid_quiet(loaded, key, message).fix(SECRET_FIX, &[])
+}
+
+/// [`invalid`] without the line's text, for the keys that sit next to
+/// secrets or name them (`[android.signing]`, `sign_command`, `sign_env`).
+fn invalid_quiet(loaded: &Loaded, key: &str, message: impl AsRef<str>) -> IcmError {
+    let mut error = invalid(loaded, key, message);
+    for evidence in &mut error.evidence {
+        evidence.excerpt = None;
+    }
+    error
+}
+
+/// Short flags that take a secret: AzureSignTool's Key Vault client
+/// secret, access token and password.
+const SECRET_SHORT_FLAGS: &[&str] = &["kvs", "kvt", "kvp"];
+
+/// A Windows-style switch (`/p`, `/fd`): a slash and letters or digits,
+/// never a path.
+fn is_slash_switch(token: &str) -> bool {
+    token
+        .strip_prefix('/')
+        .is_some_and(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 /// The flag of a command line that takes a secret as a literal (not `$VAR`,
-/// `${VAR}`, `%VAR%` or `env:VAR`), if any.
+/// `${VAR}`, `%VAR%` or `env:VAR`), if any. Flags start with `-`, or `/`
+/// as Windows tools write them. A flag takes a secret when its name has
+/// `pass`, `password`, `secret` or `token` in it, is one of AzureSignTool's
+/// `-kvs`/`-kvt`/`-kvp`, or is signtool's password `/p` (`-p` when the
+/// command runs signtool).
 pub fn literal_secret_flag(command: &str) -> Option<String> {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let signtool = tokens.iter().any(|token| {
+        let program = token
+            .trim_matches(['"', '\''])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        program == "signtool" || program == "signtool.exe"
+    });
     let secret_flag = |flag: &str| {
-        let name = flag.trim_start_matches('-').to_ascii_lowercase();
-        flag.starts_with('-')
-            && ["pass", "password", "secret", "token"]
-                .iter()
-                .any(|word| name.contains(word))
+        let name = if flag.starts_with('-') {
+            flag.trim_start_matches('-').to_ascii_lowercase()
+        } else if is_slash_switch(flag) {
+            flag[1..].to_ascii_lowercase()
+        } else {
+            return false;
+        };
+        ["pass", "password", "secret", "token"]
+            .iter()
+            .any(|word| name.contains(word))
+            || SECRET_SHORT_FLAGS.contains(&name.as_str())
+            || (name == "p" && (flag.starts_with('/') || signtool))
     };
     let indirect = |value: &str| {
         let value = value.trim_matches(['"', '\'']);
         value.starts_with('$') || value.starts_with('%') || value.starts_with("env:")
     };
-    let tokens: Vec<&str> = command.split_whitespace().collect();
     for (index, token) in tokens.iter().enumerate() {
         if let Some((flag, value)) = token.split_once('=') {
             if secret_flag(flag) && !indirect(value) {
@@ -1466,6 +1522,7 @@ pub fn literal_secret_flag(command: &str) -> Option<String> {
         } else if secret_flag(token)
             && let Some(value) = tokens.get(index + 1)
             && !value.starts_with('-')
+            && !is_slash_switch(value)
             && !indirect(value)
         {
             return Some(token.to_string());
@@ -1569,14 +1626,14 @@ fn validate_release_keys(loaded: &Loaded) -> Vec<IcmError> {
     let android = &config.android;
     if let Some(upload) = android.signing.as_ref().and_then(|s| s.upload.as_ref()) {
         if upload.keystore.trim().is_empty() {
-            problems.push(invalid(
+            problems.push(invalid_quiet(
                 loaded,
                 "android.signing.upload.keystore",
                 "must be the keystore's path",
             ));
         }
         if upload.alias.trim().is_empty() {
-            problems.push(invalid(
+            problems.push(invalid_quiet(
                 loaded,
                 "android.signing.upload.alias",
                 "must be the key's alias",
@@ -1637,7 +1694,7 @@ fn validate_release_keys(loaded: &Loaded) -> Vec<IcmError> {
     }
     if let Some(command) = &desktop.windows.sign_command {
         if !command.contains("{file}") {
-            problems.push(invalid(
+            problems.push(invalid_quiet(
                 loaded,
                 "desktop.windows.sign_command",
                 "must contain `{file}`, which icm replaces with the file to sign",
@@ -2183,6 +2240,105 @@ snapshot = false
         assert_eq!(
             literal_secret_flag("jsign --keystore k.p12 --alias a {file}"),
             None
+        );
+        // signtool's password is /p (or -p), Windows tools' switches start
+        // with a slash, and AzureSignTool's secrets are short flags.
+        assert_eq!(
+            literal_secret_flag(
+                "signtool sign /fd SHA256 /f C:/certs/code.pfx /p Hunter2Secret! {file}"
+            ),
+            Some("/p".to_string())
+        );
+        assert_eq!(
+            literal_secret_flag(
+                "\"C:/Program Files (x86)/Windows Kits/10/bin/x64/signtool.exe\" sign -f x.pfx -p hunter2 {file}"
+            ),
+            Some("-p".to_string())
+        );
+        assert_eq!(
+            literal_secret_flag("tool /Password hunter2 {file}"),
+            Some("/Password".to_string())
+        );
+        for flag in ["-kvs", "-kvt", "-kvp"] {
+            assert_eq!(
+                literal_secret_flag(&format!(
+                    "AzureSignTool sign -kvu https://v.example {flag} hunter2 {{file}}"
+                )),
+                Some(flag.to_string())
+            );
+        }
+        assert_eq!(
+            literal_secret_flag("signtool sign /f x.pfx /p $PASS {file}"),
+            None
+        );
+        assert_eq!(
+            literal_secret_flag("AzureSignTool sign -kvs %AZURE_SECRET% {file}"),
+            None
+        );
+        // `-p` of another tool, and paths that merely contain a word, are
+        // not secrets.
+        assert_eq!(literal_secret_flag("my-sign -p production {file}"), None);
+        assert_eq!(
+            literal_secret_flag("/opt/tokens/sign --in {file} /usr/share/password-free"),
+            None
+        );
+        assert_eq!(
+            literal_secret_flag("signtool sign /p /fd SHA256 {file}"),
+            None
+        );
+    }
+
+    #[test]
+    fn secrets_are_quoted_by_no_finding_on_their_line() {
+        let errors = |text: String| -> Vec<IcmError> { parse_text(&text).unwrap_err() };
+        let quoted = |errors: &[IcmError]| -> String {
+            serde_json::to_string(
+                &errors
+                    .iter()
+                    .map(|e| (e.detail.clone(), e.evidence.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        // A missing {file} next to a literal password.
+        let sign = errors(format!(
+            "{MINIMAL}[desktop.windows]\nsign_command = \"jsign --storepass Hunter2Secret! app.exe\"\n"
+        ));
+        assert_eq!(sign.len(), 2, "{}", quoted(&sign));
+        assert!(sign.iter().all(|e| e.evidence[0].line == Some(6)));
+        assert!(
+            !quoted(&sign).contains("Hunter2Secret!"),
+            "{}",
+            quoted(&sign)
+        );
+        // signtool's /p, same.
+        let signtool = errors(format!(
+            "{MINIMAL}[desktop.windows]\nsign_command = \"signtool sign /fd SHA256 /f C:/certs/code.pfx /p Hunter2Secret! {{file}}\"\n"
+        ));
+        assert_eq!(signtool.len(), 1, "{}", quoted(&signtool));
+        assert!(
+            signtool[0].detail.contains("`/p`"),
+            "{}",
+            signtool[0].detail
+        );
+        assert!(!quoted(&signtool).contains("Hunter2Secret!"));
+        // An empty keystore next to a pasted password in one inline table.
+        let upload = errors(format!(
+            "{MINIMAL}[android.signing]\nupload = {{ keystore = \"\", alias = \"upload\", store_pass_env = \"Hunter2Secret!\" }}\n"
+        ));
+        assert_eq!(upload.len(), 2, "{}", quoted(&upload));
+        assert!(
+            !quoted(&upload).contains("Hunter2Secret!"),
+            "{}",
+            quoted(&upload)
+        );
+        // Other findings keep their excerpt.
+        let other = errors(format!(
+            "{MINIMAL}[desktop.linux]\nmaintainer = \"nobody\"\n"
+        ));
+        assert_eq!(
+            other[0].evidence[0].excerpt.as_deref(),
+            Some("maintainer = \"nobody\"")
         );
     }
 

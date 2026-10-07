@@ -882,6 +882,21 @@ fn a_windows_release_builds_signs_and_gates_both_installers() {
     let md = std::fs::read_to_string(app.abs(&result["artifacts"]["upload_md"])).unwrap();
     assert!(md.contains("gh release upload"), "{md}");
 
+    // artifacts.json names the signing program and its variables, never the
+    // command line.
+    let manifest_text = std::fs::read_to_string(app.abs(&result["artifacts"]["manifest"])).unwrap();
+    let manifest: Value = serde_json::from_str(&manifest_text).unwrap();
+    assert_eq!(manifest["signing"]["sign_program"], "sign-it");
+    assert_eq!(manifest["signing"]["sign_env"][0], "ICM_TEST_SIGN_TOKEN");
+    assert!(
+        manifest["signing"].get("sign_command").is_none(),
+        "{manifest}"
+    );
+    assert!(
+        !manifest_text.contains("fakebin/sign-it"),
+        "{manifest_text}"
+    );
+
     // verify reads the PE anywhere and leaves signtool to Windows.
     app.set("ICM_HOST_OS", "macos");
     let built = app
@@ -891,6 +906,66 @@ fn a_windows_release_builds_signs_and_gates_both_installers() {
     assert_eq!(verify["exit"], 0, "{verify}");
     assert_eq!(app.status_of(&verify, "windows.pe_imports"), ["pass"]);
     assert_eq!(app.status_of(&verify, "windows.signed"), ["skip"]);
+}
+
+/// Every file under `dir` (recursively) whose text contains `needle`.
+fn files_containing(dir: &Path, needle: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_file()
+                && std::fs::read(&path)
+                    .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn a_literal_signtool_password_never_leaves_icm_toml() {
+    let mut app = App::new();
+    windows_fakes(&mut app, &["KERNEL32.dll"]);
+    let path = app.dir().join("icm.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let start = text.find("sign_command = ").unwrap();
+    let end = start + text[start..].find('\n').unwrap();
+    let secret = "Hunter2Secret!";
+    let text = format!(
+        "{}sign_command = \"signtool sign /fd SHA256 /f C:/certs/code.pfx /p {secret} {{file}}\"{}",
+        &text[..start],
+        &text[end..]
+    );
+    std::fs::write(&path, text).unwrap();
+    for args in [
+        &["release", "windows", "--allow-dirty"][..],
+        &["release", "windows", "--dry-run"][..],
+    ] {
+        let result = app.json(args);
+        assert_eq!(result["exit"], 3, "{result}");
+        assert_eq!(result["errors"][0]["id"], "config.invalid");
+        assert!(
+            result["errors"][0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("passes a literal value to `/p`"),
+            "{result}"
+        );
+        assert!(!result.to_string().contains(secret), "{result}");
+    }
+    // Nothing icm wrote holds it: no run directory, no artifacts.json.
+    let leaked: Vec<PathBuf> = files_containing(app.root.path(), secret)
+        .into_iter()
+        .filter(|file| file != &path)
+        .collect();
+    assert!(leaked.is_empty(), "{leaked:?}");
 }
 
 #[test]

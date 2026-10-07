@@ -509,9 +509,11 @@ fn build(ctx: &mut Ctx, rel: &mut Release) -> Result<()> {
         rel.embed_notices(path, super::notices::FILE)?;
         rel.add_file("upload", kind, path)?;
     }
+    // References only: the program and the variables it reads, never the
+    // command line, which could carry a value config validation missed.
     rel.signing = match &config.desktop.windows.sign_command {
         Some(command) if signing => serde_json::json!({
-            "sign_command": command,
+            "sign_program": files::sign_program(command),
             "sign_env": config.desktop.windows.sign_env,
         }),
         _ => serde_json::Value::Null,

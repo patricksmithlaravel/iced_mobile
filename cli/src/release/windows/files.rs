@@ -451,6 +451,21 @@ pub fn sign_script(command: &str, file: &Path) -> String {
     out.replace("{file}", &quoted)
 }
 
+/// The program `sign_command` runs (its first word, quoted or not, without
+/// the directory): what `artifacts.json` records instead of the command.
+pub fn sign_program(command: &str) -> String {
+    let command = command.trim_start();
+    let first = match command.chars().next() {
+        Some(quote @ ('"' | '\'')) => command[1..].split(quote).next().unwrap_or(""),
+        _ => command.split_whitespace().next().unwrap_or(""),
+    };
+    first
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(first)
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,5 +616,13 @@ mod tests {
             sign_script("signtool sign /fd sha256 /a 50% {file}", Path::new("a.exe")),
             "signtool sign /fd sha256 /a 50% a.exe"
         );
+        assert_eq!(sign_program("jsign --storepass $X {file}"), "jsign");
+        assert_eq!(
+            sign_program(
+                "\"C:\\Program Files (x86)\\Windows Kits\\10\\bin\\x64\\signtool.exe\" sign {file}"
+            ),
+            "signtool.exe"
+        );
+        assert_eq!(sign_program("/opt/bin/sign-it {file}"), "sign-it");
     }
 }
