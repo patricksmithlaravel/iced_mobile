@@ -311,13 +311,17 @@ impl Command {
     pub fn is_view(&self) -> bool {
         matches!(
             self,
-            Command::Explain(_) | Command::Wait(_) | Command::Print(_)
+            Command::Explain(_)
+                | Command::Wait(_)
+                | Command::Print(_)
+                | Command::Ps
+                | Command::Session(_)
         )
     }
 
     /// Whether the command prints content on stdout in human mode.
     pub fn is_content(&self) -> bool {
-        matches!(self, Command::Explain(_) | Command::Print(_))
+        matches!(self, Command::Explain(_) | Command::Print(_) | Command::Ps)
     }
 }
 

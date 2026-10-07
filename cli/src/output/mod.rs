@@ -304,6 +304,16 @@ impl Reporter {
         inner.emit(event);
     }
 
+    /// Reports an artifact that is not a file (the web app's `url`): the
+    /// value is kept as given, not shown as a path.
+    pub fn artifact_value(&self, kind: &str, value: &str) {
+        let mut inner = self.lock();
+        let _ = inner
+            .artifacts
+            .insert(kind.to_string(), Value::String(value.to_string()));
+        inner.emit(json!({"type": "artifact", "kind": kind, "path": value}));
+    }
+
     /// Reports that the app is ready (`url` or `session`, `source`, ...).
     pub fn ready(&self, fields: Value) {
         let mut event = json!({"type": "ready"});

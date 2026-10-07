@@ -573,8 +573,8 @@ catalogue! {
         "No font is embedded for the web build",
         "Keep `features = [\"fira-sans\"]` on iced.";
     WebRendererFallback = "web.renderer_fallback", CheckFailed, Warn, Agent,
-        "The web build fell back to another renderer",
-        "Usually harmless; enable `webgl` on iced for wasm32.";
+        "The web build has no WebGL fallback for a browser without a WebGPU adapter",
+        "Enable iced's `webgl` feature for wasm32 (headless Chrome has no WebGPU adapter).";
     WebHashedAssets = "web.hashed_assets", CheckFailed, Fail, Agent,
         "Release assets are not content-hashed",
         "Report it.";

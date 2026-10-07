@@ -2,12 +2,13 @@
 //! "Sessions", §6).
 //!
 //! Both work from the session files `icm run` writes
-//! ([`crate::session`]), so they need no platform knowledge: `stop` runs a
-//! session's recorded stop commands, ends the processes icm started and
-//! removes the file; `--shutdown` also shuts down the icm-managed
-//! simulator or emulator (`icm-` names only, never `icm-test-` ones and
-//! never a device icm did not create). Stopping what is not running is not
-//! an error.
+//! ([`crate::session`]): `stop` runs a session's recorded stop commands,
+//! ends the processes icm started and removes the file; `--shutdown` also
+//! shuts down the icm-managed simulator or emulator (`icm-` names only,
+//! never `icm-test-` ones and never a device icm did not create). The web
+//! session (the server and its headless Chrome) is asked to end over its
+//! control channel first ([`crate::web::stop`]). Stopping what is not
+//! running is not an error.
 
 use crate::catalogue::CheckId;
 use crate::cli::{Platform, StopArgs};
@@ -47,6 +48,10 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         {
             continue;
         }
+        if platform == crate::web::PLATFORM {
+            stopped.extend(crate::web::stop(&project));
+            continue;
+        }
         match session {
             Ok(session) => stopped.push(stop_one(ctx, &path, &session, args.shutdown)),
             Err(message) => {
@@ -69,7 +74,11 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         }
     }
 
-    let count = stopped.len();
+    // A record whose process had already exited stopped nothing.
+    let count = stopped
+        .iter()
+        .filter(|entry| entry["stopped"] != "was not running")
+        .count();
     ctx.rep.set("stopped", Value::Array(stopped));
     ctx.rep.set("shutdown", json!(shut_down));
     let what = match args.platform {
@@ -304,18 +313,34 @@ fn shutdown_emulator(ctx: &Ctx, project: &Project, host: &crate::host::HostConfi
 
 /// Runs `icm ps`: the sessions and whether their processes still run.
 pub fn ps(ctx: &mut Ctx) -> Result<()> {
-    let project = ctx.project()?.clone();
+    let Some(project) = ctx.try_project().cloned() else {
+        ctx.rep.set("sessions", json!([]));
+        ctx.rep.summary("not in an icm project: no sessions");
+        ctx.rep
+            .content("no icm project here (no icm.toml), so no sessions\n");
+        return Ok(());
+    };
     let dir = project.sessions_dir();
     let mut sessions = Vec::new();
+    let mut text = String::new();
     let mut running = 0;
     for (path, session) in session::list(&dir) {
         match session {
             Ok(session) => {
                 let written = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                // A record with a command-line `marker` (the web session
+                // host) also needs it in the process's command line.
+                let marked = session.extra.get("marker").and_then(Value::as_str);
                 let alive: Vec<i32> = session
                     .all_pids()
                     .into_iter()
                     .filter(|pid| session::is_ours(*pid, written))
+                    .filter(|pid| {
+                        marked.is_none_or(|marker| {
+                            crate::sessions::command_line(*pid)
+                                .is_some_and(|line| line.contains(marker))
+                        })
+                    })
                     .collect();
                 let device = session.device.as_ref().map(|d| d.name.clone());
                 let mut line = format!("{}:", session.platform);
@@ -334,6 +359,8 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
                 if let Some(run) = &session.run {
                     line.push_str(&format!(" (run {run})"));
                 }
+                text.push_str(&line);
+                text.push('\n');
                 let check = if alive.is_empty() && !session.all_pids().is_empty() {
                     Check::info(CheckId::RunNoSession, line)
                 } else {
@@ -361,6 +388,10 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
         }
     }
     let count = sessions.len();
+    if count == 0 {
+        text.push_str("no sessions\n");
+    }
+    ctx.rep.content(text);
     ctx.rep.set("sessions", Value::Array(sessions));
     ctx.rep.summary(match count {
         0 => "no sessions".to_string(),

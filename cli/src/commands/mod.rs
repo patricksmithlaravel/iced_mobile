@@ -75,6 +75,17 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
         Command::Input(args) if args.platform == Platform::Android => {
             crate::android::input(ctx, &args)
         }
+        // web (design §10.2)
+        Command::Run(args) if args.platform == Platform::Web => crate::web::run(ctx, &args),
+        Command::Build(args) if args.platform == Some(Platform::Web) && !args.all => {
+            crate::web::build_command(ctx, &args)
+        }
+        Command::Shot(args) if !args.headless && args.platform == Some(Platform::Web) => {
+            crate::web::shot(ctx, &args)
+        }
+        Command::Logs(args) if args.platform == Platform::Web => crate::web::logs(ctx, &args),
+        Command::Input(args) if args.platform == Platform::Web => crate::web::input(ctx, &args),
+        Command::Session(args) => crate::web::host::main(ctx, &args.args),
         Command::Build(_) => not_implemented("build"),
         Command::Run(_) => not_implemented("run"),
         Command::Stop(args) => stop::stop(ctx, &args),
@@ -86,7 +97,6 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<()> {
         Command::Ui(_) => not_implemented("ui"),
         Command::Test(_) => not_implemented("test"),
         Command::Clean(_) => not_implemented("clean"),
-        Command::Session(_) => not_implemented("__session"),
     }
 }
 

@@ -51,6 +51,9 @@ cargo test
 | `image.rs` | PNG decode/encode, previews, cropping, blank detection |
 | `platform/desktop/` | `build`/`run`/`shot`/`logs`/`stop desktop`: launch, readiness, window capture (`macos.rs` FFI, `linux.rs` X11), headless fallback (`headless.rs`), log records (`logs.rs`) |
 | `platform/ios_sim/` | `build`/`run`/`logs`/`shot`/`stop`/`input ios-sim`: simulator choice (`simctl.rs`), bundle and plists (`bundle.rs`, `plist.rs`), Mach-O gates (`macho.rs`), PNG preview and blank detection (`image.rs`), log normalization (`logs.rs`), the session file (`session.rs`); fake-tool tests in `tests/ios_sim.rs` |
+| `preview.rs` | after a capture: PNG decode, `screen.preview.png`, blank detection (`run.screen_blank`) |
+| `sessions.rs` | `target/icm/sessions/<platform>.json` records: write (mode 0600), list, alive (pid plus a command-line marker), terminate |
+| `web/` | the web platform: build, wasm-bindgen and the site (`site.rs`); the detached session host (`host.rs`) with its std server (`server.rs`), headless Chrome over `--remote-debugging-pipe` (`cdp.rs`) and console capture (`console.rs`); the control client (`client.rs`); viewports (`viewport.rs`) |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
 | `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices`/`doctor` for Android: APK pipeline, managed AVD, adb, logcat, session (`android/mod.rs` has the module map) |
 
@@ -92,6 +95,10 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 - `tests/desktop.rs` runs, logs, captures and stops `fixtures/desktop`, a
   windowless stand-in app (`--env ICM_FIXTURE=ready|panic|exit|hang`), and
   kills whatever it started.
+- `tests/web.rs` drives the web pipeline against real headless Chrome with
+  a fake cargo and wasm-bindgen (`ICM_TOOL_CARGO`, `ICM_TOOL_WASM_BINDGEN`)
+  whose JavaScript "app" speaks `ICM_EVENT`; it skips without Chrome or the
+  wasm32 target.
 - `icm __test <scenario>` (hidden) exercises the core end to end: `sleep`
   (timeouts, signals, `--detach`), `panic`, `fail <id>`, `checks`, `plan`,
   `project`, `lock`, `deployment`, `busy` (the signal watchdog).
