@@ -131,10 +131,12 @@ jobs:
           retention-days: 14
 
   # WiX and NSIS installers are built on Windows (design §11.5), so icm runs
-  # there; it builds on a Windows host only once the Windows pipeline brings
-  # host support (cli/src/lib.rs refuses non-Unix hosts until then).
+  # there. icm does not build on a Windows host yet (cli/src/lib.rs refuses
+  # non-Unix hosts), so the job runs only when the repository variable
+  # ICM_WINDOWS_HOST is `true`, as icm-desktop.yml's Windows job does.
   release-windows:
     name: release windows (.msi, NSIS; --sign none)
+    if: ${{ vars.ICM_WINDOWS_HOST == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:

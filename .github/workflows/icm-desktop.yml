@@ -1,7 +1,9 @@
 # icm's desktop release pipelines on their own hosts (docs/icm/DESIGN.md §17
 # item 11, §18 phase 5). GitHub Actions is not enabled on this fork yet; the
-# workflow runs once the owner enables it. The other workflows in this
-# directory are upstream iced's.
+# workflow runs once the owner enables it. icm.yml's release-* jobs release
+# the same targets through .github/ci/release.sh; this workflow adds the
+# phase 5 acceptance (a throwaway signing identity), the desktop release
+# tests with the real dpkg-deb, `icm verify linux` and the NSIS installer.
 #
 # - macos: cli/tests/accept/phase5.sh (an unsigned release and its DMG, a
 #   release signed with a throwaway identity, the app launched).
@@ -62,10 +64,10 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # The glibc floor of the packages is this image's (2.35). Pin it by
-    # digest once Actions is enabled (`docker buildx imagetools inspect
-    # ubuntu:22.04` prints it).
-    container: ubuntu:22.04
+    # The glibc floor of the packages is this image's (2.35). The digest is
+    # icm.yml's release-linux one; refresh both together (`docker buildx
+    # imagetools inspect ubuntu:22.04` prints it).
+    container: ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
     env:
       DEBIAN_FRONTEND: noninteractive
       CARGO_HOME: /root/.cargo
