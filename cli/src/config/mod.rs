@@ -6,6 +6,10 @@
 //! is compared with semver *ordering* against a plain version (Appendix C
 //! item 5): write `min_icm = "0.14.1-mobile.1"`. The older form
 //! `icm = ">=0.14.1-mobile.1"` is still read, as the same minimum.
+//!
+//! `schema` and the minimum are read first, leniently (Appendix D item 1): a
+//! file for a newer icm is `config.too_new` (exit 4) even when it holds keys
+//! this icm does not know, and the strict parse never runs on it.
 
 pub mod source;
 
@@ -993,9 +997,29 @@ pub fn load(path: &Path) -> Result<Loaded, Vec<IcmError>> {
         )]
     })?;
 
+    read(path, text)
+}
+
+/// Parses an icm.toml from text (tests and tools that already read it).
+pub fn parse(path: &Path, text: &str) -> Result<Loaded, Vec<IcmError>> {
+    read(path.to_path_buf(), text.to_string())
+}
+
+/// Checks that this icm may read the file, then parses it strictly and
+/// validates it.
+fn read(path: PathBuf, text: String) -> Result<Loaded, Vec<IcmError>> {
     let source = Source::new(&path, text);
-    let config: IcmToml =
-        toml::from_str(&source.text).map_err(|error| vec![toml_error(&source, &error)])?;
+
+    // A file for a newer icm may hold keys this one does not know: stop
+    // before the strict parse would report the first of them.
+    let compatibility = compatibility(&source);
+    if !compatibility.too_new.is_empty() {
+        return Err(compatibility.too_new);
+    }
+    let min_icm = compatibility.min_icm.as_ref();
+
+    let config: IcmToml = toml::from_str(&source.text)
+        .map_err(|error| vec![newer_key_fix(toml_error(&source, &error), min_icm)])?;
 
     let loaded = Loaded {
         dir: path.parent().map(Path::to_path_buf).unwrap_or_default(),
@@ -1004,7 +1028,10 @@ pub fn load(path: &Path) -> Result<Loaded, Vec<IcmError>> {
         source,
     };
 
-    let problems = validate(&loaded);
+    let problems: Vec<IcmError> = validate(&loaded)
+        .into_iter()
+        .map(|problem| newer_key_fix(problem, min_icm))
+        .collect();
     if problems.is_empty() {
         Ok(loaded)
     } else {
@@ -1012,23 +1039,103 @@ pub fn load(path: &Path) -> Result<Loaded, Vec<IcmError>> {
     }
 }
 
-/// Parses an icm.toml from text (tests and tools that already read it).
-pub fn parse(path: &Path, text: &str) -> Result<Loaded, Vec<IcmError>> {
-    let source = Source::new(path, text.to_string());
-    let config: IcmToml =
-        toml::from_str(&source.text).map_err(|error| vec![toml_error(&source, &error)])?;
-    let loaded = Loaded {
-        dir: path.parent().map(Path::to_path_buf).unwrap_or_default(),
-        path: path.to_path_buf(),
-        config,
-        source,
+/// The keys that say whether this icm may read a file. Every other key is
+/// ignored, and a value of another type is left to the strict parse.
+#[derive(Debug, Deserialize)]
+struct VersionKeys {
+    #[serde(default)]
+    schema: Option<toml::Value>,
+    #[serde(default)]
+    min_icm: Option<toml::Value>,
+    #[serde(default)]
+    icm: Option<toml::Value>,
+}
+
+/// What a file's version keys say about this icm.
+#[derive(Debug, Default)]
+struct Compatibility {
+    /// The minimum icm the file names, when it is a version.
+    min_icm: Option<semver::Version>,
+    /// `config.too_new`: the file needs a newer icm.
+    too_new: Vec<IcmError>,
+}
+
+/// Reads `schema` and `min_icm` (or the older `icm`) before the strict
+/// parse. A syntax error leaves the file to the strict parse, which
+/// reports it.
+fn compatibility(source: &Source) -> Compatibility {
+    let Ok(keys) = toml::from_str::<VersionKeys>(&source.text) else {
+        return Compatibility::default();
     };
-    let problems = validate(&loaded);
-    if problems.is_empty() {
-        Ok(loaded)
-    } else {
-        Err(problems)
+    let mut too_new = Vec::new();
+
+    if let Some(schema) = keys.schema.as_ref().and_then(toml::Value::as_integer)
+        && schema > i64::from(SCHEMA)
+    {
+        too_new.push(
+            IcmError::new(
+                CheckId::ConfigTooNew,
+                format!(
+                    "{}: schema {schema} is newer than this icm reads (schema {SCHEMA})",
+                    source.location_for("schema"),
+                ),
+            )
+            .evidence(source.evidence_for("schema"))
+            .fix_commands([crate::version::install_command(None)]),
+        );
     }
+
+    // `min_icm` wins over `icm`, as in `IcmToml::min_icm`.
+    let named = match (&keys.min_icm, &keys.icm) {
+        (Some(raw), _) => Some(("min_icm", raw)),
+        (None, raw) => raw.as_ref().map(|raw| ("icm", raw)),
+    };
+    let min = named.and_then(|(key, raw)| {
+        let min = crate::version::parse_min(raw.as_str()?).ok()?;
+        Some((key, min))
+    });
+    let current = crate::buildinfo::version();
+    if let Some((key, min)) = &min
+        && !crate::version::meets(&current, min)
+    {
+        too_new.push(
+            IcmError::new(
+                CheckId::ConfigTooNew,
+                format!(
+                    "{}: this project needs icm {min} or newer; this is icm {current}",
+                    source.location_for(key)
+                ),
+            )
+            .evidence(source.evidence_for(key))
+            .fix_commands([crate::version::install_command(Some(min))]),
+        );
+    }
+
+    Compatibility {
+        min_icm: min.map(|(_, min)| min),
+        too_new,
+    }
+}
+
+/// A key this icm does not know may be one a newer icm added, and the file
+/// did not say it needs that icm: its `min_icm` is absent (or not a
+/// version), or this icm meets it. The fix of a `config.unknown_key` says
+/// so.
+fn newer_key_fix(mut problem: IcmError, min_icm: Option<&semver::Version>) -> IcmError {
+    if problem.check_id() != Some(CheckId::ConfigUnknownKey) {
+        return problem;
+    }
+    let newer = match min_icm {
+        None => "The file names no `min_icm` this icm can read, so the key may come from a \
+                 newer icm: if it does, install that icm and set `min_icm` to its version."
+            .to_string(),
+        Some(min) => format!(
+            "If the key comes from an icm newer than `min_icm` ({min}), install that icm and \
+             raise `min_icm` to its version."
+        ),
+    };
+    problem.fix.summary = format!("{} {newer}", problem.fix.summary);
+    problem
 }
 
 /// Maps a TOML parse or type error to `config.unknown_key` or
@@ -1092,31 +1199,19 @@ fn invalid(loaded: &Loaded, key: &str, message: impl AsRef<str>) -> IcmError {
     .evidence(evidence)
 }
 
-/// Semantic validation. Returns every problem.
-pub fn validate(loaded: &Loaded) -> Vec<IcmError> {
+/// Semantic validation of a file `compatibility` let through. Returns every
+/// problem.
+fn validate(loaded: &Loaded) -> Vec<IcmError> {
     let config = &loaded.config;
     let mut problems = Vec::new();
 
-    // schema
-    if config.schema > SCHEMA {
-        let evidence = loaded.evidence("schema");
-        problems.push(
-            IcmError::new(
-                CheckId::ConfigTooNew,
-                format!(
-                    "{}: schema {} is newer than this icm reads (schema {SCHEMA})",
-                    loaded.source.location_for("schema"),
-                    config.schema
-                ),
-            )
-            .evidence(evidence)
-            .fix_commands([crate::version::install_command(None)]),
-        );
-    } else if config.schema != SCHEMA {
+    // schema: a newer one was `config.too_new` before the strict parse.
+    if config.schema != SCHEMA {
         problems.push(invalid(loaded, "schema", format!("must be {SCHEMA}")));
     }
 
-    // min_icm / icm
+    // min_icm / icm: one this icm does not meet was `config.too_new`
+    // before the strict parse.
     if config.min_icm.is_some() && config.icm.is_some() {
         problems.push(invalid(
             loaded,
@@ -1130,24 +1225,8 @@ pub fn validate(loaded: &Loaded) -> Vec<IcmError> {
         } else {
             "icm"
         };
-        match crate::version::parse_min(raw) {
-            Ok(min) => {
-                let current = crate::buildinfo::version();
-                if !crate::version::meets(&current, &min) {
-                    problems.push(
-                        IcmError::new(
-                            CheckId::ConfigTooNew,
-                            format!(
-                                "{}: this project needs icm {min} or newer; this is icm {current}",
-                                loaded.source.location_for(key)
-                            ),
-                        )
-                        .evidence(loaded.evidence(key))
-                        .fix_commands([crate::version::install_command(Some(&min))]),
-                    );
-                }
-            }
-            Err(message) => problems.push(invalid(loaded, key, message)),
+        if let Err(message) = crate::version::parse_min(raw) {
+            problems.push(invalid(loaded, key, message));
         }
     }
 
@@ -2105,6 +2184,195 @@ snapshot = false
     fn newer_schemas_need_a_newer_icm() {
         let error = first_error(&MINIMAL.replace("schema = 1", "schema = 2"));
         assert_eq!(error.id, "config.too_new");
+    }
+
+    /// A version newer than this icm.
+    fn newer_than_this() -> semver::Version {
+        let current = crate::buildinfo::version();
+        semver::Version::parse(&format!(
+            "{}.{}.0-mobile.1",
+            current.major,
+            current.minor + 1
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_file_for_a_newer_icm_is_too_new_whatever_else_it_holds() {
+        let newer = newer_than_this();
+        // Keys a newer icm might add: at the top, in a known table and as a
+        // new table, and a known key with a type this icm does not take.
+        let extra = "colour = \"red\"\nbuild = \"one\"\n[future]\nkey = true\n";
+
+        for (line, key) in [
+            (format!("min_icm = \"{newer}\""), "min_icm"),
+            (format!("icm = \">={newer}\""), "icm"),
+        ] {
+            let errors = parse_text(&format!("{line}\n{MINIMAL}{extra}")).unwrap_err();
+            assert_eq!(errors.len(), 1, "{key}: {errors:?}");
+            let error = &errors[0];
+            assert_eq!(error.id, "config.too_new", "{key}");
+            assert_eq!(error.exit, crate::exit::Exit::Environment);
+            assert_eq!(error.exit.code(), 4);
+            assert_eq!(error.evidence[0].line, Some(1), "{key}");
+            assert!(
+                error.detail.starts_with(&format!(
+                    "/proj/icm.toml:1: this project needs icm {newer} or newer"
+                )),
+                "{}",
+                error.detail
+            );
+            assert_eq!(
+                error.fix.commands,
+                vec![crate::version::install_command(Some(&newer))],
+                "{key}"
+            );
+        }
+
+        // A newer schema, with no minimum to name.
+        let schema = format!("{}{extra}", MINIMAL.replace("schema = 1", "schema = 2"));
+        let errors = parse_text(&schema).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].id, "config.too_new");
+        assert_eq!(
+            errors[0].fix.commands,
+            vec![crate::version::install_command(None)]
+        );
+
+        // Both at once: each is said.
+        let both = format!(
+            "min_icm = \"{newer}\"\n{}{extra}",
+            MINIMAL.replace("schema = 1", "schema = 2")
+        );
+        let ids: Vec<String> = parse_text(&both)
+            .unwrap_err()
+            .iter()
+            .map(|e| e.id.to_string())
+            .collect();
+        assert_eq!(ids, ["config.too_new", "config.too_new"]);
+
+        // A syntax error is still the strict parse's to report.
+        let broken = first_error(&format!("min_icm = \"{newer}\"\n{MINIMAL}[app\n"));
+        assert_eq!(broken.id, "config.invalid");
+    }
+
+    #[test]
+    fn unknown_keys_under_a_met_minimum_stay_unknown() {
+        let current = crate::buildinfo::version();
+        let older = semver::Version::parse("0.14.1-mobile.1").unwrap();
+        assert!(older <= current);
+
+        for min in [current.clone(), older.clone()] {
+            for (text, line) in [
+                (
+                    format!("min_icm = \"{min}\"\n{MINIMAL}colour = \"red\"\n"),
+                    6,
+                ),
+                (
+                    format!("icm = \">={min}\"\n{MINIMAL}[future]\nkey = 1\n"),
+                    6,
+                ),
+                (
+                    format!("min_icm = \"{min}\"\n{MINIMAL}[checks]\ntv = []\n"),
+                    7,
+                ),
+            ] {
+                let error = first_error(&text);
+                assert_eq!(error.id, "config.unknown_key", "{text}");
+                assert_eq!(error.exit, crate::exit::Exit::Config);
+                assert_eq!(error.exit.code(), 3);
+                assert_eq!(error.evidence[0].line, Some(line), "{text}");
+                assert!(
+                    error.fix.summary.starts_with("Remove or rename the key")
+                        && error.fix.summary.contains(&format!(
+                            "an icm newer than `min_icm` ({min}), install that icm and raise \
+                             `min_icm`"
+                        )),
+                    "{}",
+                    error.fix.summary
+                );
+                assert!(error.fix.commands.is_empty());
+            }
+        }
+
+        // Without a minimum, the key may be a newer icm's too.
+        let error = first_error(&format!("{MINIMAL}colour = \"red\"\n"));
+        assert_eq!(error.id, "config.unknown_key");
+        assert!(
+            error.fix.summary.contains(
+                "names no `min_icm` this icm can read, so the key may come from a newer icm: if \
+                 it does, install that icm and set `min_icm` to its version"
+            ),
+            "{}",
+            error.fix.summary
+        );
+
+        // A minimum that is not a version is no minimum to the key's fix,
+        // and `config.invalid` once the key is gone.
+        let bad = format!("min_icm = \"^0.14\"\n{MINIMAL}colour = \"red\"\n");
+        let error = first_error(&bad);
+        assert_eq!(error.id, "config.unknown_key");
+        assert!(
+            error
+                .fix
+                .summary
+                .contains("names no `min_icm` this icm can read")
+        );
+        let error = first_error(&bad.replace("colour = \"red\"\n", ""));
+        assert_eq!(error.id, "config.invalid");
+
+        // Other findings keep their own fix.
+        let error = first_error(&format!("min_icm = \"{older}\"\n{MINIMAL}build = 0\n"));
+        assert_eq!(error.id, "config.invalid");
+        assert!(
+            !error.fix.summary.contains("min_icm"),
+            "{}",
+            error.fix.summary
+        );
+    }
+
+    /// The template's comment on `min_icm` (`icm explain config.min_icm`)
+    /// says what an older icm does with the file.
+    #[test]
+    fn the_template_says_what_an_older_icm_does() {
+        let keys = crate::template::config_keys();
+        let min_icm = keys
+            .iter()
+            .find(|k| k.key == "min_icm")
+            .expect("the template documents min_icm");
+        let comment = &min_icm.comment;
+
+        // From this icm on, an older icm than the file asks for exits 4,
+        // even when the file holds a key or table it does not know.
+        assert!(
+            comment.contains("an older icm exits 4 (config.too_new)"),
+            "{comment}"
+        );
+        let template = std::str::from_utf8(crate::template::file("icm.toml").unwrap()).unwrap();
+        assert!(parse_text(template).is_ok());
+        let newer = newer_than_this();
+        let text = format!(
+            "{}\n[future]\nkey = true\n",
+            template.replace(&min_icm.line, &format!("min_icm = \"{newer}\""))
+        );
+        let errors = parse_text(&text).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].id, "config.too_new");
+        assert_eq!(errors[0].exit.code(), 4);
+
+        // The one release that parsed strictly first is named, with what it
+        // says instead.
+        assert!(
+            comment.contains(
+                "except 0.14.1-mobile.1, which stops first at a key it does not know \
+                 (config.unknown_key, exit 3)"
+            ),
+            "{comment}"
+        );
+        assert!(
+            semver::Version::parse("0.14.1-mobile.1").unwrap() < crate::buildinfo::version(),
+            "the release that parsed strictly first is older than this one"
+        );
     }
 
     #[test]

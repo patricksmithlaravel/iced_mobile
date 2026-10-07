@@ -896,6 +896,45 @@ fn config_errors_point_at_the_line() {
 }
 
 #[test]
+fn a_file_for_a_newer_icm_exits_four_before_its_unknown_keys() {
+    // badconfig's icm.toml has a key this icm does not know.
+    let sandbox = Sandbox::with_fixture("badconfig");
+    let icm = sandbox.cwd.join("icm.toml");
+    let text = std::fs::read_to_string(&icm).unwrap();
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let newer = format!("{}.{}.0-mobile.1", current.major, current.minor + 1);
+
+    std::fs::write(&icm, format!("min_icm = \"{newer}\"\n{text}")).unwrap();
+    let result = result(&sandbox.run(&["print", "config", "--json", "-q"]));
+    assert_eq!(result["exit"], 4, "{result}");
+    let errors = result["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1, "{result}");
+    assert_eq!(errors[0]["id"], "config.too_new");
+    assert_eq!(errors[0]["evidence"][0]["line"], 1);
+    assert_eq!(errors[0]["fix"]["by"], "agent");
+    assert!(
+        errors[0]["fix"]["commands"][0]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("--tag v{newer} icm")),
+        "{result}"
+    );
+
+    // A minimum this icm meets leaves the key to report, at exit 3.
+    std::fs::write(&icm, format!("min_icm = \"{current}\"\n{text}")).unwrap();
+    let result = self::result(&sandbox.run(&["print", "config", "--json", "-q"]));
+    assert_eq!(result["exit"], 3, "{result}");
+    assert_eq!(result["errors"][0]["id"], "config.unknown_key");
+    assert!(
+        result["errors"][0]["fix"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("newer than `min_icm` ({current})")),
+        "{result}"
+    );
+}
+
+#[test]
 fn platform_locks_are_exclusive() {
     let sandbox = Sandbox::with_fixture("app");
     let holder = sandbox

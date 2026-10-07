@@ -81,6 +81,10 @@ New states go into `LifecycleEvent`, which is `#[non_exhaustive]`.
   `verify` and host `test` refuse it (exit 2). `--help` and `--version` end with a result object
   under `--json`.
 - Exit 4 means the environment is not ready: follow each error's `fix.by` (doctor, agent or owner).
+- icm reads `min_icm` and `schema` before the rest of `icm.toml`, so a file for a newer icm stops
+  with `config.too_new` (exit 4) and the install command, not with `config.unknown_key` (exit 3)
+  at the first key the newer icm added. The fix of `config.unknown_key` says the key may come from
+  a newer icm.
 - `icm stop --shutdown` leaves running a simulator that another project's run booted, as it
   already did for the emulator, and `stop --all --shutdown` without a session considers only the
   simulator the project's runs use.

@@ -7,6 +7,13 @@
   `icm = ">=0.14.1-mobile.3"` is read the same way.
 - `schema = 2` (or higher) was written by a newer icm.
 
+icm reads `schema` and `min_icm` (or `icm`) before the rest of the file and
+ignores every other key while it does. A file for a newer icm may hold keys
+and tables this icm does not know, or values of a type it does not take. They
+are not read, so this is the only finding, not `config.unknown_key` or
+`config.invalid` (exit 3). icm 0.14.1-mobile.1 read the whole file first, so
+it reports the first key it does not know as `config.unknown_key`.
+
 ## Fix
 
 Install the icm the file asks for; the fix command names the tag:
@@ -14,3 +21,5 @@ Install the icm the file asks for; the fix command names the tag:
 ```sh
 cargo install --locked --git https://github.com/patricksmithlaravel/iced_mobile --tag v<version> icm
 ```
+
+Keep the keys this icm does not know: the newer icm reads them.
