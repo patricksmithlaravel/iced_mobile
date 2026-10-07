@@ -505,7 +505,8 @@ impl Pipeline for Android {
         let (bundletool, _) = tools.bundletool(ctx)?;
         let ctx: &Ctx = ctx;
         // The dumps are the gates' evidence: keep them in a run directory
-        // (the project's, else icm's cache), as other commands that work do.
+        // (the project's, which verify attached, else icm's cache), as other
+        // commands that work do.
         if ctx.rep.run_dir().is_none() {
             let root = verify
                 .project

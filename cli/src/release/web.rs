@@ -1006,7 +1006,7 @@ impl Pipeline for Web {
 
     fn verify(&self, ctx: &mut Ctx, verify: &mut Verify) -> Result<()> {
         // The serve check's files go into the run directory: the project's
-        // (verify found the project without attaching it) or the cache's.
+        // (verify attached it) or, outside a project, the cache's.
         if ctx.rep.run_dir().is_none() {
             let root = verify
                 .project

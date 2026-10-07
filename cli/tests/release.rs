@@ -745,6 +745,14 @@ fn releases_carry_third_party_notices() {
     ]);
     assert_eq!(verify["exit"], 0, "{verify}");
     assert_eq!(verify["checks"]["fail"], 0, "{verify}");
+    // verify with --artifact found the project without resolving it for
+    // the newest release; its run is still the project's.
+    let run_dir = app.abs(&verify["run_dir"]);
+    assert!(
+        run_dir.starts_with(app.dir().join("target/icm/runs")),
+        "{}",
+        run_dir.display()
+    );
 
     // Without `fira-sans`, Fira Sans ships only on the phones
     // (`mobile-fira-sans`, on by default).

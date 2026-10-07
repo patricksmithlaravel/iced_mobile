@@ -123,6 +123,12 @@ fn not_found(detail: String, target: ReleaseTarget) -> IcmError {
 fn locate(ctx: &mut Ctx, args: &VerifyArgs) -> Result<Verify> {
     let target = args.target;
     let project = ctx.try_project().cloned();
+    // `try_project` finds the project without attaching the run directory;
+    // inside a project the run belongs in its `runs/`, as for every command
+    // that resolves one (outside a project it goes to icm's cache).
+    if let Some(project) = &project {
+        let _ = ctx.rep.attach(&project.icm_dir);
+    }
     let mut verify = Verify {
         target,
         gates: Gates::new(SignMode::Auto),
