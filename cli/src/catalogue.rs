@@ -781,6 +781,9 @@ catalogue! {
     ReleaseDirtyTree = "release.dirty_tree", CheckFailed, Fail, Agent,
         "The release is not built from a clean git commit",
         "Commit the changes and Cargo.lock, or pass --allow-dirty (artifacts.json then records `dirty: true`).";
+    ReleaseNotUploadable = "release.not_uploadable", NeedsOwner, Fail, Owner,
+        "The release is not uploadable, so it cannot have been uploaded",
+        "Record only a build the owner uploaded: release it signed with every gate passing and let upload.sh record it; if the owner signed and uploaded this one by hand, the owner passes --force.";
     ReleaseLockMissing = "release.lock_missing", CheckFailed, Fail, Agent,
         "There is no Cargo.lock for the release to build with --locked",
         "Create it (`icm check <platform>` resolves it), then commit it.";

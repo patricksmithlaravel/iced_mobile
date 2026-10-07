@@ -954,6 +954,8 @@ fn the_ledger_marks_uploads_once() {
     let none = app.json(&["ledger", "mark-uploaded", "ios"]);
     assert_eq!(none["exit"], 2, "{none}");
     assert_eq!(none["errors"][0]["id"], "release.not_found");
+    // Recording a build without its release is the owner's call.
+    assert_eq!(none["errors"][0]["fix"]["by"], "owner", "{none}");
 
     let forced = app.json(&["ledger", "mark-uploaded", "android", "--build", "3"]);
     assert_eq!(forced["exit"], 0, "{forced}");
@@ -967,4 +969,55 @@ fn the_ledger_marks_uploads_once() {
     );
     let shown = app.json(&["ledger", "show"]);
     assert_eq!(shown["uploads"].as_array().unwrap().len(), 1);
+
+    // A release that is not uploadable cannot have been uploaded: refused
+    // (the dry run too), unless the owner forces it.
+    let unsigned = app.json(&["__test", "release", "ios", "--sign", "none"]);
+    assert_eq!(unsigned["exit"], 0, "{unsigned}");
+    for args in [
+        &["ledger", "mark-uploaded", "ios", "--dry-run"][..],
+        &["ledger", "mark-uploaded", "ios"][..],
+    ] {
+        let refused = app.json(args);
+        assert_eq!(refused["exit"], 9, "{refused}");
+        assert_eq!(refused["errors"][0]["id"], "release.not_uploadable");
+        assert_eq!(refused["errors"][0]["fix"]["by"], "owner");
+        assert!(
+            refused["errors"][0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("it is unsigned"),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        app.json(&["ledger", "show"])["uploads"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let forced = app.json(&["ledger", "mark-uploaded", "ios", "--force"]);
+    assert_eq!(forced["exit"], 0, "{forced}");
+    assert_eq!(forced["warnings"][0]["id"], "release.not_uploadable");
+    assert_eq!(
+        app.json(&["ledger", "show"])["uploads"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // An uploadable release's dry run says nothing was recorded.
+    let signed = App::new();
+    signed.ready_for_ios();
+    let release = signed.json(&["__test", "release", "ios"]);
+    assert_eq!(release["exit"], 0, "{release}");
+    let plan = signed.json(&["ledger", "mark-uploaded", "ios", "--dry-run"]);
+    assert_eq!(plan["exit"], 0, "{plan}");
+    assert_eq!(
+        plan["summary"],
+        "the plan of icm ledger mark-uploaded ios (--dry-run: nothing was recorded)"
+    );
+    assert!(!signed.dir().join(".icm/ledger.toml").exists());
 }

@@ -1024,6 +1024,10 @@ pub enum LedgerAction {
         /// The build number (default: the newest release of the target)
         #[arg(long)]
         build: Option<u64>,
+        /// Record it although its artifacts.json says it is not uploadable
+        /// (the owner signed and uploaded it by hand)
+        #[arg(long)]
+        force: bool,
     },
 }
 

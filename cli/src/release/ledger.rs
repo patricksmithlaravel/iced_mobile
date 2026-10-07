@@ -189,7 +189,11 @@ pub fn record(project_dir: &Path, entry: Entry) -> Result<bool> {
 pub fn run(ctx: &mut Ctx, args: &LedgerArgs) -> Result<()> {
     match &args.action {
         LedgerAction::Show => show(ctx),
-        LedgerAction::MarkUploaded { target, build } => mark_uploaded(ctx, *target, *build),
+        LedgerAction::MarkUploaded {
+            target,
+            build,
+            force,
+        } => mark_uploaded(ctx, *target, *build, *force),
     }
 }
 
@@ -219,7 +223,25 @@ fn show(ctx: &mut Ctx) -> Result<()> {
     Ok(())
 }
 
-fn mark_uploaded(ctx: &mut Ctx, target: ReleaseTarget, build: Option<u64>) -> Result<()> {
+/// Why a release's `artifacts.json` says it is not uploadable.
+fn not_uploadable(manifest: &Manifest) -> String {
+    if manifest.sign == "none" {
+        "it is unsigned (`icm release --sign none`)".to_string()
+    } else if !manifest.signed {
+        "it is not signed for the store".to_string()
+    } else if !manifest.checks.ids_fail.is_empty() {
+        format!("gates failed ({})", manifest.checks.ids_fail.join(", "))
+    } else {
+        "the owner had items left to act on when it was made".to_string()
+    }
+}
+
+fn mark_uploaded(
+    ctx: &mut Ctx,
+    target: ReleaseTarget,
+    build: Option<u64>,
+    force: bool,
+) -> Result<()> {
     let project = ctx.project()?.clone();
     let name = target.as_str();
 
@@ -239,6 +261,34 @@ fn mark_uploaded(ctx: &mut Ctx, target: ReleaseTarget, build: Option<u64>) -> Re
                     .map(|manifest| (dir, manifest))
             }),
     };
+
+    // A release that is not uploadable cannot have been uploaded; recording
+    // it would make every later release of that build fail
+    // `version.build_not_increased`.
+    if let Some((dir, manifest)) = &found
+        && !manifest.uploadable
+    {
+        let detail = format!(
+            "{name} build {} in {} is not uploadable: {}",
+            manifest.app.build,
+            crate::paths::display(dir),
+            not_uploadable(manifest)
+        );
+        if !force {
+            return Err(IcmError::new(
+                CheckId::ReleaseNotUploadable,
+                format!("{detail}; the ledger records only builds the owner uploaded"),
+            )
+            .evidence(Evidence::file(dir.join(super::manifest::FILE))));
+        }
+        ctx.rep.check(
+            Check::warn(
+                CheckId::ReleaseNotUploadable,
+                format!("{detail}; recorded anyway (--force)"),
+            )
+            .evidence(Evidence::file(dir.join(super::manifest::FILE))),
+        );
+    }
 
     let entry = match (&found, build) {
         (Some((dir, manifest)), _) => {
@@ -280,9 +330,12 @@ fn mark_uploaded(ctx: &mut Ctx, target: ReleaseTarget, build: Option<u64>) -> Re
                 ),
             )
             .fix(
-                "Pass the build that was uploaded, or make the release first.",
+                format!(
+                    "Make the release first (`icm release {name}`); its upload.sh records the upload. Recording a build without its release is the owner's call, with --build <n>."
+                ),
                 &[&format!("icm ledger mark-uploaded {name} --build <n>")],
-            ));
+            )
+            .by(crate::catalogue::By::Owner));
         }
     };
 
@@ -299,6 +352,9 @@ fn mark_uploaded(ctx: &mut Ctx, target: ReleaseTarget, build: Option<u64>) -> Re
         ));
         plan.report(ctx);
         ctx.rep.set("upload", json!(entry));
+        ctx.rep.summary(format!(
+            "the plan of icm ledger mark-uploaded {name} (--dry-run: nothing was recorded)"
+        ));
         return Ok(());
     }
     let added = record(project.dir(), entry.clone())?;
