@@ -1,0 +1,97 @@
+# The framework's checks (AGENTS.md "Checks"; design §17 item 9): the fork's
+# own crates, the template in examples/app, and the workspace's rust-version.
+# Every job builds with the toolchain examples/app/rust-toolchain.toml pins
+# (.github/ci/toolchain.sh), except the MSRV job. icm has its own workflow,
+# icm.yml.
+name: Framework
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*-mobile.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: .github/ci/toolchain.sh pinned
+      # Plain `cargo fmt`, never with --all: that flag also formats path
+      # dependencies and would rewrite vendor/winit with this repository's
+      # settings (AGENTS.md).
+      - run: cargo fmt -- --check
+
+  check:
+    name: check (host, ios-sim, android, wasm)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - run: .github/ci/toolchain.sh pinned aarch64-apple-ios-sim aarch64-linux-android wasm32-unknown-unknown
+      - name: Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 >/dev/null
+      - run: cargo check -p iced
+      - run: cargo check -p iced --target aarch64-apple-ios-sim
+      # NativeActivity is iced's default on Android; the check needs no NDK.
+      - run: cargo check -p iced --target aarch64-linux-android
+      - run: cargo check -p iced --target wasm32-unknown-unknown
+      - name: The template (examples/app) on every platform icm builds it for
+        run: |
+          cargo check -p app --bin app
+          cargo check -p app --bin app --target aarch64-apple-ios-sim
+          cargo check -p app --lib --target aarch64-linux-android
+          cargo check -p app --bin app --target wasm32-unknown-unknown
+      - name: Clippy on the shell's mobile code
+        run: |
+          cargo clippy -p iced_winit --no-deps --target aarch64-apple-ios-sim -- -D warnings
+          cargo clippy -p iced_winit --features android-native-activity --no-deps --target aarch64-linux-android -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is the platform AGENTS.md's matrix runs on; Linux and Windows
+        # keep the desktop coverage upstream's test workflow had.
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - run: .github/ci/toolchain.sh pinned
+      - name: System libraries (the list upstream's workflows install)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get install -y libxkbcommon-dev libgtk-3-dev
+      - run: ICED_TEST_BACKEND=tiny-skia cargo test --workspace
+
+  msrv:
+    name: msrv (rust-version)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      # Tawara pins iced_winit directly and keeps a floor of its own, so iced
+      # must build on the rust-version the workspace declares.
+      - run: .github/ci/toolchain.sh msrv
+      - run: cargo check -p iced
