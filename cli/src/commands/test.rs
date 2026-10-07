@@ -138,15 +138,48 @@ pub fn run(ctx: &mut Ctx, args: &TestArgs) -> Result<()> {
 
         if !suite.finished {
             problems += 1;
+            let text = format!("{stdout}\n{stderr}");
+            // The app's panic is why a harness suite stops early: name it,
+            // and the flows that never reported, as `shot --headless` does.
+            let panic = signatures::first_panic(&text);
             let mut detail = format!("{} stopped before it finished", suite.name);
-            if let Some(crash) = libtest::crashed_processes(&stderr).first() {
-                detail.push_str(&format!(": {crash}"));
+            match &panic {
+                Some(panic) => detail.push_str(&format!(": the app {}", panic.describe())),
+                None => {
+                    if let Some(crash) = libtest::crashed_processes(&stderr).first() {
+                        detail.push_str(&format!(": {crash}"));
+                    }
+                }
             }
-            let error = signatures::annotate(
-                IcmError::new(CheckId::TestFailed, detail),
-                &format!("{stdout}\n{stderr}"),
-                &facts,
-            );
+            if suite.harness {
+                let unreported = flow_names(&package.dir().join("tests").join("flows"));
+                if !unreported.is_empty() {
+                    detail.push_str(&format!(
+                        "; no flow reported a result ({})",
+                        unreported.join(", ")
+                    ));
+                }
+            }
+            let mut error = IcmError::new(CheckId::TestFailed, detail);
+            if let Some(panic) = &panic
+                && let Some((file, line)) = panic.file_line()
+            {
+                let path = [project.metadata.workspace_root.as_path(), package.dir()]
+                    .into_iter()
+                    .map(|base| base.join(&file))
+                    .find(|candidate| candidate.is_file())
+                    .unwrap_or_else(|| PathBuf::from(&file));
+                error = error
+                    .evidence(Evidence::line(&path, line, panic.message.clone()))
+                    .fix(
+                        format!(
+                            "Fix the panic at {}:{line}, then rerun.",
+                            crate::paths::display(&path)
+                        ),
+                        &["icm test --json -q"],
+                    );
+            }
+            let error = signatures::annotate(error, &text, &facts);
             let error = with_log(error, &outcome);
             ctx.rep
                 .check(Check::from_error(error, crate::error::Status::Fail));
@@ -259,6 +292,20 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     let canonical =
         |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| crate::paths::normalize(p));
     canonical(a) == canonical(b)
+}
+
+/// The flows (`<name>.ice`) in a directory, by name, sorted.
+fn flow_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "ice"))
+        .filter_map(|path| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    names
 }
 
 fn with_log(mut error: IcmError, outcome: &crate::process::Outcome) -> IcmError {

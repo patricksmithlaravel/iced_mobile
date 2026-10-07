@@ -190,7 +190,8 @@ fn step_line(event: &Value) -> String {
     line
 }
 
-/// `CHECK FAIL <id>: <detail>` plus `evidence:` and `fix:` continuations.
+/// `CHECK FAIL <id>: <detail>` plus `evidence:`, `likely:` and `fix:`
+/// continuations.
 fn check_lines(event: &Value) -> Vec<String> {
     let status = str_field(event, "status").to_ascii_uppercase();
     let id = str_field(event, "id");
@@ -219,6 +220,18 @@ fn check_lines(event: &Value) -> Vec<String> {
                 }
             }
             lines.push(format!("  evidence: {text}"));
+        }
+    }
+
+    if let Some(causes) = event.get("likely_causes").and_then(Value::as_array) {
+        for cause in causes.iter().filter_map(Value::as_str).take(5) {
+            let mut cause_lines = cause.lines();
+            if let Some(first) = cause_lines.next() {
+                lines.push(format!("  likely: {first}"));
+            }
+            for more in cause_lines.take(5) {
+                lines.push(format!("    {more}"));
+            }
         }
     }
 
@@ -299,6 +312,26 @@ mod tests {
                 "CHECK WARN run.screen_blank: 99.8% of pixels are #000000",
                 "  evidence: target/icm/latest/ios-sim/screen.png",
                 "  fix: icm logs ios-sim --level warn ; icm explain run.screen_blank",
+            ]
+        );
+    }
+
+    #[test]
+    fn likely_causes_render_as_continuations() {
+        let event = json!({
+            "type": "check", "id": "run.app_panicked", "status": "fail",
+            "detail": "panicked at src/lib.rs:107:9: too many items: 20",
+            "likely_causes": ["a bug at src/lib.rs:107", "two lines\nof cause"],
+            "fix": {"summary": "Fix the panic.", "commands": [], "by": "agent"}
+        });
+        assert_eq!(
+            stdout(render(&event, true, false)),
+            vec![
+                "CHECK FAIL run.app_panicked: panicked at src/lib.rs:107:9: too many items: 20",
+                "  likely: a bug at src/lib.rs:107",
+                "  likely: two lines",
+                "    of cause",
+                "  fix: Fix the panic.",
             ]
         );
     }
