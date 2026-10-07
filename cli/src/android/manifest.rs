@@ -128,6 +128,43 @@ pub fn screen_orientation(orientations: &[Orientation]) -> Option<&'static str> 
     }
 }
 
+/// An axis of the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    /// Taller than wide.
+    Portrait,
+    /// Wider than tall.
+    Landscape,
+}
+
+impl Axis {
+    /// Its name in results.
+    pub fn name(self) -> &'static str {
+        match self {
+            Axis::Portrait => "portrait",
+            Axis::Landscape => "landscape",
+        }
+    }
+}
+
+/// The one axis the configured orientations keep the app on, as
+/// [`screen_orientation`] locks it, or `None` when the app turns to both.
+/// Android turns such an app only along its axis on a phone, whatever the
+/// device's rotation (from API 36 large screens ignore the lock).
+pub fn locked_axis(orientations: &[Orientation]) -> Option<Axis> {
+    let portraits = orientations
+        .iter()
+        .any(|o| matches!(o, Orientation::Portrait | Orientation::PortraitUpsideDown));
+    let landscapes = orientations
+        .iter()
+        .any(|o| matches!(o, Orientation::LandscapeLeft | Orientation::LandscapeRight));
+    match (portraits, landscapes) {
+        (true, false) => Some(Axis::Portrait),
+        (false, true) => Some(Axis::Landscape),
+        _ => None,
+    }
+}
+
 /// The Android permissions `[app.permissions]` and
 /// `[android] extra_permissions` ask for (design §7.5).
 pub fn permissions(config: &IcmToml) -> Vec<String> {
@@ -542,6 +579,19 @@ mod tests {
         );
         assert_eq!(screen_orientation(&[Portrait, LandscapeLeft]), None);
         assert_eq!(screen_orientation(&[]), None);
+
+        // The axis the lock keeps the app on, as screen_orientation sets it.
+        assert_eq!(locked_axis(&[Portrait]), Some(Axis::Portrait));
+        assert_eq!(
+            locked_axis(&[Portrait, PortraitUpsideDown]),
+            Some(Axis::Portrait)
+        );
+        assert_eq!(
+            locked_axis(&[LandscapeLeft, LandscapeRight]),
+            Some(Axis::Landscape)
+        );
+        assert_eq!(locked_axis(&[Portrait, LandscapeRight]), None);
+        assert_eq!(locked_axis(&[]), None);
     }
 
     #[test]

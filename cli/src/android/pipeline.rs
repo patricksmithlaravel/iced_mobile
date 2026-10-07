@@ -13,7 +13,7 @@ use super::avd;
 use super::device::{self, Chosen};
 use super::image;
 use super::logcat::{self, Record};
-use super::manifest::ACTIVITY;
+use super::manifest::{ACTIVITY, Axis};
 use super::session::{self, Geometry, Session};
 use crate::catalogue::CheckId;
 use crate::cli::{
@@ -2085,6 +2085,31 @@ fn geometry(adb: &Adb, session: Option<&Session>) -> Result<Screen> {
     Ok(screen)
 }
 
+/// WARN `android.orientation_locked`: the app is locked to `locked` by
+/// `orientations`, so a rotation to the other axis does not turn it on a
+/// phone. `what` says what happened instead ("… <axis>").
+pub(super) fn orientation_locked(
+    app_id: &str,
+    orientations: &[crate::config::Orientation],
+    locked: Axis,
+    what: &str,
+) -> Check {
+    let names: Vec<String> = orientations
+        .iter()
+        .filter_map(|orientation| serde_json::to_value(orientation).ok())
+        .filter_map(|value| value.as_str().map(|name| format!("\"{name}\"")))
+        .collect();
+    Check::warn(
+        CheckId::AndroidOrientationLocked,
+        format!(
+            "{app_id} is locked to {} ([app] orientations = [{}]): {what} {} (large screens from API 36 ignore the lock)",
+            locked.name(),
+            names.join(", "),
+            locked.name()
+        ),
+    )
+}
+
 fn keycode(key: Key) -> &'static str {
     match key {
         Key::Back => "KEYCODE_BACK",
@@ -2230,6 +2255,22 @@ pub fn input(ctx: &mut Ctx, args: &InputArgs) -> Result<()> {
             } else {
                 0
             };
+            let wanted = if rotation == 1 {
+                Axis::Landscape
+            } else {
+                Axis::Portrait
+            };
+            let orientations = &project.config.config.app.orientations;
+            if let Some(locked) = super::manifest::locked_axis(orientations)
+                && locked != wanted
+            {
+                ctx.rep.check(orientation_locked(
+                    &app_id,
+                    orientations,
+                    locked,
+                    "the device turns, but Android keeps the app",
+                ));
+            }
             (
                 format!(
                     "settings put system accelerometer_rotation 0 && settings put system user_rotation {rotation}"

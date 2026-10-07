@@ -21,14 +21,16 @@
 //! `ANR in` the app, a panic or crash, a changed process where it must
 //! stay, a new `ICM_EVENT start` where the app must carry on, no `ready`
 //! where it must start over, or a blank screenshot (the frame was lost;
-//! FLAG_SECURE windows are exempt). The device's settings are restored at
-//! the end, whatever happened. The project's `[checks] android` scripts
+//! FLAG_SECURE windows are exempt). `landscape` and `portrait` are SKIP
+//! for an app that `[app] orientations` locks to one axis when its frame
+//! stays on that axis: Android does not turn it, so they test nothing. The
+//! device's settings are restored at the end, whatever happened. The project's `[checks] android` scripts
 //! run after every step that leaves the app in front, with
 //! `ICM_LIFECYCLE_STEP` naming the step.
 
 use super::adb::Adb;
 use super::logcat;
-use super::manifest::ACTIVITY;
+use super::manifest::{ACTIVITY, Axis};
 use super::pipeline::{self, Launched, Presence};
 use crate::catalogue::CheckId;
 use crate::cli::{Platform, RunArgs, TestArgs};
@@ -339,6 +341,8 @@ struct Suite<'a> {
     /// The device's API level.
     api: u32,
     settings: Settings,
+    /// The axis of the app's last screenshot.
+    axis: Option<Axis>,
     results: Vec<Value>,
     hooks: Vec<Value>,
 }
@@ -350,6 +354,8 @@ struct Found {
     evidence: Vec<Evidence>,
     causes: Vec<String>,
     screenshot: Option<PathBuf>,
+    /// The axis of the screenshot.
+    axis: Option<Axis>,
     /// Where the app is now.
     presence: Presence,
 }
@@ -374,6 +380,7 @@ impl<'a> Suite<'a> {
             speaks,
             api,
             settings,
+            axis: None,
             results: Vec::new(),
             hooks: Vec::new(),
             launched,
@@ -471,6 +478,7 @@ impl<'a> Suite<'a> {
                 evidence: Vec::new(),
                 causes: Vec::new(),
                 screenshot: None,
+                axis: None,
                 presence: pipeline::presence(&adb, &app_id),
             });
         }
@@ -500,6 +508,30 @@ impl<'a> Suite<'a> {
         }
 
         let mut found = self.judge(step, &mark, before, ready_seen)?;
+        // A rotation that cannot turn an app locked to one axis tests
+        // nothing: the frame stays on that axis.
+        let orientations = &self.launched.project.config.config.app.orientations;
+        if matches!(step.name, "landscape" | "portrait")
+            && found.status == Status::Pass
+            && let Some(locked) = super::manifest::locked_axis(orientations)
+            && found.axis.is_some()
+            && found.axis == self.axis
+        {
+            found.status = Status::Skip;
+            found.detail = format!(
+                "no rotation was tested: {}; {}",
+                pipeline::orientation_locked(
+                    &app_id,
+                    orientations,
+                    locked,
+                    "the device turned, but Android kept the app",
+                )
+                .error
+                .detail,
+                found.detail
+            );
+        }
+        self.axis = found.axis.or(self.axis);
         found.detail = format!(
             "{}: {} ({:.1} s)",
             step.what,
@@ -728,15 +760,19 @@ impl<'a> Suite<'a> {
 
         // The frame.
         let mut screenshot = None;
+        let mut axis = None;
         if front {
             let stem = format!("screen-{}", step.name);
             match pipeline::grab(ctx, &adb, &dir, &stem) {
                 Ok(grabbed) => {
                     let (w, h) = grabbed.stats.px;
-                    notes.push(format!(
-                        "screenshot {w}x{h} ({})",
-                        if w > h { "landscape" } else { "portrait" }
-                    ));
+                    let shown = if w > h {
+                        Axis::Landscape
+                    } else {
+                        Axis::Portrait
+                    };
+                    axis = Some(shown);
+                    notes.push(format!("screenshot {w}x{h} ({})", shown.name()));
                     if grabbed.stats.blank {
                         if pipeline::window_is_secure(&adb, &app_id) {
                             notes.push(
@@ -784,6 +820,7 @@ impl<'a> Suite<'a> {
             evidence,
             causes,
             screenshot,
+            axis,
             presence,
         })
     }

@@ -582,6 +582,9 @@ catalogue! {
     AndroidScreenSecure = "android.screen.secure", CheckFailed, Info, Agent,
         "The window has FLAG_SECURE, so screenshots are black",
         "Expected for apps that set FLAG_SECURE; use `icm shot --headless` to see the UI.";
+    AndroidOrientationLocked = "android.orientation_locked", Config, Warn, Agent,
+        "The app is locked to the other orientation, so turning the device does not turn it",
+        "Add the orientation to `[app] orientations` and run the app again to test it there; `icm shot --headless --viewport <W>x<H>` renders any size without a device.";
     AndroidAapt2Failed = "android.aapt2_failed", Tool, Fail, Agent,
         "aapt2 failed",
         "Read the step log; usually a resource in platform/android/res is invalid.";
