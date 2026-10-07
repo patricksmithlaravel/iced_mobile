@@ -2,13 +2,16 @@
 //! `tests/icm.rs` uses it.
 //!
 //! Plain `cargo test` runs `tests/flows/*.ice`, then checks what `icm-shot`,
-//! `icm-tree` and `icm-ice` write. With a command
+//! `icm-tree` and `icm-ice` write, and the safe area a second program
+//! receives at each viewport. With a command
 //! (`cargo test -p iced_test --test agent -- icm-shot --out shot.png`), it is
 //! the harness alone.
 use iced_test::agent;
 use iced_test::core::window;
 use iced_test::core::{Element, Font, Settings, Theme};
+use iced_test::futures::Subscription;
 use iced_test::program::Program;
+use iced_test::runtime::safe_area::{self, SafeArea};
 use iced_test::runtime::{Task, clipboard};
 use iced_widget::{button, column, container, row, text, text_input};
 
@@ -103,6 +106,68 @@ impl Program for Counter {
     }
 }
 
+/// Shows the safe area it receives, as an app padding with it would.
+struct Insets;
+
+impl Program for Insets {
+    type State = Option<SafeArea>;
+    type Message = SafeArea;
+    type Theme = Theme;
+    type Renderer = iced_test::renderer::Renderer;
+    type Executor = iced_test::futures::backend::default::Executor;
+
+    fn name() -> &'static str {
+        "insets"
+    }
+
+    fn settings(&self) -> Settings {
+        Settings {
+            default_font: Font::with_name("Fira Sans"),
+            ..Settings::default()
+        }
+    }
+
+    fn window(&self) -> Option<window::Settings> {
+        Some(window::Settings::default())
+    }
+
+    fn boot(&self) -> (Self::State, Task<SafeArea>) {
+        (None, Task::none())
+    }
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        area: SafeArea,
+    ) -> Task<SafeArea> {
+        *state = Some(area);
+
+        Task::none()
+    }
+
+    fn view<'a>(
+        &self,
+        state: &'a Self::State,
+        _window: window::Id,
+    ) -> Element<'a, SafeArea, Theme, Self::Renderer> {
+        text(match state {
+            Some(area) => format!(
+                "Insets: {} {} {} {}",
+                area.insets.top,
+                area.insets.right,
+                area.insets.bottom,
+                area.insets.left
+            ),
+            None => String::from("Insets: none"),
+        })
+        .into()
+    }
+
+    fn subscription(&self, _state: &Self::State) -> Subscription<SafeArea> {
+        safe_area::safe_area()
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -133,6 +198,10 @@ fn main() -> ExitCode {
     commands_write_what_they_report(&scratch);
 
     println!("agent commands ... ok");
+
+    device_viewports_get_their_safe_area(&scratch);
+
+    println!("agent safe areas ... ok");
 
     ExitCode::SUCCESS
 }
@@ -248,6 +317,47 @@ fn commands_write_what_they_report(scratch: &Path) {
     assert_eq!(run(&["icm-shot"]), ExitCode::from(2));
     assert_eq!(run(&["icm-tree", "--viewport", "huge"]), ExitCode::from(2));
     assert_eq!(run(&["icm-launch"]), ExitCode::from(2));
+}
+
+fn device_viewports_get_their_safe_area(scratch: &Path) {
+    let insets = |viewport: &str| {
+        let out = scratch.join(format!("insets-{viewport}.json"));
+        let args: Vec<String> = [
+            "icm-tree",
+            "--viewport",
+            viewport,
+            "--wait-ms",
+            "200",
+            "--out",
+            out.to_str().unwrap(),
+        ]
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect();
+
+        assert_eq!(
+            agent::run(&Insets, env!("CARGO_MANIFEST_DIR"), &args),
+            ExitCode::SUCCESS,
+            "icm-tree --viewport {viewport}"
+        );
+
+        let tree = fs::read_to_string(out).unwrap();
+        let start = tree.find("\"text\":\"Insets: ").unwrap() + 8;
+        let end = start + tree[start..].find('"').unwrap();
+
+        tree[start..end].to_owned()
+    };
+
+    assert_eq!(insets("iphone-17"), "Insets: 62 0 34 0");
+    assert_eq!(insets("iphone-se"), "Insets: 20 0 0 0");
+    assert!(insets("pixel-9").starts_with("Insets: 54.09"));
+    assert_eq!(insets("desktop"), "Insets: 0 0 0 0");
+
+    // A device's size given as WxH is that device.
+    assert_eq!(insets("402x874"), "Insets: 62 0 34 0");
+
+    // Another size gets none, also after a device's.
+    assert_eq!(insets("400x800"), "Insets: none");
 }
 
 /// The width and height in a PNG's header.

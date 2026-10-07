@@ -13,6 +13,7 @@ pub mod clipboard;
 pub mod font;
 pub mod image;
 pub mod keyboard;
+pub mod safe_area;
 pub mod system;
 pub mod task;
 pub mod user_interface;

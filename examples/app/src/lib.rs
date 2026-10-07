@@ -210,7 +210,7 @@ const PHONE_WIDTH: f32 = 600.0;
 /// a phone gets the same padding anywhere, so headless renders at phone
 /// viewports (`icm shot --headless`, `icm ui --headless`, `.ice` flows) lay
 /// out as the phone does. `iced::mobile::safe_area()` reports the device's
-/// own insets and the keyboard's height instead, but nothing headless.
+/// own insets and the keyboard's height instead.
 fn safe_area(size: Size) -> Padding {
     if cfg!(any(target_os = "ios", target_os = "android"))
         || size.width < PHONE_WIDTH

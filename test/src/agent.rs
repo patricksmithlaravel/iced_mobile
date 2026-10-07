@@ -35,6 +35,15 @@
 //!   to 1.
 //! - `--theme` is the system's light or dark mode, which the program sees
 //!   when it does not choose a theme itself (default `light`).
+//! - A viewport the size of a device preset gets the safe area that
+//!   device's shell reports, through `iced::mobile::safe_area()` (the
+//!   runtime's [`safe_area`](crate::runtime::safe_area)), before the
+//!   program boots: `iphone-17` 62 top and 34 bottom, `iphone-se` 20 top,
+//!   `pixel-9` 54.1 top and 24 bottom (icm's `pixel_9` emulator), and zero
+//!   at `web-mobile` and `desktop`, as the web and the desktop report. A
+//!   viewport of any other size gets none, and the program keeps whatever
+//!   padding it uses until one arrives. `.ice` flows follow the same rule
+//!   with their `viewport:` line.
 //! - `--preset` boots the program in one of its
 //!   [`Preset`](crate::program::Preset)s instead of its usual state.
 //! - `--wait-ms` lets the tasks the program starts at boot run for that
@@ -86,11 +95,12 @@ use crate::Ice;
 use crate::core::theme;
 use crate::core::widget;
 use crate::core::window;
-use crate::core::{Rectangle, Size, Vector};
+use crate::core::{Padding, Rectangle, Size, Vector};
 use crate::emulator::{self, Emulator};
 use crate::futures::futures::channel::mpsc;
 use crate::instruction::{self, Expectation, Instruction};
 use crate::program::Program;
+use crate::runtime::safe_area::{self, SafeArea};
 use crate::selector::Candidate;
 
 use std::env;
@@ -115,6 +125,69 @@ pub const VIEWPORTS: &[(&str, Size, f32)] = &[
     ("web-mobile", Size::new(390.0, 844.0), 3.0),
     ("desktop", Size::new(1024.0, 768.0), 1.0),
 ];
+
+/// The safe area each device preset of [`VIEWPORTS`] reports, in logical
+/// pixels: the status bar, the notch, Dynamic Island or display cutout, and
+/// the home indicator or navigation bar. The web and the desktop report
+/// zero.
+const SAFE_AREAS: &[(&str, Padding)] = &[
+    // The iPhone 17 simulator (iOS 27): Dynamic Island, home indicator.
+    (
+        "iphone-17",
+        Padding {
+            top: 62.0,
+            right: 0.0,
+            bottom: 34.0,
+            left: 0.0,
+        },
+    ),
+    // The status bar; a home button, so nothing at the bottom.
+    (
+        "iphone-se",
+        Padding {
+            top: 20.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        },
+    ),
+    // icm's `pixel_9` emulator (API 36, gesture navigation): a 142 px status
+    // bar and a 63 px navigation bar at 2.625.
+    (
+        "pixel-9",
+        Padding {
+            top: 142.0 / 2.625,
+            right: 0.0,
+            bottom: 63.0 / 2.625,
+            left: 0.0,
+        },
+    ),
+    ("web-mobile", Padding::ZERO),
+    ("desktop", Padding::ZERO),
+];
+
+/// The safe area of the device preset of the same size as `viewport`, if
+/// there is one.
+fn device_safe_area(viewport: Size) -> Option<SafeArea> {
+    let (name, _, _) =
+        VIEWPORTS.iter().find(|(_, size, _)| *size == viewport)?;
+
+    SAFE_AREAS
+        .iter()
+        .find(|(device, _)| device == name)
+        .map(|(_, insets)| SafeArea::new(*insets))
+}
+
+/// Gives the program the safe area of the device `viewport` stands for, as
+/// that device's shell would, before it boots, so that its subscriptions
+/// start with it. A viewport of another size gets none.
+fn publish_safe_area(viewport: Size) {
+    safe_area::reset();
+
+    if let Some(area) = device_safe_area(viewport) {
+        safe_area::publish(area);
+    }
+}
 
 const DEFAULT_WAIT: Duration = Duration::from_millis(500);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -550,6 +623,8 @@ where
 
         let (sender, receiver) = mpsc::channel(100);
 
+        publish_safe_area(viewport);
+
         let emulator = Emulator::with_backend(
             sender,
             program,
@@ -722,6 +797,8 @@ where
         .collect();
 
     let (sender, mut receiver) = mpsc::channel(100);
+
+    publish_safe_area(ice.viewport);
 
     let mut emulator = Emulator::with_backend(
         sender,
@@ -1381,6 +1458,34 @@ mod tests {
         );
         assert!(viewport(Some("0x720")).is_err());
         assert!(viewport(Some("big")).is_err());
+    }
+
+    #[test]
+    fn device_viewports_have_their_safe_area() {
+        let insets =
+            |viewport| device_safe_area(viewport).map(|area| area.insets);
+
+        assert_eq!(
+            insets(Size::new(402.0, 874.0)),
+            Some(Padding::ZERO.top(62.0).bottom(34.0))
+        );
+        assert_eq!(
+            insets(Size::new(375.0, 667.0)),
+            Some(Padding::ZERO.top(20.0))
+        );
+
+        let pixel = insets(Size::new(412.0, 915.0)).unwrap();
+        assert!((pixel.top - 54.1).abs() < 0.01, "{pixel:?}");
+        assert_eq!(pixel.bottom, 24.0);
+
+        assert_eq!(insets(Size::new(390.0, 844.0)), Some(Padding::ZERO));
+        assert_eq!(insets(Size::new(1024.0, 768.0)), Some(Padding::ZERO));
+        assert_eq!(insets(Size::new(400.0, 800.0)), None);
+
+        // Every preset has one.
+        for (name, size, _) in VIEWPORTS {
+            assert!(device_safe_area(*size).is_some(), "{name}");
+        }
     }
 
     #[test]

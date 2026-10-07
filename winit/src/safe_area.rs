@@ -1,7 +1,9 @@
-//! The safe area: the edges of the screen that the system's own UI covers.
+//! The shell's side of the safe area: the edges of the screen that the
+//! system's own UI covers.
 //!
 //! The shell reads it from the platform whenever something may have changed
-//! it, and publishes it to [`safe_area`] subscriptions when it did:
+//! it, and publishes it to [`safe_area`] subscriptions (`iced_runtime`'s
+//! `safe_area` module) when it did:
 //!
 //! - Android: the root view's `WindowInsets`, read through JNI, and the
 //!   content rect `NativeActivity` reports, which stands in for them while
@@ -10,15 +12,17 @@
 //!   keyboard's frame from UIKit's notification (`safe_area/ios.rs`).
 //! - Elsewhere: [`SafeArea::ZERO`], once.
 use crate::Control;
-use crate::broadcast::Broadcast;
-use crate::core::Padding;
 use crate::core::theme;
-use crate::futures::Subscription;
 use crate::futures::futures::channel::mpsc;
 use crate::graphics::Compositor;
 use crate::program::Program;
+use crate::runtime;
 use crate::window::{Window, WindowManager};
 
+pub use crate::runtime::safe_area::{SafeArea, safe_area};
+
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+use crate::core::Padding;
 #[cfg(any(target_os = "android", test))]
 use crate::core::time::{Duration, Instant};
 
@@ -26,83 +30,6 @@ use crate::core::time::{Duration, Instant};
 mod android;
 #[cfg(target_os = "ios")]
 mod ios;
-
-/// What covers the edges of the screen the application fills, in the same
-/// logical pixels as its layout.
-///
-/// On a phone the application draws under the status bar, the notch or
-/// Dynamic Island, the home indicator or navigation bar, and the on-screen
-/// keyboard. Pad the root of the view with [`SafeArea::padding`] to keep
-/// its content clear of them, and receive the area with [`safe_area`].
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-#[non_exhaustive]
-pub struct SafeArea {
-    /// The system's own UI over each edge: the status bar, the notch, Dynamic
-    /// Island or display cutout, and the home indicator or navigation bar.
-    pub insets: Padding,
-    /// How far the on-screen keyboard reaches up from the bottom edge; 0 while
-    /// it is hidden.
-    ///
-    /// It is measured from the bottom edge, so it includes the bottom inset
-    /// it covers: take the larger of the two, as [`SafeArea::padding`] does.
-    pub keyboard: f32,
-}
-
-impl SafeArea {
-    /// Nothing covered: the desktop and the web.
-    pub const ZERO: Self = Self {
-        insets: Padding::ZERO,
-        keyboard: 0.0,
-    };
-
-    /// A safe area with these insets and no keyboard (for tests and previews).
-    pub const fn new(insets: Padding) -> Self {
-        Self {
-            insets,
-            keyboard: 0.0,
-        }
-    }
-
-    /// The same safe area with a keyboard of this height.
-    pub const fn with_keyboard(self, height: f32) -> Self {
-        Self {
-            keyboard: height,
-            ..self
-        }
-    }
-
-    /// The padding for a root container: `margin` plus the inset on each
-    /// edge, the bottom raised to the keyboard's top while it shows.
-    pub fn padding(self, margin: impl Into<Padding>) -> Padding {
-        let margin = margin.into();
-
-        Padding {
-            top: margin.top + self.insets.top,
-            right: margin.right + self.insets.right,
-            bottom: margin.bottom + self.insets.bottom.max(self.keyboard),
-            left: margin.left + self.insets.left,
-        }
-    }
-}
-
-/// The safe area: the current one as soon as the shell knows it, then every
-/// change.
-///
-/// Android and iOS report it once the window exists and again on rotation,
-/// a cutout change and the keyboard; the desktop and the web report
-/// [`SafeArea::ZERO`] once. Headless tests (`iced_test`) have no shell and
-/// report nothing. On phones every window fills the screen, so they share
-/// one safe area: the one of the window that changed last.
-pub fn safe_area() -> Subscription<SafeArea> {
-    Subscription::run(subscribe)
-}
-
-/// The latest safe area, for subscriptions that start later.
-static SAFE_AREA: Broadcast<SafeArea> = Broadcast::new(true);
-
-fn subscribe() -> mpsc::UnboundedReceiver<SafeArea> {
-    SAFE_AREA.subscribe()
-}
 
 /// Keeps the `AndroidApp` of the application about to run on this thread,
 /// for the JNI calls that read its insets.
@@ -117,7 +44,7 @@ pub(crate) fn set_android_app(
 /// starts its subscriptions: Android runs one application per Activity in
 /// the same process, and the new window may not have the old one's area.
 pub(crate) fn reset() {
-    SAFE_AREA.reset();
+    runtime::safe_area::reset();
 }
 
 /// The shell's side: reads the safe area when something may have changed
@@ -298,7 +225,7 @@ impl Shell {
 
         self.published = Some(area);
         crate::icm::safe_area(area.insets, area.keyboard);
-        SAFE_AREA.publish(area);
+        runtime::safe_area::publish(area);
     }
 }
 
@@ -343,15 +270,13 @@ impl Physical {
         let logical = |pixels: f32| pixels.max(0.0) / scale_factor;
         let [top, right, bottom, left] = self.insets.map(logical);
 
-        SafeArea {
-            insets: Padding {
-                top,
-                right,
-                bottom,
-                left,
-            },
-            keyboard: logical(self.keyboard),
-        }
+        SafeArea::new(Padding {
+            top,
+            right,
+            bottom,
+            left,
+        })
+        .with_keyboard(logical(self.keyboard))
     }
 }
 
@@ -546,33 +471,6 @@ impl Polls {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const ISLAND: SafeArea = SafeArea::new(Padding {
-        top: 62.0,
-        right: 0.0,
-        bottom: 34.0,
-        left: 0.0,
-    });
-
-    #[test]
-    fn padding_adds_the_insets_and_rises_with_the_keyboard() {
-        assert_eq!(
-            ISLAND.padding(16),
-            Padding {
-                top: 78.0,
-                right: 16.0,
-                bottom: 50.0,
-                left: 16.0,
-            }
-        );
-
-        // The keyboard covers the home indicator: the larger one counts.
-        assert_eq!(ISLAND.with_keyboard(336.0).padding(16).bottom, 352.0);
-        assert_eq!(ISLAND.with_keyboard(20.0).padding(16).bottom, 50.0);
-
-        assert_eq!(SafeArea::ZERO.padding(8), Padding::new(8.0));
-        assert_eq!(SafeArea::default(), SafeArea::ZERO);
-    }
 
     #[test]
     fn physical_pixels_become_logical_with_the_app_scale_factor() {

@@ -218,7 +218,8 @@ exits 1 if any step failed. Outputs go to `$ACCEPT` (a new temporary directory b
   keys, including Return and Tab on Android and iOS. `winit/src/icm.rs` has the event protocol.
   `winit/src/scene.rs` puts iOS windows into the scene. `winit/src/safe_area.rs` reads the safe area
   (`safe_area/android.rs` through JNI, `safe_area/ios.rs` from winit's frames and UIKit's keyboard
-  notification) and publishes it through `winit/src/broadcast.rs`.
+  notification) and publishes it through `runtime/src/safe_area.rs`, where the headless harness
+  (`test/src/agent.rs`) publishes a device preset's.
 - **winit itself:** `vendor/winit/src/platform_impl/android/` and `.../ios/`.
 - **What icm does per platform:** `cli/src/android/`, `cli/src/platform/ios_sim/`, `cli/src/web/` and
   `cli/src/platform/desktop/`. Pipelines are in `docs/icm/DESIGN.md` §10, and the output contract is

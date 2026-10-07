@@ -74,7 +74,8 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
   `iced::mobile::lifecycle()`: its messages come too late for saving.
 - Keep the root padding (`safe_area` in `src/lib.rs`): Android targetSdk 36 draws edge to edge, and
   the fixed padding lays headless renders out as on the phone. `iced::mobile::safe_area()` reports
-  the device's own insets and the keyboard's height, and nothing headless (see `iced::mobile`).
+  the device's own insets and the keyboard's height (headless, a device preset's insets; see
+  `iced::mobile`).
 - `.ice` `click` and host tests use a mouse; phones use touch. Confirm UI changes with `icm run ios-sim`
   and `icm run android`, and look at the screenshot.
 - Keep `features = ["fira-sans"]` and the Fira Sans `default_font`: every platform and the headless

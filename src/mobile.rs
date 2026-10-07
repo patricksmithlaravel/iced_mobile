@@ -276,10 +276,16 @@
 //! [`SafeArea::keyboard`] is measured from the bottom edge, so it covers the
 //! bottom inset: [`SafeArea::padding`] takes the larger of the two.
 //!
-//! Headless runs (`iced_test`, and `icm`'s `.ice` flows, `shot --headless`
-//! and `ui --headless`) have no shell, and [`safe_area()`] reports nothing
-//! there: keep a padding of your own until a value arrives, or set one in a
-//! unit test with [`SafeArea::new`] and [`SafeArea::with_keyboard`].
+//! Headless, `icm`'s harness (`iced_test::agent`: `.ice` flows, `shot
+//! --headless` and `ui --headless`) stands in for the shell: a viewport the
+//! size of a device preset gets that device's safe area before the
+//! application boots (`iphone-17`: 62 top and 34 bottom; `iphone-se`: 20
+//! top; `pixel-9`: 54.1 top and 24 bottom; zero for `web-mobile` and
+//! `desktop`), so headless layouts match the device's. A viewport of any
+//! other size gets none, and `iced_test`'s `Simulator` runs no
+//! subscription: keep a padding of your own until a value arrives, or set
+//! one in a unit test with [`SafeArea::new`] and
+//! [`SafeArea::with_keyboard`].
 //!
 //! # Logs
 //!

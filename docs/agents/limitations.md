@@ -7,19 +7,20 @@ this file in the commit that fixes or finds a limitation.
 
 <!-- icm: AGENTS.md embeds everything below this line -->
 
-- **The safe area comes from a running app only** (iOS, Android). The app
-  draws under the status bar, the notch or Dynamic Island, the home
-  indicator or navigation bar (Android draws edge to edge from targetSdk
-  35) and the keyboard. `iced::mobile::safe_area()` reports what covers
-  each edge and the keyboard's height; pad the root with
-  `SafeArea::padding`. Headless runs (`.ice` flows, `icm shot --headless`,
-  `icm ui --headless`, unit tests) report nothing, so keep a padding of your
-  own until a value arrives. The template pads phones a fixed 64 top and 48
-  bottom (`safe_area()` in `src/lib.rs`), which keeps its headless layouts
-  the same as the phone's but follows neither the device nor the keyboard.
-  On Android the keyboard's height can arrive a quarter of a second after
-  the keyboard. The desktop and the web report zero, a phone browser's
-  notch included. Keep controls away from the rounded corners.
+- **The safe area arrives with the window** (iOS, Android). The app draws
+  under the status bar, the notch or Dynamic Island, the home indicator or
+  navigation bar (Android draws edge to edge from targetSdk 35) and the
+  keyboard. `iced::mobile::safe_area()` reports what covers each edge and
+  the keyboard's height; pad the root with `SafeArea::padding`. It arrives
+  once the window exists. Headless, `.ice` flows, `icm shot --headless` and
+  `icm ui --headless` give a viewport the size of a device preset
+  (`iphone-17`, `iphone-se`, `pixel-9`) that device's insets; other sizes
+  and unit tests get none. So keep a padding of your own until a value
+  arrives. The template pads phones a fixed 64 top and 48 bottom
+  (`safe_area()` in `src/lib.rs`), which follows neither the device nor the
+  keyboard. On Android the keyboard's height can arrive a quarter of a
+  second after the keyboard. The desktop and the web report zero, a phone
+  browser's notch included. Keep controls away from the rounded corners.
 - **No edit menu on phones.** A long press in a text field shows no menu
   and no selection handles, and the Ctrl shortcuts of text fields fire
   only from a hardware keyboard on Android (iOS hardware keyboards send no

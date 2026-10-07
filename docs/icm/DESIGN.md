@@ -891,7 +891,7 @@ Input on a device: `icm input android tap X Y`, `icm input web tap X Y`, `icm in
 - Keep every iced line on the same git URL and tag (`icm framework set tag:<t>` changes them all).
 - Never call `iced::exit()` or close the last window on Android or iOS.
 - Keep the root padding (Android targetSdk 36 is edge-to-edge): it lays headless renders out as on the phone;
-  `iced::mobile::safe_area()` reports the device's own insets and keyboard, and nothing headless.
+  `iced::mobile::safe_area()` reports the device's own insets and keyboard (headless, a device preset's insets).
 - .ice `click` and host tests use a mouse; phones use touch. Confirm UI changes with `icm run` on
   ios-sim and android and look at the screenshot.
 - Keep `features = ["fira-sans"]`; text with no font renders as nothing.
@@ -1571,6 +1571,7 @@ As built (`test/src/agent.rs`, whose module docs are the reference):
 - With no command, libtest's `--list`, `--ignored`, `--skip` and name filters apply to the flow names `flows::<stem>`, so nextest can list them.
 - It draws with tiny-skia unless `ICED_TEST_BACKEND` names another backend (`Emulator::with_backend`, `iced_test::run_with_backend` and `screenshot_with_backend`, Appendix C 7), and `Font::DEFAULT` is Fira Sans.
 - `iced::clipboard::read` and `write` tasks use the `Emulator`'s clipboard, the one its text fields copy to and paste from, so a flow can copy and paste (in `mode: Zen`, which waits for the read's message). It starts empty for each flow.
+- It stands in for the shell's safe area (F6): before the program boots, a viewport the size of a §13.1 preset gets that device's insets through `iced::mobile::safe_area()` (`iphone-17` 62 top and 34 bottom, as the iPhone 17 simulator reports; `iphone-se` 20 top; `pixel-9` 54.1 top and 24 bottom, icm's `pixel_9` emulator at API 36; zero at `web-mobile` and `desktop`). `.ice` flows get it from their `viewport:` line. Any other size gets none.
 
 icm runs it as `ICED_TEST_BACKEND=tiny-skia cargo test -p <pkg> --test icm -- <subcommand> …`. That powers `icm shot --headless`, `icm ui --headless tree|find|ice` and `icm test --host`. It needs no device, no OS permission and no GPU, and it runs in CI.
 
@@ -1685,7 +1686,7 @@ Hooks run with stdin closed and a 300 s timeout. Output lines of the form `CHECK
 | F3 | `ICM_EVENT` protocol v1 (§13.3); Android reads sysprops `debug.icm.events` and `debug.iced.backend` | to do | 0 |
 | F4 | `iced_test::agent::main` harness (§13.2) | to do (~200 lines on the public iced_test API) | 0 |
 | F5 | `iced_test` touch helpers (`Simulator::tap` as touch, `.ice tap`); template adds `tests/touch.rs` | to do | 6 |
-| F6 | `iced::mobile::safe_area` (fixed fallback insets first, then real ones); new types in `iced::mobile`, not new enum variants (review §6.8) | **done**: `iced::mobile::safe_area() -> Subscription<SafeArea>` (insets and keyboard on Android and iOS, zero elsewhere, nothing headless) and the `safe_area` event. The template keeps its fixed padding, so that headless layouts match the phone's until the harness can give each viewport its insets | 6 |
+| F6 | `iced::mobile::safe_area` (fixed fallback insets first, then real ones); new types in `iced::mobile`, not new enum variants (review §6.8) | **done**: `iced::mobile::safe_area() -> Subscription<SafeArea>` (insets and keyboard on Android and iOS, zero elsewhere; headless, a device preset's insets at its viewport size, §13.2) and the `safe_area` event. The template keeps its fixed padding | 6 |
 | F7 | `agent` feature: bridge client, synthetic-event queue, tree operation, marker string. Phase 0 adds an **empty** `agent = []` feature to iced so the template's `icm-agent` feature resolves from the first tag | to do | 0 (stub), 6 |
 | F8 | Loud failure messages (RecreationAttempt text, iOS exit warning); partly done in `c6b2ebe16` | ongoing | — |
 
