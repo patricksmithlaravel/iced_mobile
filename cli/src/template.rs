@@ -627,16 +627,38 @@ pub fn config_keys() -> Vec<ConfigKey> {
     let mut keys: Vec<ConfigKey> = Vec::new();
     for raw in text.lines() {
         let trimmed = raw.trim();
-        if trimmed.starts_with('[') && !trimmed.starts_with("[[") {
-            let (header, comment) = split_comment(trimmed);
+        // A table header, set or commented out (`# [android.signing]`): the
+        // keys after it belong to it.
+        let (header_text, header_commented) = match trimmed.strip_prefix("# [") {
+            Some(rest) => (format!("[{rest}"), true),
+            None => (trimmed.to_string(), false),
+        };
+        if header_text.starts_with('[') && !header_text.starts_with("[[") {
+            let (header, comment) = split_comment(&header_text);
             section = header.trim_matches(['[', ']']).trim().to_string();
-            keys.push(ConfigKey {
-                key: section.clone(),
-                line: header,
-                comment,
-                commented_out: false,
-                table: true,
-            });
+            if !keys.iter().any(|k| k.key == section) {
+                keys.push(ConfigKey {
+                    key: section.clone(),
+                    line: if header_commented {
+                        format!("# {header}")
+                    } else {
+                        header
+                    },
+                    comment,
+                    commented_out: header_commented,
+                    table: true,
+                });
+            }
+            continue;
+        }
+        // The continuation of a commented-out multi-line value belongs to
+        // the key just before it.
+        if trimmed.starts_with("#  ") {
+            if let Some(last) = keys.last_mut().filter(|k| k.commented_out && !k.table) {
+                let (rest, _) = split_comment(trimmed);
+                last.line.push('\n');
+                last.line.push_str(&rest);
+            }
             continue;
         }
         let (body, commented_out) = match trimmed.strip_prefix("# ") {
@@ -744,10 +766,30 @@ mod tests {
             "android.target_sdk",
             "web.public_url",
             "desktop.macos.min_os",
+            "desktop.windows.sign_env",
+            "android.signing",
+            "android.signing.upload",
+            "store",
+            "store.privacy_policy_url",
+            "store.asc_key_id_env",
             "test.viewports",
         ] {
             assert!(keys.iter().any(|k| k.key == key), "{key} is not documented");
         }
+        // A commented-out table's keys belong to it, and a continuation
+        // line is not a key.
+        assert!(!keys.iter().any(|k| k.key == "android.manifest.upload"));
+        assert!(!keys.iter().any(|k| k.key.ends_with(".store_pass_env")));
+        let upload = config_key_doc("android.signing.upload").unwrap();
+        assert!(upload.contains("leaves it unset"), "{upload}");
+        assert!(upload.contains("keystore = "), "{upload}");
+        let signing = config_key_doc("android.signing").unwrap();
+        assert!(
+            signing.contains("`config.android.signing.upload`"),
+            "{signing}"
+        );
+        let privacy = config_key_doc("store.privacy_policy_url").unwrap();
+        assert!(privacy.contains("require"), "{privacy}");
         let doc = config_key_doc("app.id").unwrap();
         assert!(doc.starts_with("# config.app.id\n"), "{doc}");
         assert!(doc.contains("placeholder"), "{doc}");

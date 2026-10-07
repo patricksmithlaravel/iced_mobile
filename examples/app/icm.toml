@@ -88,6 +88,7 @@ identity = "auto"                      # Developer ID Application signing identi
 [desktop.windows]
 formats = ["msi", "nsis"]              # installers to build
 # sign_command = "jsign --storetype TRUSTEDSIGNING ... {file}"   # the owner's signing command; credentials only via env
+# sign_env = ["AZURE_ACCESS_TOKEN"]    # the variables sign_command reads (names only); a release checks they are set
 
 [desktop.linux]
 formats = ["deb", "appimage"]          # packages to build
@@ -95,6 +96,13 @@ glibc_floor = "2.35"                   # newest glibc the binary may need: Ubunt
 # maintainer = "Example Ltd <dev@example.com>"   # required for .deb
 deb_depends = []                       # extra Depends of the .deb
 deb_recommends = []                    # extra Recommends of the .deb
+
+[store]                                # store listings and printed upload commands; references only, never a secret
+# privacy_policy_url = "https://example.com/privacy"   # App Store Connect and Google Play require one
+# support_url = "https://example.com/support"          # App Store Connect requires one
+# marketing_url = "https://example.com"                # optional
+asc_key_id_env = "ASC_KEY_ID"          # env var holding the App Store Connect API key id (altool, notarytool)
+asc_issuer_id_env = "ASC_ISSUER_ID"    # env var holding the App Store Connect API issuer id
 
 [test]
 flows = "tests/flows"                  # the .ice flows `icm test` runs

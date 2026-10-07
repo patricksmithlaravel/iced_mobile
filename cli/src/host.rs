@@ -23,6 +23,10 @@ pub struct HostConfig {
     /// The Chrome (or Chromium) executable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chrome: Option<String>,
+    /// A keychain file Apple signing searches instead of the user's
+    /// keychain search list (a CI keychain); `ICM_KEYCHAIN` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_keychain: Option<String>,
     /// `[ios]`.
     #[serde(default)]
     pub ios: HostIos,
@@ -66,6 +70,20 @@ pub struct HostAndroid {
 pub const DEFAULT_EMULATOR_PORTS: &[u16] = &[5580, 5582, 5584];
 
 impl HostConfig {
+    /// The keychain Apple signing searches: `ICM_KEYCHAIN`, else
+    /// `signing_keychain`; `None` means the user's keychain search list.
+    /// Release pipelines pass it to `security find-identity` and
+    /// `codesign --keychain`, so a CI or test keychain never has to join
+    /// the search list.
+    pub fn signing_keychain(&self, env: &crate::tools::Env) -> Option<PathBuf> {
+        env.var("ICM_KEYCHAIN").map(PathBuf::from).or_else(|| {
+            self.signing_keychain
+                .as_deref()
+                .filter(|path| !path.trim().is_empty())
+                .map(PathBuf::from)
+        })
+    }
+
     /// The emulator ports to try, in order.
     pub fn emulator_ports(&self) -> Vec<u16> {
         self.android
@@ -186,6 +204,30 @@ emulator_ports = [5580, 5582, 5600]
         assert_eq!(
             HostConfig::default().emulator_ports(),
             DEFAULT_EMULATOR_PORTS
+        );
+    }
+
+    #[test]
+    fn the_signing_keychain_comes_from_the_env_then_the_file() {
+        use crate::tools::Env;
+        let host = parse(
+            Path::new("/h/host.toml"),
+            "signing_keychain = \"/ci/build.keychain-db\"\n",
+        )
+        .unwrap()
+        .config;
+        assert_eq!(
+            host.signing_keychain(&Env::default()),
+            Some(PathBuf::from("/ci/build.keychain-db"))
+        );
+        let env = Env::from_pairs(&[("ICM_KEYCHAIN", "/tmp/test.keychain-db")], None);
+        assert_eq!(
+            host.signing_keychain(&env),
+            Some(PathBuf::from("/tmp/test.keychain-db"))
+        );
+        assert_eq!(
+            HostConfig::default().signing_keychain(&Env::default()),
+            None
         );
     }
 }

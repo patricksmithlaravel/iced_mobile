@@ -122,6 +122,9 @@ pub struct IcmToml {
     /// `[desktop]`.
     #[serde(default)]
     pub desktop: DesktopConfig,
+    /// `[store]`: listing metadata and upload credentials, by reference.
+    #[serde(default)]
+    pub store: StoreConfig,
     /// `[test]`.
     #[serde(default)]
     pub test: TestConfig,
@@ -574,6 +577,10 @@ pub struct WindowsConfig {
     /// The signing command (credentials only via env).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_command: Option<String>,
+    /// The environment variables `sign_command` reads its credentials from
+    /// (names only); a release checks they are set.
+    #[serde(default)]
+    pub sign_env: Vec<String>,
 }
 
 impl Default for WindowsConfig {
@@ -581,6 +588,43 @@ impl Default for WindowsConfig {
         WindowsConfig {
             formats: default_windows_formats(),
             sign_command: None,
+            sign_env: Vec::new(),
+        }
+    }
+}
+
+/// `[store]`: what the store listings and the printed upload commands need
+/// that no binary carries. URLs are public; credentials appear only as the
+/// names of the environment variables that hold them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreConfig {
+    /// The privacy policy URL (App Store Connect and Google Play require one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_policy_url: Option<String>,
+    /// The support URL (App Store Connect requires one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support_url: Option<String>,
+    /// The marketing URL (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marketing_url: Option<String>,
+    /// The variable holding the App Store Connect API key id (altool,
+    /// notarytool), for the printed commands.
+    #[serde(default = "default_asc_key_id_env")]
+    pub asc_key_id_env: String,
+    /// The variable holding the App Store Connect API issuer id.
+    #[serde(default = "default_asc_issuer_id_env")]
+    pub asc_issuer_id_env: String,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        StoreConfig {
+            privacy_policy_url: None,
+            support_url: None,
+            marketing_url: None,
+            asc_key_id_env: default_asc_key_id_env(),
+            asc_issuer_id_env: default_asc_issuer_id_env(),
         }
     }
 }
@@ -701,6 +745,12 @@ fn default_track() -> String {
 }
 fn default_service_account_env() -> String {
     "PLAY_SERVICE_ACCOUNT_JSON".to_string()
+}
+fn default_asc_key_id_env() -> String {
+    "ASC_KEY_ID".to_string()
+}
+fn default_asc_issuer_id_env() -> String {
+    "ASC_ISSUER_ID".to_string()
 }
 fn default_public_url() -> String {
     "/".to_string()
@@ -1314,6 +1364,9 @@ pub fn validate(loaded: &Loaded) -> Vec<IcmError> {
         ));
     }
 
+    // Signing references and store metadata (design §1 principle 5).
+    problems.extend(validate_release_keys(loaded));
+
     // [test]
     for (index, viewport) in config.test.viewports.iter().enumerate() {
         if !VIEWPORT_PRESETS.contains(&viewport.as_str()) && parse_viewport(viewport).is_none() {
@@ -1353,6 +1406,312 @@ pub fn validate(loaded: &Loaded) -> Vec<IcmError> {
             problems.push(invalid(loaded, &path, "has an empty script path"));
         }
     }
+
+    problems
+}
+
+/// Whether `name` is an environment variable name in the form icm requires
+/// for every `*_env` key: upper-case letters, digits and underscores, not
+/// starting with a digit. A password pasted where its variable's name
+/// belongs almost never passes.
+pub fn is_env_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// A finding about a value that may be a secret: it points at the line but
+/// never quotes it.
+fn invalid_secret(loaded: &Loaded, key: &str, message: &str) -> IcmError {
+    let mut evidence = loaded.evidence(key);
+    evidence.excerpt = None;
+    let location = match evidence.line {
+        Some(line) => format!("{}:{line}", evidence.path),
+        None => evidence.path.clone(),
+    };
+    IcmError::new(
+        CheckId::ConfigInvalid,
+        format!("{location}: `{key}` {message}"),
+    )
+    .evidence(evidence)
+    .fix(
+        "Keep secrets out of icm.toml: put the value in an environment variable (or the keychain) and name the variable here.",
+        &[],
+    )
+}
+
+/// The flag of a command line that takes a secret as a literal (not `$VAR`,
+/// `${VAR}`, `%VAR%` or `env:VAR`), if any.
+pub fn literal_secret_flag(command: &str) -> Option<String> {
+    let secret_flag = |flag: &str| {
+        let name = flag.trim_start_matches('-').to_ascii_lowercase();
+        flag.starts_with('-')
+            && ["pass", "password", "secret", "token"]
+                .iter()
+                .any(|word| name.contains(word))
+    };
+    let indirect = |value: &str| {
+        let value = value.trim_matches(['"', '\'']);
+        value.starts_with('$') || value.starts_with('%') || value.starts_with("env:")
+    };
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    for (index, token) in tokens.iter().enumerate() {
+        if let Some((flag, value)) = token.split_once('=') {
+            if secret_flag(flag) && !indirect(value) {
+                return Some(flag.to_string());
+            }
+        } else if secret_flag(token)
+            && let Some(value) = tokens.get(index + 1)
+            && !value.starts_with('-')
+            && !indirect(value)
+        {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+fn is_https_url(url: &str) -> bool {
+    url.strip_prefix("https://").is_some_and(|rest| {
+        !rest.is_empty()
+            && !rest.starts_with('/')
+            && !rest.chars().any(|c| c.is_whitespace() || c.is_control())
+    })
+}
+
+/// A signing identity: `auto`, a certificate SHA-1 or its common name.
+fn is_identity_ref(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && !value.chars().any(char::is_control)
+}
+
+/// A provisioning profile: `auto`, a UUID or a `.mobileprovision` path.
+fn is_profile_ref(value: &str) -> bool {
+    let uuid = |v: &str| {
+        let groups: Vec<&str> = v.split('-').collect();
+        groups.len() == 5
+            && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, len)| {
+                group.len() == len && group.chars().all(|c| c.is_ascii_hexdigit())
+            })
+    };
+    value == "auto" || uuid(value) || value.ends_with(".mobileprovision")
+}
+
+/// The release keys: signing references, upload credentials (names
+/// only) and store metadata.
+fn validate_release_keys(loaded: &Loaded) -> Vec<IcmError> {
+    let config = &loaded.config;
+    let mut problems = Vec::new();
+    let env_name = |key: &str, value: &str, problems: &mut Vec<IcmError>| {
+        if !is_env_name(value) {
+            problems.push(invalid_secret(
+                loaded,
+                key,
+                "must be the name of an environment variable (A-Z, 0-9 and _), never the secret itself",
+            ));
+        }
+    };
+
+    // [ios]
+    let ios = &config.ios;
+    if let Some(team) = &ios.team_id
+        && !(team.len() == 10
+            && team
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
+    {
+        problems.push(invalid(
+            loaded,
+            "ios.team_id",
+            "must be the 10-character Apple team id (upper-case letters and digits, e.g. \"ABCDE12345\")",
+        ));
+    }
+    if let Some(id) = &ios.asc_app_id
+        && !(!id.is_empty() && id.len() <= 12 && id.chars().all(|c| c.is_ascii_digit()))
+    {
+        problems.push(invalid(
+            loaded,
+            "ios.asc_app_id",
+            "must be App Store Connect's numeric app id (App Information > Apple ID)",
+        ));
+    }
+    if ios.export_compliance_code.is_some() && ios.uses_non_exempt_encryption != Some(true) {
+        problems.push(invalid(
+            loaded,
+            "ios.export_compliance_code",
+            "applies only when `ios.uses_non_exempt_encryption = true`; remove it or answer true",
+        ));
+    }
+    for (kind, signing) in [
+        ("development", &ios.signing.development),
+        ("distribution", &ios.signing.distribution),
+    ] {
+        if !is_identity_ref(&signing.identity) {
+            problems.push(invalid(
+                loaded,
+                &format!("ios.signing.{kind}.identity"),
+                "must be \"auto\", a certificate SHA-1 or its common name",
+            ));
+        }
+        if !is_profile_ref(&signing.profile) {
+            problems.push(invalid(
+                loaded,
+                &format!("ios.signing.{kind}.profile"),
+                "must be \"auto\", a profile UUID or the path of a .mobileprovision file",
+            ));
+        }
+    }
+
+    // [android.signing], [android.play]
+    let android = &config.android;
+    if let Some(upload) = android.signing.as_ref().and_then(|s| s.upload.as_ref()) {
+        if upload.keystore.trim().is_empty() {
+            problems.push(invalid(
+                loaded,
+                "android.signing.upload.keystore",
+                "must be the keystore's path",
+            ));
+        }
+        if upload.alias.trim().is_empty() {
+            problems.push(invalid(
+                loaded,
+                "android.signing.upload.alias",
+                "must be the key's alias",
+            ));
+        }
+        env_name(
+            "android.signing.upload.store_pass_env",
+            &upload.store_pass_env,
+            &mut problems,
+        );
+        if let Some(key_pass) = &upload.key_pass_env {
+            env_name(
+                "android.signing.upload.key_pass_env",
+                key_pass,
+                &mut problems,
+            );
+        }
+    }
+    env_name(
+        "android.play.service_account_json_env",
+        &android.play.service_account_json_env,
+        &mut problems,
+    );
+    if android.play.track.trim().is_empty() {
+        problems.push(invalid(
+            loaded,
+            "android.play.track",
+            "must name a Play track (internal, alpha, beta, production or a closed-testing track)",
+        ));
+    }
+
+    // [desktop.macos], [desktop.windows], [desktop.linux]
+    let desktop = &config.desktop;
+    if !is_identity_ref(&desktop.macos.identity) {
+        problems.push(invalid(
+            loaded,
+            "desktop.macos.identity",
+            "must be \"auto\", a certificate SHA-1 or its common name",
+        ));
+    }
+    if let Some(profile) = &desktop.macos.notary_profile
+        && (profile.trim().is_empty() || profile.chars().any(char::is_control))
+    {
+        problems.push(invalid(
+            loaded,
+            "desktop.macos.notary_profile",
+            "must name the keychain profile `xcrun notarytool store-credentials` created",
+        ));
+    }
+    for (index, format) in desktop.windows.formats.iter().enumerate() {
+        if !["msi", "nsis"].contains(&format.as_str()) {
+            problems.push(invalid(
+                loaded,
+                &format!("desktop.windows.formats[{index}]"),
+                "must be \"msi\" or \"nsis\"",
+            ));
+        }
+    }
+    if let Some(command) = &desktop.windows.sign_command {
+        if !command.contains("{file}") {
+            problems.push(invalid(
+                loaded,
+                "desktop.windows.sign_command",
+                "must contain `{file}`, which icm replaces with the file to sign",
+            ));
+        }
+        if let Some(flag) = literal_secret_flag(command) {
+            problems.push(invalid_secret(
+                loaded,
+                "desktop.windows.sign_command",
+                &format!(
+                    "passes a literal value to `{flag}`; pass secrets as $VARIABLES and list their names in `sign_env`"
+                ),
+            ));
+        }
+    }
+    for (index, name) in desktop.windows.sign_env.iter().enumerate() {
+        env_name(
+            &format!("desktop.windows.sign_env[{index}]"),
+            name,
+            &mut problems,
+        );
+    }
+    for (index, format) in desktop.linux.formats.iter().enumerate() {
+        if !["deb", "appimage"].contains(&format.as_str()) {
+            problems.push(invalid(
+                loaded,
+                &format!("desktop.linux.formats[{index}]"),
+                "must be \"deb\" or \"appimage\"",
+            ));
+        }
+    }
+    if parse_os_version(&desktop.linux.glibc_floor).is_none() {
+        problems.push(invalid(
+            loaded,
+            "desktop.linux.glibc_floor",
+            "must look like \"2.35\"",
+        ));
+    }
+    if let Some(maintainer) = &desktop.linux.maintainer {
+        let well_formed = maintainer.split_once('<').is_some_and(|(name, rest)| {
+            !name.trim().is_empty() && rest.ends_with('>') && rest.contains('@')
+        });
+        if !well_formed {
+            problems.push(invalid(
+                loaded,
+                "desktop.linux.maintainer",
+                "must look like \"Example Ltd <dev@example.com>\"",
+            ));
+        }
+    }
+
+    // [store]
+    let store = &config.store;
+    for (key, value) in [
+        ("store.privacy_policy_url", &store.privacy_policy_url),
+        ("store.support_url", &store.support_url),
+        ("store.marketing_url", &store.marketing_url),
+    ] {
+        if let Some(url) = value
+            && !is_https_url(url)
+        {
+            problems.push(invalid(
+                loaded,
+                key,
+                "must be an https:// URL the stores can open",
+            ));
+        }
+    }
+    env_name("store.asc_key_id_env", &store.asc_key_id_env, &mut problems);
+    env_name(
+        "store.asc_issuer_id_env",
+        &store.asc_issuer_id_env,
+        &mut problems,
+    );
 
     problems
 }
@@ -1747,6 +2106,94 @@ snapshot = false
             .find(|error| error.detail.contains("android:configChanges"))
             .unwrap();
         assert_eq!(config_changes.evidence[0].line, Some(6));
+    }
+
+    #[test]
+    fn release_keys_are_references_that_validate() {
+        let good = format!(
+            "{MINIMAL}[ios]\nteam_id = \"ABCDE12345\"\nasc_app_id = \"1234567890\"\nuses_non_exempt_encryption = true\nexport_compliance_code = \"abc\"\n[ios.signing]\ndistribution = {{ identity = \"0123456789abcdef0123456789abcdef01234567\", profile = \"01234567-89ab-cdef-0123-456789abcdef\" }}\n[android.signing]\nupload = {{ keystore = \"~/.icm/keys/up.jks\", alias = \"upload\", store_pass_env = \"ICM_ANDROID_STORE_PASS\", key_pass_env = \"ICM_ANDROID_KEY_PASS\" }}\n[desktop.windows]\nsign_command = \"jsign --storetype TRUSTEDSIGNING --storepass $AZURE_TOKEN {{file}}\"\nsign_env = [\"AZURE_TOKEN\"]\n[desktop.linux]\nmaintainer = \"Acme <dev@acme.com>\"\n[store]\nprivacy_policy_url = \"https://acme.com/privacy\"\nsupport_url = \"https://acme.com/help\"\n"
+        );
+        let loaded = parse_text(&good).unwrap_or_else(|errors| panic!("{errors:?}"));
+        assert_eq!(loaded.config.store.asc_key_id_env, "ASC_KEY_ID");
+        assert_eq!(loaded.config.desktop.windows.sign_env, ["AZURE_TOKEN"]);
+
+        let errors = |text: String| -> Vec<IcmError> { parse_text(&text).unwrap_err() };
+        let details = |errors: &[IcmError]| -> String {
+            errors
+                .iter()
+                .map(|e| e.detail.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // A password where its variable's name belongs is refused, and
+        // neither the detail nor the evidence quotes it.
+        let pasted = errors(format!(
+            "{MINIMAL}[android.signing]\nupload = {{ keystore = \"k.jks\", alias = \"upload\", store_pass_env = \"hunter2!\" }}\n"
+        ));
+        assert_eq!(pasted.len(), 1, "{}", details(&pasted));
+        assert_eq!(pasted[0].id, "config.invalid");
+        assert!(
+            pasted[0]
+                .detail
+                .contains("android.signing.upload.store_pass_env")
+        );
+        assert!(!pasted[0].detail.contains("hunter2"));
+        assert_eq!(pasted[0].evidence[0].line, Some(6));
+        assert_eq!(pasted[0].evidence[0].excerpt, None);
+
+        let bad = errors(format!(
+            "{MINIMAL}[ios]\nteam_id = \"abc\"\nasc_app_id = \"com.acme\"\nexport_compliance_code = \"x\"\n[ios.signing]\ndistribution = {{ identity = \"auto\", profile = \"my profile\" }}\n[desktop.windows]\nsign_command = \"signtool sign /f cert.pfx --password s3cret\"\nsign_env = [\"azure_token\"]\nformats = [\"zip\"]\n[desktop.linux]\nmaintainer = \"nobody\"\n[store]\nprivacy_policy_url = \"http://acme.com/privacy\"\n"
+        ));
+        let text = details(&bad);
+        for key in [
+            "ios.team_id",
+            "ios.asc_app_id",
+            "ios.export_compliance_code",
+            "ios.signing.distribution.profile",
+            "desktop.windows.sign_command` must contain `{file}`",
+            "passes a literal value to `--password`",
+            "desktop.windows.sign_env[0]",
+            "desktop.windows.formats[0]",
+            "desktop.linux.maintainer",
+            "store.privacy_policy_url",
+        ] {
+            assert!(text.contains(key), "{key} not in:\n{text}");
+        }
+        assert!(!text.contains("s3cret"), "{text}");
+    }
+
+    #[test]
+    fn literal_secrets_in_commands_are_found() {
+        assert_eq!(
+            literal_secret_flag("jsign --storepass hunter2 {file}"),
+            Some("--storepass".to_string())
+        );
+        assert_eq!(
+            literal_secret_flag("tool --password=hunter2 {file}"),
+            Some("--password".to_string())
+        );
+        assert_eq!(literal_secret_flag("jsign --storepass $PASS {file}"), None);
+        assert_eq!(
+            literal_secret_flag("jsign --storepass \"${PASS}\" {file}"),
+            None
+        );
+        assert_eq!(literal_secret_flag("signtool sign /p %PASS% {file}"), None);
+        assert_eq!(literal_secret_flag("tool --token env:TOKEN {file}"), None);
+        assert_eq!(
+            literal_secret_flag("jsign --keystore k.p12 --alias a {file}"),
+            None
+        );
+    }
+
+    #[test]
+    fn env_names_are_upper_case() {
+        assert!(is_env_name("ICM_ANDROID_STORE_PASS"));
+        assert!(is_env_name("_X1"));
+        assert!(!is_env_name("icm_pass"));
+        assert!(!is_env_name("1PASS"));
+        assert!(!is_env_name(""));
+        assert!(!is_env_name("PASS WORD"));
     }
 
     #[test]
