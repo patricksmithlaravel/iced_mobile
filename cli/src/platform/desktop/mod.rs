@@ -1943,6 +1943,9 @@ fn attach(ctx: &Ctx, project: &Project, session: &Session, launched: &Launched) 
     match end {
         FollowEnd::Exited(ended) => {
             write_logs(ctx, session);
+            // "The app is running" no longer holds; an error's summary
+            // comes from the error, a clean exit sets its own below.
+            ctx.rep.clear_summary();
             ctx.rep.set(
                 "process",
                 json!({"pid": session.pid, "alive": false, "exit": ended.to_json()}),

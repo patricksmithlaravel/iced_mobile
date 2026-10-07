@@ -417,13 +417,33 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         "read the app's warnings and errors",
     );
     ctx.rep.next(
-        "icm input android tap <x> <y>",
+        "icm input android tap <x> <y> --json -q",
         "tap in screen.preview.png pixels",
     );
-    ctx.rep.next("icm stop android", "stop the app");
+    ctx.rep.next("icm stop android --json -q", "stop the app");
 
     if args.attach {
-        follow(ctx, &adb, &app_id, &mark, pids, true, &|_, _| true)?;
+        match follow(ctx, &adb, &app_id, &mark, pids.clone(), true, &|_, _| true)? {
+            Followed::Gone { stopped: true } => {
+                ctx.rep
+                    .summary(format!("{app_id} was stopped (am force-stop)"));
+            }
+            Followed::Gone { stopped: false } => {
+                // The app's own exit decides the result, as on the other
+                // platforms: a panic or crash is the run's failure.
+                let mut error = IcmError::new(
+                    CheckId::RunAppDied,
+                    format!("{app_id} exited during --attach, after its first frame"),
+                );
+                let logs = collect_logs(ctx, &adb, &dir, &app_id, &mark, &pids);
+                attach_evidence(&mut error, &logs, &project);
+                ctx.rep
+                    .set("process", json!({"pid": session.pid, "alive": false}));
+                ctx.rep.clear_summary();
+                return Err(error);
+            }
+            Followed::Ended => {}
+        }
     }
     Ok(())
 }
@@ -1411,9 +1431,18 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     ));
 
     if args.follow {
-        follow(ctx, &adb, &app_id, &mark, pids, false, &wanted)?;
+        let _ = follow(ctx, &adb, &app_id, &mark, pids, false, &wanted)?;
     }
     Ok(())
+}
+
+/// How [`follow`] ended.
+enum Followed {
+    /// Ctrl-C or `--timeout`.
+    Ended,
+    /// The app's process is gone (`until_exit`); `stopped` when it was
+    /// `am force-stop` (`icm stop android`, or someone at the device).
+    Gone { stopped: bool },
 }
 
 /// Streams the app's new records until the app exits (`until_exit`),
@@ -1426,7 +1455,7 @@ fn follow(
     mut pids: BTreeSet<u32>,
     until_exit: bool,
     wanted: &dyn Fn(&str, &Record) -> bool,
-) -> Result<()> {
+) -> Result<Followed> {
     type Key = (String, u32, u32, String);
     let key = |record: &Record| -> Key {
         (
@@ -1446,9 +1475,11 @@ fn follow(
         }
     }
     let deadline = ctx.deadline();
+    let force_stop = format!("Force stopping {app_id} ");
+    let mut stopped = false;
     loop {
         if crate::signals::pending().is_some() || deadline.is_some_and(|d| Instant::now() >= d) {
-            return Ok(());
+            return Ok(Followed::Ended);
         }
         std::thread::sleep(Duration::from_millis(1000));
         let alive = adb.pids(app_id);
@@ -1459,6 +1490,10 @@ fn follow(
             // no longer needed.
             let floor: f64 = since.parse().unwrap_or(0.0);
             seen.retain(|(ts, ..)| ts.parse::<f64>().unwrap_or(0.0) >= floor);
+            // ActivityManager logs every `am force-stop`.
+            stopped |= records
+                .iter()
+                .any(|record| record.msg.starts_with(&force_stop));
             for (source, record) in logcat::select(&records, app_id, &pids) {
                 if !seen.insert(key(record)) || !wanted(source, record) {
                     continue;
@@ -1477,7 +1512,7 @@ fn follow(
         }
         if until_exit && alive.is_empty() {
             ctx.rep.progress(format!("{app_id} exited"));
-            return Ok(());
+            return Ok(Followed::Gone { stopped });
         }
     }
 }

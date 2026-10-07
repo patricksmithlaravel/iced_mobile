@@ -380,6 +380,12 @@ impl Reporter {
         self.lock().summary = Some(summary.into());
     }
 
+    /// Forgets the summary set so far, so the result's summary comes from
+    /// the error (an `--attach` that ends in a crash after "is running").
+    pub fn clear_summary(&self) {
+        self.lock().summary = None;
+    }
+
     /// Points `latest/<platform>` at this run when it finishes.
     pub fn latest(&self, platform: &str) {
         self.lock().latest = Some(platform.to_string());

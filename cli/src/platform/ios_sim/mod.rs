@@ -1647,9 +1647,45 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         // The run's work is done: `icm stop ios-sim` (which takes this
         // lock) must work while --attach streams.
         drop(lock);
-        return follow(ctx, &session, &logs::Filter::default(), true);
+        if follow(ctx, &session, &logs::Filter::default(), true)? == Followed::AppGone {
+            // `icm stop ios-sim` marks the session stopped before the app
+            // goes: that stop was asked for. Any other exit is the app's.
+            let stopped = Session::read(&sessions_dir)
+                .is_some_and(|now| now.run == session.run && now.state == "stopped");
+            if stopped {
+                ctx.rep.summary("the app was stopped (icm stop ios-sim)");
+                return Ok(());
+            }
+            let stderr = std::fs::read_to_string(&session.logs.stderr).unwrap_or_default();
+            let panic = logs::find_panic(&stderr);
+            stop_collector(&mut session);
+            session.state = "exited".to_string();
+            let _ = write_session(&session);
+            ctx.rep.set("process", process(false, source, Some(ms)));
+            ctx.rep.clear_summary();
+            let mut error = died(
+                ctx,
+                &xcode,
+                &session,
+                &run_dir,
+                panic,
+                launched_at.elapsed(),
+                None,
+            );
+            error.detail = format!("{} (while attached)", error.detail);
+            return Err(error);
+        }
     }
     Ok(())
+}
+
+/// How [`follow`] ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Followed {
+    /// `--timeout`, or not following until the app exits.
+    Ended,
+    /// The app's process is gone.
+    AppGone,
 }
 
 /// Stops the session's `log stream` collector (its process group), but
@@ -1734,7 +1770,12 @@ fn emit_record(ctx: &Ctx, record: &logs::Record) {
 
 /// Streams new records until Ctrl-C, the `--timeout`, or (with
 /// `stop_on_exit`) the app's death.
-fn follow(ctx: &Ctx, session: &Session, filter: &logs::Filter, stop_on_exit: bool) -> Result<()> {
+fn follow(
+    ctx: &Ctx,
+    session: &Session,
+    filter: &logs::Filter,
+    stop_on_exit: bool,
+) -> Result<Followed> {
     let mut seen = [0usize; 3];
     let filter = logs::Filter {
         tail: None,
@@ -1758,13 +1799,10 @@ fn follow(ctx: &Ctx, session: &Session, filter: &logs::Filter, stop_on_exit: boo
             return Err(crate::output::interrupted(signal));
         }
         if ctx.remaining().is_some_and(|left| left.is_zero()) {
-            return Ok(());
+            return Ok(Followed::Ended);
         }
         if stop_on_exit && !session.app_alive() {
-            return Err(
-                IcmError::new(CheckId::RunAppDied, "the app exited while attached")
-                    .evidence(Evidence::file(&session.logs.stderr)),
-            );
+            return Ok(Followed::AppGone);
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -1791,7 +1829,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     );
 
     if args.follow {
-        return follow(ctx, &session, &filter, false);
+        return follow(ctx, &session, &filter, false).map(|_| ());
     }
 
     let wants_system = matches!(args.source, LogSource::System | LogSource::All);
