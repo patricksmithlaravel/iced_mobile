@@ -5,13 +5,14 @@
 //! [`application`] is the program. [`run`] runs it, and `tests/icm.rs`
 //! drives it headless: the `.ice` flows in `tests/flows`, `icm shot
 //! --headless` and `icm ui --headless`.
+use iced::theme;
 use iced::widget::{
     Column, button, column, container, operation, responsive, row, scrollable,
     text, text_input,
 };
 use iced::{
-    Application, Center, Element, Fill, Font, Padding, Program, Size, Task,
-    Theme,
+    Application, Center, Element, Fill, Font, Padding, Program, Size,
+    Subscription, Task, Theme,
 };
 
 /// The id of the text field: `operation::focus(INPUT)` focuses it, and a
@@ -33,6 +34,8 @@ const TAP: Padding = Padding {
 /// The state of the app.
 #[derive(Debug)]
 pub struct App {
+    /// The system's light or dark mode, as the platform last reported it.
+    appearance: theme::Mode,
     count: i64,
     draft: String,
     items: Vec<String>,
@@ -41,6 +44,7 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            appearance: theme::Mode::None,
             count: 0,
             draft: String::new(),
             items: (1..=20).map(|i| format!("Item {i}")).collect(),
@@ -51,6 +55,9 @@ impl Default for App {
 /// Everything that can happen in the app.
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// The system switched between light and dark mode, or reported its
+    /// mode at launch.
+    AppearanceChanged(theme::Mode),
     /// The "Increment" button was pressed.
     Increment,
     /// The text in the field changed.
@@ -64,6 +71,13 @@ pub enum Message {
 impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            // The default theme follows the system already; the state keeps
+            // the mode only to show it.
+            Message::AppearanceChanged(appearance) => {
+                self.appearance = appearance;
+
+                Task::none()
+            }
             Message::Increment => {
                 self.count += 1;
 
@@ -104,6 +118,12 @@ impl App {
         }
     }
 
+    fn subscription(&self) -> Subscription<Message> {
+        Subscription::batch([
+            iced::system::theme_changes().map(Message::AppearanceChanged)
+        ])
+    }
+
     fn view(&self) -> Element<'_, Message> {
         // The root padding depends on the window's size (see `safe_area`).
         responsive(move |size| self.screen(size)).into()
@@ -118,6 +138,14 @@ impl App {
         ]
         .spacing(12)
         .align_y(Center);
+
+        let appearance = text(match self.appearance {
+            theme::Mode::Light => "Appearance: light",
+            theme::Mode::Dark => "Appearance: dark",
+            // Headless runs have no platform to ask.
+            theme::Mode::None => "Appearance: not reported",
+        })
+        .size(14);
 
         // At the top of the screen: iced does not know how tall a phone's
         // keyboard is, and the keyboard covers fields in the lower half.
@@ -154,6 +182,7 @@ impl App {
 
         let content = column![
             counter,
+            appearance,
             form,
             scrollable(items)
                 .id(LIST)
@@ -197,6 +226,9 @@ pub fn application()
 -> Application<impl Program<Message = Message, Theme = Theme>> {
     iced::application(App::default, App::update, App::view)
         .title("App")
+        // No `.theme(..)`: the default theme follows the system's light or
+        // dark mode.
+        .subscription(App::subscription)
         // Embedded by the `fira-sans` feature: every platform, the headless
         // renderer included, draws the same glyphs.
         .default_font(Font::with_name("Fira Sans"))
@@ -273,6 +305,23 @@ mod tests {
 
         touch(ui, position, pressed);
         touch(ui, position, lifted);
+    }
+
+    #[test]
+    fn the_system_appearance_is_shown() {
+        let mut app = App::default();
+
+        // Headless, nothing reports a mode.
+        {
+            let mut ui = simulator(app.view());
+
+            assert!(ui.find("Appearance: not reported").is_ok());
+        }
+
+        let _ = app.update(Message::AppearanceChanged(theme::Mode::Dark));
+        let mut ui = simulator(app.view());
+
+        assert!(ui.find("Appearance: dark").is_ok());
     }
 
     #[test]
