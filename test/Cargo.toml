@@ -29,3 +29,14 @@ nom.workspace = true
 png.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+iced_widget.workspace = true
+
+iced_renderer.workspace = true
+iced_renderer.features = ["tiny-skia"]
+
+[[test]]
+name = "agent"
+path = "tests/agent.rs"
+harness = false

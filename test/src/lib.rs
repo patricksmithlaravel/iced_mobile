@@ -91,6 +91,7 @@ pub use iced_runtime::core;
 
 pub use iced_selector as selector;
 
+pub mod agent;
 pub mod emulator;
 pub mod ice;
 pub mod instruction;
