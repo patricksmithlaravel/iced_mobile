@@ -376,6 +376,12 @@ fn dry_runs_print_the_plan() {
         .find(|step| step["name"] == "desktop.launch")
         .unwrap();
     assert_eq!(launch["env"]["ICM_EVENTS"], "1");
+    // `print plan <command>` is the same, with --json and -q after the
+    // command applying to the output.
+    let printed = sandbox.result(&["print", "plan", "run", "desktop"]);
+    assert_eq!(printed["exit"], 0, "{printed}");
+    assert_eq!(printed["plan"][0]["name"], "cargo.build", "{printed}");
+
     // Nothing ran, and `latest/desktop` still means the last real run.
     assert!(!sandbox.project.path().join("target/icm/build").exists());
     assert!(

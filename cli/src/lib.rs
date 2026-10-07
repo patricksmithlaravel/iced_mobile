@@ -95,14 +95,19 @@ fn run(cli: Cli, argv: Vec<String>) -> Exit {
     let (command, target) = cli.command.name_and_target();
     let detaching =
         cli.global.detach && !cli.command.is_view() && !env_flag(commands::detach::DETACHED_ENV);
-    // An unknown or later-phase command swallows its flags unparsed.
-    let (external_json, external_quiet) = match &cli.command {
-        cli::Command::External(args) => (
-            args.iter().any(|arg| arg == "--json"),
-            args.iter().any(|arg| is_quiet_flag(arg)),
-        ),
-        _ => (false, false),
+    // An unknown or later-phase command, and the command after `print
+    // plan`, swallow their flags unparsed.
+    let swallowed: &[String] = match &cli.command {
+        cli::Command::External(args) => args,
+        cli::Command::Print(cli::PrintArgs {
+            what: cli::PrintWhat::Plan { command },
+        }) => command,
+        _ => &[],
     };
+    let (external_json, external_quiet) = (
+        swallowed.iter().any(|arg| arg == "--json"),
+        swallowed.iter().any(|arg| is_quiet_flag(arg)),
+    );
     let json = cli.global.json || env_flag("ICM_JSON") || external_json;
 
     let inherited = std::env::var("ICM_RUN_ID")
