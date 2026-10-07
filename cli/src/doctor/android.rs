@@ -162,8 +162,15 @@ pub(super) fn gather(probe: &Probe<'_>) -> Vec<Requirement> {
     // itself present.
     let installer = sdkmanager.filter(|_| licensed);
     let abi = managed::host_abi();
-    let image = managed::system_image_package(target_sdk, abi);
-    let image_installed = system_image_dir(&sdk, target_sdk, abi.as_str()).is_some();
+    // The AVD is created from the image that is installed, the way `icm
+    // run android` creates it (google_apis first), else from the one the
+    // fix installs.
+    let installed = crate::android::avd::find_image(&sdk, target_sdk, abi);
+    let image = installed.as_ref().map_or_else(
+        || managed::system_image_package(target_sdk, abi),
+        |image| image.package.clone(),
+    );
+    let image_installed = installed.is_some();
 
     for (key, present, package, what) in [
         (

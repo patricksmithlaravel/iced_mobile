@@ -59,7 +59,7 @@ cargo test
 | `signatures.rs` | known failure signatures (design §13.4) → `likely_causes`; `signatures::annotate(error, text, &Facts)` |
 | `hooks.rs` | project hooks, `[checks] <platform>` scripts; `run` calls `hooks::run(ctx, &HookContext)` after a launch |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
-| `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices`/`doctor` for Android: APK pipeline, managed AVD, adb, logcat, session (`android/mod.rs` has the module map) |
+| `android/` | `build`/`run`/`stop`/`shot`/`logs`/`input`/`devices` for Android (`doctor android` is `doctor/`): APK pipeline, managed AVD, adb, logcat, session (`android/mod.rs` has the module map) |
 
 ## Writing a command
 

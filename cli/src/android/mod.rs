@@ -1,5 +1,6 @@
 //! The Android pipeline (design §9.4, §10.4, §13; Appendix C items 2, 10,
 //! 25 and 27): `icm build|run|stop|shot|logs|input|devices android`.
+//! `icm doctor android` is the generic doctor ([`crate::doctor`]).
 //!
 //! | Module | What it owns |
 //! |---|---|
@@ -29,9 +30,7 @@ pub mod res;
 pub mod session;
 pub mod zip;
 
-pub use pipeline::{
-    build, devices, doctor, doctor_checks, input, logs, run, shot, stop, stop_session,
-};
+pub use pipeline::{build, devices, input, logs, run, shot, stop, stop_session};
 
 use crate::catalogue::CheckId;
 use crate::error::{Evidence, IcmError};
@@ -47,10 +46,7 @@ use std::path::{Path, PathBuf};
 pub const MIN_BUILD_TOOLS: u32 = 35;
 
 /// The build-tools `doctor --fix --yes` installs.
-pub const BUILD_TOOLS_PACKAGE: &str = "build-tools;36.0.0";
-
-/// The NDK `doctor --fix --yes` installs.
-pub const NDK_PACKAGE: &str = "ndk;29.0.14206865";
+pub const BUILD_TOOLS_PACKAGE: &str = crate::managed::BUILD_TOOLS_PACKAGE;
 
 /// The Android SDK, JDK and NDK, and the environment for their children.
 #[derive(Clone, Debug)]
