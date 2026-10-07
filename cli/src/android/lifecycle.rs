@@ -613,7 +613,7 @@ impl<'a> Suite<'a> {
         // The activity: relaunched or destroyed since the step's mark.
         let events_path = dir.join(format!("events-{}.txt", step.name));
         let events = pipeline::events_buffer(&adb, mark, &[]).unwrap_or_default();
-        let _ = std::fs::write(&events_path, &events);
+        let _ = crate::process::write_redacted(&events_path, &events);
         let records = logcat::parse(&events);
         let relaunched = logcat::relaunches(&records, &app_id);
         let destroyed = logcat::destroys(&records, &app_id);

@@ -13,7 +13,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_icm");
 
 /// The fake adb: one emulator, `emulator-5580`, running the AVD
 /// `icm-api36` (or `$FAKE_AVD`) with a 1080x2400 display at 420 dpi. Every call is appended
-/// to `$FAKE_ADB_LOG`; `emu kill` removes the emulator.
+/// to `$FAKE_ADB_LOG`; `emu kill` removes the emulator. `logcat` prints
+/// `logcat.txt` (`events.txt` for `-b events`) next to the log, and `pidof`
+/// the file `pidof` there when it exists (else 4321).
 const FAKE_ADB: &str = r#"#!/bin/sh
 echo "$*" >> "$FAKE_ADB_LOG"
 state_dir=$(dirname "$FAKE_ADB_LOG")
@@ -35,9 +37,15 @@ case "$1" in
       "wm density") echo "Physical density: 420" ;;
       "wm size") echo "Physical size: 1080x2400" ;;
       "dumpsys window displays") echo "  init=1080x2400 420dpi cur=1080x2400 app=1080x2337" ;;
-      pidof*) echo "4321" ;;
+      pidof*) if [ -f "$state_dir/pidof" ]; then cat "$state_dir/pidof"; else echo "4321"; fi ;;
       "date +%s.%N") echo "1791334000.123456789" ;;
       *) ;;
+    esac
+    exit 0 ;;
+  logcat)
+    case "$*" in
+      *"-b events"*) [ -f "$state_dir/events.txt" ] && cat "$state_dir/events.txt" ;;
+      *) [ -f "$state_dir/logcat.txt" ] && cat "$state_dir/logcat.txt" ;;
     esac
     exit 0 ;;
 esac
@@ -265,6 +273,54 @@ fn logs_need_a_launch_mark_or_a_duration() {
 
     let result = sandbox.result(&["logs", "android", "--since", "soon"]);
     assert_eq!(result["exit"], 2, "{result}");
+}
+
+impl Sandbox {
+    /// The text of an artifact a result names.
+    fn artifact(&self, result: &Value, kind: &str) -> String {
+        let path = PathBuf::from(result["artifacts"][kind].as_str().unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.project.join(path)
+        };
+        std::fs::read_to_string(path).unwrap()
+    }
+}
+
+/// The log files a command keeps are redacted as its stdout is: a value of
+/// a secret-named variable in icm's environment that the app logged
+/// (`--json` printed `<redacted>`) stays out of `logcat.txt`, `logs.ndjson`
+/// and `app.log`, a JSON-escaped one included.
+#[test]
+fn log_files_keep_no_secret() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.root.path().join("logcat.txt"),
+        "--------- beginning of main
+1791333501.000  4321  4350 I iced: signed in with tok-sekrit-123456
+1791333501.100  4321  4350 I iced: {\"token\":\"tok-sekrit-123456\"}
+",
+    )
+    .unwrap();
+
+    let output = sandbox.run(
+        &["logs", "android", "--since", "15m", "--json"],
+        &[("ICM_TEST_API_TOKEN", "tok-sekrit-123456")],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let result: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!(result["exit"], 0, "{result}");
+    assert_eq!(result["records"][0]["msg"], "signed in with <redacted>");
+    assert!(!stdout.contains("tok-sekrit-123456"));
+    for kind in ["logcat", "logs", "app_log"] {
+        let text = sandbox.artifact(&result, kind);
+        assert!(!text.contains("tok-sekrit-123456"), "{kind}: {text}");
+        assert!(text.contains("signed in with <redacted>"), "{kind}: {text}");
+    }
+    let logs = sandbox.artifact(&result, "logs");
+    let second: Value = serde_json::from_str(logs.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(second["msg"], "{\"token\":\"<redacted>\"}");
 }
 
 #[test]

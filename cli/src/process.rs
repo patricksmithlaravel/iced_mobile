@@ -495,6 +495,19 @@ pub fn redact_with(text: &str, secrets: &[String]) -> String {
     text
 }
 
+/// Writes a text file icm keeps for reading later (a log, a copy of a
+/// device's output) with the secret values icm knows ([`secret_values`])
+/// replaced, as the reporter replaces them in every event and result: a
+/// file in the run directory must not keep what stdout hides.
+pub fn write_redacted(path: &Path, text: &str) -> io::Result<()> {
+    let secrets = secret_values();
+    if secrets.iter().any(|secret| text.contains(secret.as_str())) {
+        std::fs::write(path, redact_with(text, &secrets))
+    } else {
+        std::fs::write(path, text)
+    }
+}
+
 fn redact_file(path: &Path, secrets: &[String]) {
     if secrets.is_empty() {
         return;
@@ -1089,6 +1102,14 @@ mod tests {
         assert_eq!(
             redact_values("detail: child-only-pw!"),
             "detail: <redacted>!"
+        );
+        // So do the files icm keeps.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("app.log");
+        write_redacted(&log, "1 I app: child-only-pw\n2 I app: fine\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "1 I app: <redacted>\n2 I app: fine\n"
         );
     }
 

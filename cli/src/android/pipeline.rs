@@ -1408,7 +1408,8 @@ pub(super) fn query(adb: &Adb, mark: &str, buffers: &[&str]) -> Option<String> {
 }
 
 /// Writes `logcat.txt` (raw), `logs.ndjson` and `app.log` (the app's
-/// records) into the run directory.
+/// records) into the run directory, with the secret values icm knows
+/// redacted as on stdout.
 pub(super) fn collect_logs(
     ctx: &Ctx,
     adb: &Adb,
@@ -1421,7 +1422,7 @@ pub(super) fn collect_logs(
         return Collected::default();
     };
     let raw = dir.join("logcat.txt");
-    let _ = std::fs::write(&raw, &text);
+    let _ = crate::process::write_redacted(&raw, &text);
     let records = logcat::parse(&text);
     let mut pids = pids.clone();
     // ICM_EVENT start names the app's pid even when pidof missed it.
@@ -1449,10 +1450,16 @@ pub(super) fn collect_logs(
     }
 }
 
+/// Writes `logs.ndjson` and `app.log`, redacted.
 fn write_records(dir: &Path, selected: &[(String, Record)]) -> (Option<PathBuf>, Option<PathBuf>) {
+    // Each record's strings are redacted before JSON escapes them.
     let ndjson: String = selected
         .iter()
-        .map(|(source, record)| format!("{}\n", record.to_json(source)))
+        .map(|(source, record)| {
+            let mut json = record.to_json(source);
+            crate::output::redact(&mut json);
+            format!("{json}\n")
+        })
         .collect();
     let readable: String = selected
         .iter()
@@ -1461,8 +1468,12 @@ fn write_records(dir: &Path, selected: &[(String, Record)]) -> (Option<PathBuf>,
     let logs = dir.join("logs.ndjson");
     let app_log = dir.join("app.log");
     (
-        std::fs::write(&logs, ndjson).ok().map(|()| logs),
-        std::fs::write(&app_log, readable).ok().map(|()| app_log),
+        crate::process::write_redacted(&logs, &ndjson)
+            .ok()
+            .map(|()| logs),
+        crate::process::write_redacted(&app_log, &readable)
+            .ok()
+            .map(|()| app_log),
     )
 }
 
@@ -1510,7 +1521,7 @@ fn recreation(
 ) -> Option<Recreated> {
     let text = events_buffer(adb, mark, &[])?;
     let path = dir.join("events.txt");
-    if std::fs::write(&path, &text).is_ok() {
+    if crate::process::write_redacted(&path, &text).is_ok() {
         ctx.rep.artifact("events", &path);
     }
     let config = &project.config.config;
@@ -1867,7 +1878,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     })?;
     let raw = dir.join("logcat.txt");
     let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(&raw, &text);
+    let _ = crate::process::write_redacted(&raw, &text);
     ctx.rep.artifact("logcat", &raw);
 
     if args.raw {

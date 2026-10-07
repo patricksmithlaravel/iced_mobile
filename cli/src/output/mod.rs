@@ -12,7 +12,9 @@
 //!   and in the result, progress and content has the secret values icm
 //!   knows replaced with `<redacted>` ([`crate::process::secret_values`]),
 //!   whatever produced it (a hook's CHECK line, a tool's output, an app's
-//!   log).
+//!   log). Step logs are redacted by the runner, and the logs a pipeline
+//!   saves as artifacts go through [`crate::process::write_redacted`] (and
+//!   [`redact`] for JSON records).
 //!
 //! Exit-code rules (§4.4): the first blocking failure (the error a command
 //! returns) sets the exit code and is `errors[0]`; non-blocking FAILs set
@@ -893,7 +895,9 @@ fn first_line(text: &str) -> &str {
 }
 
 /// Replaces the secret values icm knows in every string of a JSON value.
-fn redact(value: &mut Value) {
+/// A file of JSON records is redacted this way before it is written, since
+/// JSON escaping can hide a secret from a search of the text.
+pub fn redact(value: &mut Value) {
     let secrets = crate::process::secret_values();
     if !secrets.is_empty() {
         redact_strings(value, &secrets);
