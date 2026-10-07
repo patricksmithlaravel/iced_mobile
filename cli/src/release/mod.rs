@@ -20,8 +20,10 @@
 //!    - the pipeline's own preconditions ([`Pipeline::preconditions`]);
 //!    - then every owner item blocks at once (exit 9, `owner_steps` lists
 //!      them), and after that `version.build_not_increased` (the ledger,
-//!      exit 1; a WARN under `--sign none`) and `release.dirty_tree` (exit
-//!      1 unless `--allow-dirty`).
+//!      exit 1; a WARN under `--sign none`), `release.lock_missing` (the
+//!      build is `--locked`, exit 1) and `release.dirty_tree` (changed
+//!      tracked files or an uncommitted Cargo.lock; exit 1 unless
+//!      `--allow-dirty`).
 //! 3. The dist directory `target/icm/dist/<version>+<build>/<target>/` is
 //!    emptied (unless [`Pipeline::keeps_dist`]) and the pipeline builds
 //!    into it ([`Pipeline::build`]).
@@ -197,6 +199,9 @@ pub struct Release {
     pub ledger: ledger::Ledger,
     /// Where the artifacts carry the third-party notices.
     pub notices: Vec<manifest::NoticesAt>,
+    /// Whether the build's Cargo.lock is not committed (`--allow-dirty`
+    /// records the release as dirty).
+    lock_uncommitted: bool,
     notices_ready: bool,
     files: Vec<FileEntry>,
 }
@@ -230,6 +235,7 @@ impl Release {
             owner_plan: None,
             ledger: ledger::read(project.dir())?,
             notices: Vec::new(),
+            lock_uncommitted: false,
             notices_ready: false,
             files: Vec::new(),
             project: project.clone(),
@@ -754,55 +760,117 @@ fn build_number(ctx: &Ctx, rel: &mut Release) -> Result<()> {
     }
 }
 
-/// `release.dirty_tree`: a release comes from a commit.
+/// The `icm check` platform that resolves the lock of a target's package.
+fn check_platform(target: ReleaseTarget) -> &'static str {
+    match target {
+        ReleaseTarget::Ios => "ios-device",
+        ReleaseTarget::Android => "android",
+        ReleaseTarget::Web => "web",
+        ReleaseTarget::Macos | ReleaseTarget::Windows | ReleaseTarget::Linux => "desktop",
+    }
+}
+
+/// `release.lock_missing`: a release builds the lock with `--locked`, so
+/// it must exist before the build (a new app has none until `icm check`
+/// or `icm run` resolves it).
+fn lock_present(rel: &Release) -> Result<()> {
+    let lock = rel.project.lock_path();
+    if lock.is_file() {
+        return Ok(());
+    }
+    let shown = crate::paths::display(&lock);
+    let create = match rel.target {
+        ReleaseTarget::Web => "icm doctor web --fix --yes".to_string(),
+        target => format!("icm check {} --json -q", check_platform(target)),
+    };
+    Err(IcmError::new(
+        CheckId::ReleaseLockMissing,
+        format!("there is no {shown}; a release builds the committed lock with --locked, so it would fail in cargo"),
+    )
+    .evidence(Evidence::file(&rel.package.manifest_path))
+    .fix(
+        format!("Create Cargo.lock (`{create}` resolves it), then commit it, so the release names a commit that can rebuild it."),
+        &[&create, &format!("git add {shown}")],
+    ))
+}
+
+/// `release.dirty_tree`: a release comes from a commit, which holds the
+/// Cargo.lock it builds with.
 fn source(ctx: &Ctx, rel: &mut Release) -> Result<()> {
+    lock_present(rel)?;
     let inputs = rel.project.inputs_json();
     let rev = inputs["git_rev"].as_str().map(str::to_string);
     let dirty = inputs["dirty"].as_bool();
-    match (rev, dirty) {
-        (None, _) => {
-            rel.check(
-                ctx,
-                Check::warn(
-                    CheckId::ReleaseDirtyTree,
-                    "the project has no git commit; artifacts.json records no source revision",
-                )
-                .fix(
-                    "Commit the project to git, so a release names the commit it was built from.",
-                    &[],
-                ),
-            );
-            Ok(())
-        }
-        (Some(rev), Some(true)) if rel.args.allow_dirty => {
-            rel.check(
-                ctx,
-                Check::info(
-                    CheckId::ReleaseDirtyTree,
-                    format!("tracked files changed since {rev} (--allow-dirty): artifacts.json records dirty: true"),
-                ),
-            );
-            Ok(())
-        }
-        (Some(rev), Some(true)) => Err(IcmError::new(
-            CheckId::ReleaseDirtyTree,
-            format!("tracked files have uncommitted changes on top of {rev}; a release is built from a commit"),
-        )
-        .fix(
-            "Commit the changes, or pass --allow-dirty (artifacts.json then records dirty: true).",
-            &[
-                "git status --short",
-                &format!("icm release {} --allow-dirty", rel.target.as_str()),
-            ],
-        )),
-        (Some(rev), _) => {
-            rel.check(
-                ctx,
-                Check::pass(CheckId::ReleaseDirtyTree, format!("built from commit {rev}")),
-            );
-            Ok(())
-        }
+    let Some(rev) = rev else {
+        rel.check(
+            ctx,
+            Check::warn(
+                CheckId::ReleaseDirtyTree,
+                "the project has no git commit; artifacts.json records no source revision",
+            )
+            .fix(
+                "Commit the project to git, so a release names the commit it was built from.",
+                &[],
+            ),
+        );
+        return Ok(());
+    };
+    let lock = rel.project.lock_path();
+    let shown = crate::paths::display(&lock);
+    let lock_uncommitted = rel.project.git_tracks(&lock) == Some(false);
+    let mut problems = Vec::new();
+    if dirty == Some(true) {
+        problems.push(format!(
+            "tracked files have uncommitted changes on top of {rev}"
+        ));
     }
+    if lock_uncommitted {
+        problems.push(format!(
+            "{shown} is not committed, so {rev} cannot rebuild what --locked builds"
+        ));
+    }
+    if problems.is_empty() {
+        rel.check(
+            ctx,
+            Check::pass(
+                CheckId::ReleaseDirtyTree,
+                format!("built from commit {rev}"),
+            ),
+        );
+        return Ok(());
+    }
+    if rel.args.allow_dirty {
+        rel.lock_uncommitted = lock_uncommitted;
+        rel.check(
+            ctx,
+            Check::info(
+                CheckId::ReleaseDirtyTree,
+                format!(
+                    "{} (--allow-dirty): artifacts.json records dirty: true",
+                    problems.join("; ")
+                ),
+            ),
+        );
+        return Ok(());
+    }
+    let mut commands = vec!["git status --short".to_string()];
+    if lock_uncommitted {
+        commands.push(format!("git add {shown}"));
+    }
+    commands.push(format!("icm release {} --allow-dirty", rel.target.as_str()));
+    Err(IcmError::new(
+        CheckId::ReleaseDirtyTree,
+        format!("{}; a release is built from a commit", problems.join("; ")),
+    )
+    .fix(
+        if lock_uncommitted {
+            "Commit Cargo.lock (remove it from .gitignore if it is listed there) and any other changes, or pass --allow-dirty (artifacts.json then records dirty: true)."
+        } else {
+            "Commit the changes, or pass --allow-dirty (artifacts.json then records dirty: true)."
+        },
+        &[],
+    )
+    .fix_commands(commands))
 }
 
 fn prepare_dist(dist: &Path, clean: bool) -> Result<()> {
@@ -866,7 +934,7 @@ fn preconditions_plan(rel: &Release, keeps_dist: bool) -> Plan {
     plan.push(Step::internal(
         "release.preconditions",
         &format!(
-            "version {} is X.Y.Z; {}; [store] listing URLs; the store policy table; {ledger}; a clean git tree{} ({} {})",
+            "version {} is X.Y.Z; {}; [store] listing URLs; the store policy table; {ledger}; a Cargo.lock, committed, and a clean git tree{} ({} {})",
             rel.version,
             owner.join("; "),
             if rel.args.allow_dirty { " (or --allow-dirty)" } else { "" },
@@ -1010,7 +1078,9 @@ fn finish(ctx: &Ctx, rel: &mut Release) -> Result<()> {
         },
         source: manifest::Source {
             git_rev: inputs["git_rev"].as_str().map(str::to_string),
-            dirty: inputs["dirty"].as_bool(),
+            dirty: inputs["dirty"]
+                .as_bool()
+                .map(|dirty| dirty || rel.lock_uncommitted),
             cargo_lock_sha256: inputs["cargo_lock_sha256"].as_str().map(str::to_string),
         },
         framework: manifest::Framework {

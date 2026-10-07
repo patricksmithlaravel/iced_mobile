@@ -780,7 +780,10 @@ catalogue! {
         "The owner sets the `[store]` key the detail names (a privacy policy or support URL); UPLOAD.md lists it either way.";
     ReleaseDirtyTree = "release.dirty_tree", CheckFailed, Fail, Agent,
         "The release is not built from a clean git commit",
-        "Commit the changes, or pass --allow-dirty (artifacts.json then records `dirty: true`).";
+        "Commit the changes and Cargo.lock, or pass --allow-dirty (artifacts.json then records `dirty: true`).";
+    ReleaseLockMissing = "release.lock_missing", CheckFailed, Fail, Agent,
+        "There is no Cargo.lock for the release to build with --locked",
+        "Create it (`icm check <platform>` resolves it), then commit it.";
     ReleaseNotFound = "release.not_found", Usage, Fail, Agent,
         "There is no release of that target (or no artifact at that path)",
         "Make one with `icm release <target>`, or pass `--artifact <path>` of an existing artifact.";

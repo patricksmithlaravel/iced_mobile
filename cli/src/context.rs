@@ -738,6 +738,30 @@ impl Project {
         })
     }
 
+    /// Whether git tracks `path` (`git ls-files --error-unmatch`, run in the
+    /// file's own directory): `None` when that is not in a git repository
+    /// or git cannot run.
+    pub fn git_tracks(&self, path: &Path) -> Option<bool> {
+        let dir = path.parent()?;
+        let name = path.file_name()?;
+        let outcome = process::run(
+            &Cmd::tool("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["ls-files", "--error-unmatch", "--"])
+                .arg(name)
+                .timeout(Duration::from_secs(10)),
+            None,
+            None,
+        )
+        .ok()?;
+        match outcome.code() {
+            Some(0) => Some(true),
+            Some(1) => Some(false),
+            _ => None,
+        }
+    }
+
     /// The result's `inputs` object.
     pub fn inputs_json(&self) -> Value {
         let git = |args: &[&str]| -> Option<String> {

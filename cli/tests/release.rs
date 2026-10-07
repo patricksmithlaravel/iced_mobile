@@ -602,6 +602,56 @@ fn releases_come_from_a_clean_commit() {
         "--allow-dirty",
     ]);
     assert_eq!(allowed["exit"], 0, "{allowed}");
+
+    // A Cargo.lock that is not committed: the commit cannot rebuild what
+    // --locked builds, so the tree is not clean.
+    git(&["checkout", "--", "icm.toml"]);
+    git(&["rm", "-q", "--cached", "Cargo.lock"]);
+    git(&["commit", "-qm", "untrack the lock"]);
+    let untracked = app.json(&["__test", "release", "ios", "--sign", "none"]);
+    assert_eq!(untracked["exit"], 1, "{untracked}");
+    assert_eq!(untracked["errors"][0]["id"], "release.dirty_tree");
+    let detail = untracked["errors"][0]["detail"].as_str().unwrap();
+    assert!(detail.contains("Cargo.lock is not committed"), "{detail}");
+    assert!(
+        untracked["errors"][0]["fix"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "git add Cargo.lock"),
+        "{untracked}"
+    );
+    let recorded = app.json(&[
+        "__test",
+        "release",
+        "ios",
+        "--sign",
+        "none",
+        "--allow-dirty",
+    ]);
+    assert_eq!(recorded["exit"], 0, "{recorded}");
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(app.abs(&recorded["artifacts"]["manifest"])).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["source"]["dirty"], true, "{manifest}");
+
+    // No Cargo.lock at all: a precondition, before anything is built.
+    std::fs::remove_file(app.dir().join("Cargo.lock")).unwrap();
+    std::fs::remove_dir_all(app.dir().join("target/icm/dist")).unwrap();
+    let missing = app.json(&["__test", "release", "ios", "--sign", "none"]);
+    assert_eq!(missing["exit"], 1, "{missing}");
+    assert_eq!(missing["errors"][0]["id"], "release.lock_missing");
+    assert_eq!(
+        missing["errors"][0]["fix"]["commands"][0],
+        "icm check ios-device --json -q"
+    );
+    assert!(!app.dir().join("target/icm/dist/0.3.0+7/ios").exists());
+    let web = app.json(&["__test", "release", "web", "--sign", "none"]);
+    assert_eq!(
+        web["errors"][0]["fix"]["commands"][0],
+        "icm doctor web --fix --yes"
+    );
 }
 
 #[test]
