@@ -1,0 +1,16 @@
+# A minimal app crate for icm's tests: no dependencies, so `cargo metadata`
+# needs no network. Cargo.lock is a fixture icm reads, not one cargo wrote.
+[package]
+name = "fixture-app"
+version = "0.3.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "fixture-app"
+path = "src/main.rs"
+
+[workspace]

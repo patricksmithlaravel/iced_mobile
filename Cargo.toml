@@ -218,6 +218,9 @@ members = [
     "winit",
     "examples/*",
 ]
+# The icm CLI is its own workspace with its own Cargo.lock, so its
+# dependencies never enter the framework's lock.
+exclude = ["cli"]
 
 [workspace.package]
 version = "0.14.1"

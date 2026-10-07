@@ -1,0 +1,6 @@
+schema = 1
+
+[app]
+name = "Fixture"
+id = "com.acme.fixture"
+colour = "#FFFFFF"

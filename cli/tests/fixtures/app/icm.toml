@@ -1,0 +1,7 @@
+schema = 1
+min_icm = "0.14.1-mobile.1"
+
+[app]
+name = "Fixture"
+id = "com.acme.fixture"
+build = 7
