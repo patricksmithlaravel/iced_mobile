@@ -3,7 +3,7 @@ use crate::subscription;
 use crate::{BoxStream, Executor, MaybeSend};
 
 use futures::channel::{mpsc, oneshot};
-use futures::future::{self, FutureExt, Shared};
+use futures::future::{self, Either, FutureExt, Shared};
 use futures::{Sink, SinkExt};
 use std::marker::PhantomData;
 
@@ -12,10 +12,12 @@ use std::marker::PhantomData;
 /// If you have an [`Executor`], a [`Runtime`] can be leveraged to run any
 /// `Command` or [`Subscription`] and get notified of the results!
 ///
-/// Dropping a [`Runtime`] ends the futures it spawned that are still
-/// running, subscriptions included, the next time their executor polls
-/// them. An executor that lives on (another runtime of the same process, as
-/// when Android starts a new Activity) is not left running them.
+/// On Android and iOS, dropping a [`Runtime`] ends the futures it spawned
+/// that are still running, subscriptions included, the next time their
+/// executor polls them. On Android a new Activity starts a new application
+/// in the same process, and an executor that lives on is not left running
+/// the last one's futures. Elsewhere, as in upstream iced, they keep running
+/// on their executor.
 ///
 /// [`Subscription`]: crate::Subscription
 #[derive(Debug)]
@@ -27,33 +29,47 @@ pub struct Runtime<Executor, Sender, Message> {
     _message: PhantomData<Message>,
 }
 
-/// Ends, once dropped, the futures it guards.
+/// Whether dropping a [`Runtime`] ends the futures it spawned: on Android and
+/// iOS only.
+const ENDS_ON_DROP: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// Ends, once dropped, the futures it guards, if it was made to.
 #[derive(Debug)]
 struct Stop {
-    _sender: oneshot::Sender<()>,
-    stopped: Shared<oneshot::Receiver<()>>,
+    /// The sender, whose drop ends the futures, and what they wait on; `None`
+    /// when they outlive the [`Stop`].
+    signal: Option<(oneshot::Sender<()>, Shared<oneshot::Receiver<()>>)>,
 }
 
 impl Stop {
-    fn new() -> Self {
-        let (sender, receiver) = oneshot::channel();
-
+    /// A [`Stop`] that ends the futures it guards once dropped if `ends`,
+    /// and otherwise leaves them running.
+    fn new(ends: bool) -> Self {
         Self {
-            _sender: sender,
-            stopped: receiver.shared(),
+            signal: ends.then(|| {
+                let (sender, receiver) = oneshot::channel();
+
+                (sender, receiver.shared())
+            }),
         }
     }
 
-    /// Runs `future` until it completes or this [`Stop`] is dropped.
+    /// Runs `future` until it completes or, if this [`Stop`] ends what it
+    /// guards, until it is dropped.
     fn guard(
         &self,
         future: impl Future<Output = ()> + MaybeSend + 'static,
     ) -> impl Future<Output = ()> + MaybeSend + 'static {
-        let stopped = self.stopped.clone();
+        match &self.signal {
+            Some((_sender, stopped)) => {
+                let stopped = stopped.clone();
 
-        async move {
-            let future = std::pin::pin!(future);
-            let _ = future::select(future, stopped).await;
+                Either::Left(async move {
+                    let future = std::pin::pin!(future);
+                    let _ = future::select(future, stopped).await;
+                })
+            }
+            None => Either::Right(future),
         }
     }
 }
@@ -74,11 +90,15 @@ where
     /// - an [`Executor`] to spawn futures
     /// - a `Sender` implementing `Sink` to receive the results
     pub fn new(executor: Executor, sender: Sender) -> Self {
+        Self::with_stop(executor, sender, Stop::new(ENDS_ON_DROP))
+    }
+
+    fn with_stop(executor: Executor, sender: Sender, stop: Stop) -> Self {
         Self {
             executor,
             sender,
             subscriptions: subscription::Tracker::new(),
-            stop: Stop::new(),
+            stop,
             _message: PhantomData,
         }
     }
@@ -154,8 +174,8 @@ where
         });
 
         // The Tracker cancels a subscription only while it waits for its
-        // stream. One blocked on sending to a full `Sender` would outlive
-        // the Runtime without the guard.
+        // stream. On Android and iOS, one blocked on sending to a full
+        // `Sender` would outlive the Runtime without the guard.
         for future in futures {
             executor.spawn(stop.guard(future));
         }
@@ -201,14 +221,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dropping_the_runtime_ends_what_it_spawned() {
-        let executor = Spawned::default();
-        let (sender, _receiver) = mpsc::channel::<()>(1);
-        let mut runtime = Runtime::new(executor.clone(), sender);
-
-        runtime.run(Box::pin(futures::stream::pending()));
-
+    /// The future that `executor` was given last, polled once: it must be
+    /// running.
+    fn running(executor: &Spawned) -> BoxFuture<'static, ()> {
         let mut future = executor
             .0
             .lock()
@@ -216,17 +231,70 @@ mod tests {
             .pop()
             .expect("A spawned future");
 
+        assert!(!ended(&mut future), "the spawned future is running");
+
+        future
+    }
+
+    /// Whether `future` ends when polled.
+    fn ended(future: &mut BoxFuture<'static, ()>) -> bool {
         let mut context = Context::from_waker(noop_waker_ref());
 
-        assert!(future.as_mut().poll(&mut context).is_pending());
-
-        drop(runtime);
-
-        assert!(future.as_mut().poll(&mut context).is_ready());
+        future.as_mut().poll(&mut context).is_ready()
     }
 
     #[test]
-    fn dropping_the_runtime_ends_a_subscription_blocked_on_its_sender() {
+    fn a_dropped_runtime_ends_its_futures_on_android_and_ios_only() {
+        let executor = Spawned::default();
+        let (sender, _receiver) = mpsc::channel::<()>(1);
+        let mut runtime = Runtime::new(executor.clone(), sender);
+
+        runtime.run(Box::pin(futures::stream::pending()));
+
+        let mut future = running(&executor);
+
+        drop(runtime);
+
+        assert_eq!(
+            ended(&mut future),
+            cfg!(any(target_os = "android", target_os = "ios"))
+        );
+    }
+
+    #[test]
+    fn a_runtime_that_leaves_its_futures_leaves_what_it_spawned_running() {
+        let executor = Spawned::default();
+        let (sender, _receiver) = mpsc::channel::<()>(1);
+        let mut runtime =
+            Runtime::with_stop(executor.clone(), sender, Stop::new(false));
+
+        runtime.run(Box::pin(futures::stream::pending()));
+
+        let mut future = running(&executor);
+
+        drop(runtime);
+
+        assert!(!ended(&mut future));
+    }
+
+    #[test]
+    fn a_runtime_that_ends_its_futures_ends_what_it_spawned() {
+        let executor = Spawned::default();
+        let (sender, _receiver) = mpsc::channel::<()>(1);
+        let mut runtime =
+            Runtime::with_stop(executor.clone(), sender, Stop::new(true));
+
+        runtime.run(Box::pin(futures::stream::pending()));
+
+        let mut future = running(&executor);
+
+        drop(runtime);
+
+        assert!(ended(&mut future));
+    }
+
+    #[test]
+    fn a_runtime_that_ends_its_futures_ends_a_blocked_subscription() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         static DROPPED: AtomicBool = AtomicBool::new(false);
@@ -249,26 +317,18 @@ mod tests {
         // Nothing reads it: the subscription's first message fills it, and
         // the second one waits.
         let (sender, _receiver) = mpsc::channel::<()>(0);
-        let mut runtime = Runtime::new(executor.clone(), sender);
+        let mut runtime =
+            Runtime::with_stop(executor.clone(), sender, Stop::new(true));
 
         runtime.track(subscription::into_recipes(crate::Subscription::run(
             ticking,
         )));
 
-        let mut future = executor
-            .0
-            .lock()
-            .expect("Lock futures")
-            .pop()
-            .expect("A spawned future");
-
-        let mut context = Context::from_waker(noop_waker_ref());
-
-        assert!(future.as_mut().poll(&mut context).is_pending());
+        let mut future = running(&executor);
 
         drop(runtime);
 
-        assert!(future.as_mut().poll(&mut context).is_ready());
+        assert!(ended(&mut future));
         assert!(DROPPED.load(Ordering::SeqCst));
     }
 }
