@@ -80,6 +80,9 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 - A logger of your own (`env_logger`, `tracing_subscriber`) is installed in `run()` BEFORE
   `iced::mobile::init_logger()`, and the Android line becomes `iced::android_main!(run, logger = false)`.
   `log` takes one logger per process: installed after iced's, yours panics at startup.
+- On Android `run()` runs again for each new activity in the same process (after Back, say), so
+  everything it sets up for the process must accept a second call: `try_init()` with the error
+  ignored, or a `std::sync::Once`. A second `env_logger::init()` panics, and the app crashes.
 
 ## Releases belong to the owner
 - This icm builds and runs development builds. Store packages come with a later icm.

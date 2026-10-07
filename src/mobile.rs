@@ -260,8 +260,9 @@
 //!    The function that runs it returns `Ok(())`, and
 //!    `mobile::activity_destroyed` says why.
 //! 3. `android_main` returns, as the Activity's `onDestroy` waits for it.
-//! 4. The next Activity calls `android_main` again, on a thread of its own,
-//!    and a new application starts, from its boot function.
+//! 4. The next Activity calls `android_main` again, on a thread of its own:
+//!    the function that runs the application runs again, and a new
+//!    application starts, from its boot function.
 //!
 //! Whatever the application keeps in memory is lost: save what must outlive
 //! the Activity on [`Lifecycle::Suspended`], which always comes before.
@@ -272,6 +273,16 @@
 //! application's own statics. A static that keeps an `AndroidApp` (for JNI,
 //! say) must take each Activity's new one: a `OnceLock` would keep the
 //! first, whose Activity is gone.
+//!
+//! Since the function that runs the application runs once per Activity,
+//! whatever it sets up for the whole process must accept a second call: a
+//! logger or `tracing` subscriber of your own, a panic hook, a global
+//! runtime. Use the forms that report "already set" instead of panicking
+//! (`env_logger::try_init()`, `tracing_subscriber`'s `try_init()`), and
+//! ignore that error, or guard the setup with a `std::sync::Once`.
+//! `env_logger::init()` and `tracing_subscriber`'s `init()` panic the
+//! second time, and a panic in that function ends the process, so the app
+//! would crash on every relaunch that reuses it (after Back, say).
 //!
 //! [`android_main!`](crate::android_main) does steps 3 and 4 for you. The
 //! process ends instead after a panic, and when the application stops on
@@ -474,7 +485,12 @@ pub fn activity_destroyed() -> bool {
 /// install global subscriber". On Android, where
 /// [`android_main!`](crate::android_main) calls `init_logger` before your
 /// function, write `iced::android_main!(run, logger = false)` so your
-/// function can install its logger first.
+/// function can install its logger first. Your function then runs once per
+/// Activity, and the next Activity of the process finds your logger in
+/// place: install it with `try_init()` and ignore the error (or behind a
+/// `std::sync::Once`), since the one-line `init()` forms panic the second
+/// time, which ends the process. See [Activity
+/// destruction](self#android-activity-destruction).
 ///
 /// With your logger in place, the hook still logs each panic through
 /// `log::error!` before the previous hook prints it to stderr, so on the
@@ -713,6 +729,13 @@ fn log_panics() {
 /// installs only the panic hook, and your function installs the logger
 /// before it runs the application. With the first form, iced's logger is in
 /// place before your code runs, so installing another one fails.
+///
+/// Your function runs once per Activity, not once per process: anything it
+/// sets up for the whole process, a logger first of all, must accept a
+/// second call. Use `env_logger::try_init()` or `tracing_subscriber`'s
+/// `try_init()` and ignore the error, or a `std::sync::Once`: their
+/// `init()` panics when a logger is already set, and that panic ends the
+/// process the second time an Activity runs your function.
 ///
 /// On every other target it defines nothing, so the same line serves every
 /// build, but the path is still checked: it must name a function taking

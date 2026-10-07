@@ -213,6 +213,9 @@ pub fn run() -> iced::Result {
     // A logger of your own (env_logger, tracing_subscriber) goes BEFORE this
     // line, with `iced::android_main!(run, logger = false)` below: `log`
     // takes one logger per process, and installing one after iced's panics.
+    // On Android `run` runs again for each new activity in the same process,
+    // so install it with `try_init()` and ignore the error (or behind a
+    // `std::sync::Once`): a second `init()` panics and ends the app.
     iced::mobile::init_logger();
 
     application().run()
