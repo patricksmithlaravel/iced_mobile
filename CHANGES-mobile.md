@@ -26,6 +26,15 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   `desktop.logs.secret_unknown` whatever the shell holds. Before, a shell where that variable held
   another value printed the old one. Read the logs while the app runs, or hand the secret with
   `--env`.
+- `icm logs desktop` of a running app whose environment could not be read back in full no longer
+  prints the secrets it inherited. A read of the process that returned its arguments and no
+  variables (macOS does for a platform binary), or another environment than the app's (the app
+  replaced its process with `exec`, keeping its pid), made every inherited secret known, so `logs`
+  from a shell with another value of the variable printed the app's token in its output,
+  `result.json` and `events.ndjson` with no warning. Now an inherited secret counts as known only
+  when the read returned a variable of its name, and a process that runs another program than the
+  one `icm run` launched is not read at all; the others warn `desktop.logs.secret_unknown` and
+  `logs` reads the run's redacted copies.
 - Desktop session records keep only the protocol fields of the app's `ready` event, redacted, so a
   secret an app put in a field of its own no longer stays in them.
 - `icm stop --shutdown` leaves a managed simulator or emulator running when it cannot read which

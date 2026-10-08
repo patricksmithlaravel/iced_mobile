@@ -17,13 +17,16 @@
 //! run without them redacts them too. What the app inherits from icm's
 //! environment is never written there or anywhere else: the session names
 //! those variables, `run` redacts their values, and a later command reads
-//! them from the running app's environment ([`learn_app_secrets`]). A
+//! them from the running app's environment ([`learn_app_secrets`]), each
+//! one only when that read returns it. A
 //! command that ends the app or finds it gone (`stop`, `logs`, `shot`,
 //! `run --attach`, a failed run) redacts the live files in place with the
 //! values it knows ([`finish_live`]). `logs` of an app that ended by itself
 //! cannot learn them (a variable of the same name in its own environment
-//! may hold another value), so it cannot redact them: it reads the run
-//! directory's copies and warns `desktop.logs.secret_unknown`. It is
+//! may hold another value), nor can it of a running app whose environment
+//! reads back without them (it replaced its process, or the OS gives no
+//! variables), so it cannot redact them: it reads the run directory's
+//! copies and warns `desktop.logs.secret_unknown`. It is
 //! ready on `ICM_EVENT ready`; an app that sends no events is ready when it
 //! is alive after 3 s and owns a window (`source: "probe"`). A panic, an
 //! exit or no first frame within `--wait-ready` fails the run (exit 10) and
@@ -69,7 +72,7 @@ use crate::time::format_duration;
 use logs::{Filter, Record};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -361,25 +364,47 @@ fn remove_session(project: &Project, pid: i32) {
 
 // ---- secrets the app inherited -----------------------------------------------------
 
-/// The pids of the apps whose environment this command knows: the one it
-/// launched, which inherited its own ([`launch`]), and the running one it
-/// read back ([`learn_app_secrets`]).
-static KNOWN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
-
-/// Records that this command knows the environment `pid` started with.
-fn know_environment(pid: i32) {
-    KNOWN
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(pid);
+/// What this command knows of the environment an app inherited.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Known {
+    /// All of it: the app is the one this command launched, which inherited
+    /// this command's own environment ([`launch`]).
+    All,
+    /// The secret-named variables that reading the running app back
+    /// returned, by name ([`learn_app_secrets`]).
+    Secrets(Vec<String>),
 }
 
-/// Whether this command knows the environment `pid` started with.
-fn knows_environment(pid: i32) -> bool {
+/// What this command knows of each app's environment, by pid.
+static KNOWN: Mutex<Vec<(i32, Known)>> = Mutex::new(Vec::new());
+
+/// Records that this command knows `what` of the environment `pid` started
+/// with.
+fn know(pid: i32, what: Known) {
     KNOWN
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .contains(&pid)
+        .push((pid, what));
+}
+
+/// Records that this command knows the whole environment `pid` started
+/// with.
+fn know_environment(pid: i32) {
+    know(pid, Known::All);
+}
+
+/// Whether this command knows the value of the secret-named variable `name`
+/// that `pid` started with.
+fn knows_secret(pid: i32, name: &str) -> bool {
+    KNOWN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter(|(known, _)| *known == pid)
+        .any(|(_, what)| match what {
+            Known::All => true,
+            Known::Secrets(names) => names.iter().any(|known| known == name),
+        })
 }
 
 /// Learns the secret values in the environment of this project's running
@@ -398,29 +423,53 @@ pub fn learn_app_secrets(sessions_dir: &Path) {
         Some(identity) if procid::check(session.pid, identity) != Verdict::Same => return,
         _ => {}
     }
-    let Some((program, vars)) = process::environment_of(session.pid) else {
+    learn_environment(&session, process::environment_of(session.pid));
+}
+
+/// What a read of the app's process ([`process::environment_of`], its
+/// `argv[0]` and the variables it started with) tells of the secrets it
+/// inherited.
+///
+/// The pid and start time say it is the process icm launched, not that its
+/// environment is the one the app inherited: a process that replaced itself
+/// (`exec`) keeps both and reads back with the environment it was given,
+/// and macOS returns the arguments with no variables at all for a platform
+/// binary, or any process whose environment it keeps back. A successful
+/// read is therefore not knowledge of the whole environment. A recorded
+/// inherited secret is known only when the read returned a variable of its
+/// name, and only for a process that still runs the program icm launched;
+/// the others stay unknown ([`unknown_inherited`]), and `logs` warns and
+/// reads the run's redacted copies. What cannot be told: that the variable
+/// holds the value the app inherited, when it replaced itself by the same
+/// program with another environment.
+fn learn_environment(session: &Session, read: Option<(OsString, Vec<(OsString, OsString)>)>) {
+    let Some((program, vars)) = read else {
         return;
     };
-    // A session from before identities: a reused pid runs something else.
-    if session.identity.is_none() && Path::new(&program) != session.exe {
+    // Another program than the one icm launched: what it started with is
+    // not what the app inherited. A session from before identities also
+    // tells a reused pid from the app by this.
+    if Path::new(&program) != session.exe {
         return;
     }
-    let _ = process::learn_environment_secrets(vars);
-    know_environment(session.pid);
+    let names = process::learn_environment_secrets(vars);
+    know(session.pid, Known::Secrets(names));
 }
 
 /// The session's inherited secrets (by name) whose values this command
-/// does not know: all of them, unless it launched the app or read them
-/// from the running app ([`learn_app_secrets`]). A variable of the same
-/// name in its own environment does not make one known: the shell's value
-/// may have changed since `icm run desktop`, and the app logged the one it
-/// inherited. The command cannot redact what the app's live files hold of
-/// them.
+/// does not know: all of them, unless it launched the app, and those that
+/// reading the running app back did not return ([`learn_app_secrets`]). A
+/// variable of the same name in its own environment does not make one
+/// known: the shell's value may have changed since `icm run desktop`, and
+/// the app logged the one it inherited. The command cannot redact what the
+/// app's live files hold of them.
 fn unknown_inherited(session: &Session) -> Vec<String> {
-    if knows_environment(session.pid) {
-        return Vec::new();
-    }
-    session.inherited_secrets.clone()
+    session
+        .inherited_secrets
+        .iter()
+        .filter(|name| !knows_secret(session.pid, name))
+        .cloned()
+        .collect()
 }
 
 /// Whether `path` is one of the app's live files (not a run directory's
@@ -1880,7 +1929,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
             ("their values", "variables of those names")
         };
         let why = if live {
-            "the running app's environment could not be read"
+            "reading the running app's environment did not return it"
         } else {
             "the app has ended"
         };
@@ -2631,6 +2680,115 @@ mod tests {
             ["ICM_UNIT_SHELL_TOKEN", "PATH"]
         );
         know_environment(session.pid);
+        assert!(unknown_inherited(&session).is_empty());
+    }
+
+    fn session_of(pid: i32, exe: &str, inherited: &[&str]) -> Session {
+        Session {
+            platform: PLATFORM.into(),
+            pid,
+            identity: None,
+            pgid: pid,
+            run: "r".into(),
+            run_dir: PathBuf::from("/nonexistent/run"),
+            exe: PathBuf::from(exe),
+            cwd: PathBuf::from("/nonexistent"),
+            stdout: PathBuf::from("/nonexistent/app.stdout"),
+            stderr: PathBuf::from("/nonexistent/app.stderr"),
+            launched: "2026-10-06T00:00:00.000Z".into(),
+            profile: "debug".into(),
+            window: None,
+            ready: None,
+            inherited_secrets: inherited.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    fn read_of(
+        program: &str,
+        vars: &[(&str, &str)],
+    ) -> Option<(OsString, Vec<(OsString, OsString)>)> {
+        Some((
+            OsString::from(program),
+            vars.iter()
+                .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+                .collect(),
+        ))
+    }
+
+    /// Reading the running app back is knowledge of the secrets it
+    /// returned, not of its whole environment: a read with the arguments
+    /// and no variables (macOS for a platform binary, or an app that
+    /// replaced itself with an empty environment) leaves each inherited
+    /// secret unknown, and one the read does return makes only itself
+    /// known.
+    #[test]
+    fn a_read_that_returns_no_secret_does_not_make_the_environment_known() {
+        let (first, second) = ("ICM_UNIT_READ_FIRST_TOKEN", "ICM_UNIT_READ_SECOND_TOKEN");
+        let exe = "/work/target/icm/build/desktop/debug/app";
+
+        // Nothing read: the OS would not say.
+        let session = session_of(i32::MAX - 31, exe, &[first, second]);
+        learn_environment(&session, None);
+        assert_eq!(unknown_inherited(&session), [first, second]);
+
+        // The arguments and no variables.
+        let session = session_of(i32::MAX - 32, exe, &[first, second]);
+        learn_environment(&session, read_of(exe, &[]));
+        assert_eq!(unknown_inherited(&session), [first, second]);
+
+        // Variables, none of them the secrets.
+        let session = session_of(i32::MAX - 33, exe, &[first]);
+        learn_environment(&session, read_of(exe, &[("HOME", "/Users/unit-test")]));
+        assert_eq!(unknown_inherited(&session), [first]);
+
+        // A variable of the name that is no secret icm can learn (too
+        // short), which the app logged in full: still unknown.
+        let session = session_of(i32::MAX - 34, exe, &[first]);
+        learn_environment(&session, read_of(exe, &[(first, "short")]));
+        assert_eq!(unknown_inherited(&session), [first]);
+
+        // One secret returned: it is known, the other is not.
+        let session = session_of(i32::MAX - 35, exe, &[first, second]);
+        learn_environment(&session, read_of(exe, &[(first, "unit-first-value-1")]));
+        assert_eq!(unknown_inherited(&session), [second]);
+
+        // Every secret returned, and a variable that was no inherited
+        // secret besides: nothing is unknown.
+        let session = session_of(i32::MAX - 36, exe, &[first, second]);
+        learn_environment(
+            &session,
+            read_of(
+                exe,
+                &[
+                    (first, "unit-first-value-2"),
+                    (second, "unit-second-value-2"),
+                    ("ICM_UNIT_READ_OTHER_TOKEN", "unit-other-value-2"),
+                ],
+            ),
+        );
+        assert!(unknown_inherited(&session).is_empty());
+
+        // A session with no inherited secret has nothing unknown, read or
+        // not.
+        let session = session_of(i32::MAX - 37, exe, &[]);
+        assert!(unknown_inherited(&session).is_empty());
+    }
+
+    /// A process that runs another program than the one icm launched (it
+    /// replaced itself, or the pid is another process's) tells nothing of
+    /// what the app inherited, even with a variable of the secret's name.
+    #[test]
+    fn a_read_of_another_program_makes_nothing_known() {
+        let name = "ICM_UNIT_OTHER_PROGRAM_TOKEN";
+        let exe = "/work/target/icm/build/desktop/debug/app";
+        let session = session_of(i32::MAX - 41, exe, &[name]);
+        learn_environment(
+            &session,
+            read_of("/bin/sleep", &[(name, "unit-other-program-1")]),
+        );
+        assert_eq!(unknown_inherited(&session), [name]);
+        // The program that was launched.
+        learn_environment(&session, read_of(exe, &[(name, "unit-other-program-1")]));
         assert!(unknown_inherited(&session).is_empty());
     }
 

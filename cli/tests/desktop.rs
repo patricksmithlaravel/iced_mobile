@@ -798,6 +798,156 @@ fn another_value_of_the_same_name_does_not_redact_the_inherited_one() {
     assert!(secret::holds(&live.join("app.stdout")));
 }
 
+/// The command line of a running process, `ps -o command=`.
+fn command_of(pid: i32) -> String {
+    let output = Command::new("ps")
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// `ICM_TEST_API_TOKEN=<TOKEN> icm run desktop --env ICM_FIXTURE=<mode>`
+/// (the app logs the token, then `mode` decides what it becomes), then
+/// `logs`, `logs --raw` and `shot` while it still runs, from shells that
+/// hold another value of the variable and none. When `replaced`, the app
+/// has replaced its process (`exec`) by one whose command line holds
+/// `becomes` and whose environment cannot be read in full. Returns what
+/// each command printed (`--json`, standard output and error), by its
+/// name, and checks that no run directory the commands made holds the
+/// token.
+fn logs_from_other_shells(mode: &str, becomes: &str, replaced: bool) -> Vec<(String, String)> {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps(Vec::new());
+    let icm = sandbox.project.path().join("target/icm");
+    let old = [(secret::NAME, secret::TOKEN)];
+    let new = [(secret::NAME, "another-value-24680")];
+    let none: [(&str, &str); 0] = [];
+
+    let run = sandbox.result_with(
+        &[
+            "run",
+            "desktop",
+            "--settle",
+            "200ms",
+            "--env",
+            &format!("ICM_FIXTURE={mode}"),
+        ],
+        &old,
+    );
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(pid);
+    let live = icm
+        .join("sessions/desktop")
+        .join(run["run"].as_str().unwrap());
+    assert!(secret::holds(&live.join("app.stdout")));
+
+    // The app is the same process (its pid and start time) either way; it
+    // may need a moment to replace itself.
+    if replaced {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !command_of(pid).contains(becomes) {
+            assert!(
+                Instant::now() < until,
+                "pid {pid} still runs {:?}, not {becomes}",
+                command_of(pid)
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let recorded: Value =
+        serde_json::from_str(&std::fs::read_to_string(sandbox.session()).unwrap()).unwrap();
+    let identity: icm::procid::Identity =
+        serde_json::from_value(recorded["identity"].clone()).unwrap();
+    assert_eq!(icm::procid::of(pid).unwrap().start, identity.start);
+    assert!(alive(pid));
+
+    let mut printed = Vec::new();
+    for (args, env) in [
+        (&["logs", "desktop"][..], &new[..]),
+        (&["logs", "desktop", "--raw"], &new),
+        (&["logs", "desktop"], &none),
+        (&["shot", "desktop"], &new),
+    ] {
+        let mut full = args.to_vec();
+        full.push("--json");
+        let output = sandbox.run_with(&full, env);
+        let text = String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {text}");
+        printed.push((args.join(" "), text));
+    }
+    // What the commands kept in their run directories (`result.json`,
+    // `events.ndjson`, the copies of the app's output).
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    secret::assert_kept_nowhere(&icm.join("latest"));
+    printed
+}
+
+/// An app that inherited a secret, logged it and then replaced its process,
+/// keeping its pid and start time: reading the process back gives a
+/// program and no variables (an empty environment; on macOS the system's
+/// `sleep`, whose environment the OS keeps from other processes). That
+/// does not tell the secret the app inherited, so a later `logs` from a
+/// shell with another value of the variable knows nothing of it: it warns
+/// `desktop.logs.secret_unknown` and reads the run's redacted copies. It
+/// used to take the read for the app's whole environment and print the
+/// live files, with the token, in its output, `result.json` and
+/// `events.ndjson`.
+#[test]
+fn an_app_that_replaced_its_process_leaves_its_inherited_secrets_unread() {
+    let printed = logs_from_other_shells("exec", "idle", true);
+    assert_replaced_app_is_guarded("exec", &printed);
+}
+
+/// The same with the system's `sleep`, whose environment macOS hides: the
+/// OS gives `argv` and no environment at all.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_app_that_became_a_platform_binary_leaves_its_inherited_secrets_unread() {
+    let printed = logs_from_other_shells("exec-restricted", "/bin/sleep", true);
+    assert_replaced_app_is_guarded("exec-restricted", &printed);
+}
+
+fn assert_replaced_app_is_guarded(mode: &str, printed: &[(String, String)]) {
+    for (what, text) in printed {
+        let form = secret::forms()
+            .into_iter()
+            .find(|form| text.contains(form.as_str()));
+        assert_eq!(form, None, "{mode}: {what} printed the token: {text}");
+        if what.starts_with("logs") {
+            assert!(
+                text.contains("desktop.logs.secret_unknown"),
+                "{what}: {text}"
+            );
+            assert!(text.contains(secret::NAME), "{what}: {text}");
+            assert!(text.contains("signed in with <redacted>"), "{what}: {text}");
+        }
+    }
+}
+
+/// The control of the two tests above: the app keeps its process, so a
+/// later `logs` reads its environment, learns the secret it inherited and
+/// redacts what it logged from the live files, with no warning.
+#[test]
+fn an_app_that_kept_its_process_has_its_inherited_secrets_read() {
+    let printed = logs_from_other_shells("ready", "", false);
+    for (what, text) in &printed {
+        let form = secret::forms()
+            .into_iter()
+            .find(|form| text.contains(form.as_str()));
+        assert_eq!(form, None, "{what} printed the token: {text}");
+        if what.starts_with("logs") {
+            assert!(
+                !text.contains("desktop.logs.secret_unknown"),
+                "{what}: {text}"
+            );
+            assert!(text.contains("signed in with <redacted>"), "{what}: {text}");
+        }
+    }
+}
+
 #[test]
 fn dry_runs_print_the_plan() {
     let sandbox = Sandbox::new();

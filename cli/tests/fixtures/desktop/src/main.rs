@@ -55,7 +55,37 @@ fn log_token() -> Option<String> {
     Some(token)
 }
 
+/// Replaces this process by another program, as a launcher's `exec` does:
+/// the pid and the start time stay, and the environment that can be read
+/// back from the process is the new program's own.
+///
+/// - `exec`: this program again, in `idle` mode, started with an empty
+///   environment and the same `argv[0]`.
+/// - `exec-restricted`: the system's `sleep`, whose environment macOS keeps
+///   from other processes (it is a platform binary): reading it back gives
+///   the arguments and no variables.
+fn replace_process(mode: &str) -> ! {
+    use std::os::unix::process::CommandExt;
+    let error = if mode == "exec" {
+        let argv0 = std::env::args_os().next().unwrap_or_default();
+        std::process::Command::new(&argv0)
+            .arg0(&argv0)
+            .arg("idle")
+            .env_clear()
+            .exec()
+    } else {
+        std::process::Command::new("/bin/sleep").arg("600").exec()
+    };
+    eprintln!("error: cannot replace the process: {error}");
+    std::process::exit(4);
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("idle") {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
     let start = format!(
         r#"{{"v":1,"kind":"start","protocol":1,"framework":"0.14.1","pid":{},"platform":"test","bridge":null}}"#,
         std::process::id()
@@ -95,6 +125,11 @@ fn main() {
                 }
                 println!("after the run: {}", token.unwrap_or_default());
                 return;
+            }
+            if mode.starts_with("exec") {
+                // It keeps its pid and start time, and gives out no
+                // environment: the secret it logged was inherited.
+                replace_process(mode);
             }
         }
     }

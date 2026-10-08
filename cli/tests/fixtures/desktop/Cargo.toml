@@ -1,7 +1,9 @@
 # A stand-in desktop app for icm's tests: no dependencies and no window.
-# `icm run desktop --env ICM_FIXTURE=<ready|panic|leak|exit|hang>` picks what it
-# does; with ICM_EVENTS=1 it writes ICM_EVENT lines like the framework, and
-# it logs ICM_TEST_API_TOKEN when it is set (`leak` then panics with it).
+# `icm run desktop --env ICM_FIXTURE=<ready|panic|leak|exit|hang|quit|exec|
+# exec-restricted>` picks what it does; with ICM_EVENTS=1 it writes ICM_EVENT
+# lines like the framework, and it logs ICM_TEST_API_TOKEN when it is set
+# (`leak` then panics with it). `exec` and `exec-restricted` replace the
+# process, once ready, by one whose environment cannot be read back.
 [package]
 name = "fixture-desktop"
 version = "0.2.0"
