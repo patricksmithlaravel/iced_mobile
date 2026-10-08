@@ -150,3 +150,11 @@ this file in the commit that fixes or finds a limitation.
   `icm run ios-sim` and `icm run android`.
 - **iced's `sysinfo` feature breaks iOS builds** once libc is 0.2.190 or
   newer (sysinfo 0.33 calls macOS-only functions). Leave it off for iOS.
+- **`icm logs desktop` cannot redact every inherited secret.** It learns the
+  secret-named variables the app inherited from `icm run desktop`'s shell by
+  reading the running app's environment, and a variable counts as known by
+  its name. An app that replaces itself with the same program and another
+  value of that variable makes `logs` print the original value, and after
+  `icm stop` the raw `app.stdout` and `app.stderr` under `target/icm/sessions/`
+  keep a token icm never learned. Hand a secret the app logs to `icm run
+  desktop --env NAME=…`, which every later command redacts from any shell.

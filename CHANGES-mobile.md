@@ -51,7 +51,10 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   `result.json` and `events.ndjson` with no warning. Now an inherited secret counts as known only
   when the read returned a variable of its name, and a process that runs another program than the
   one `icm run` launched is not read at all; the others warn `desktop.logs.secret_unknown` and
-  `logs` reads the run's redacted copies.
+  `logs` reads the run's redacted copies. What icm cannot know: an app that replaces itself with the
+  same program and another value of a same-named variable still counts as known by name, so `logs`
+  prints the original value, and after `stop` the app's raw live `app.stdout` and `app.stderr`
+  keep a token icm never learned. Hand a secret that matters to `icm run desktop --env NAME=…`.
 - Desktop session records keep only the protocol fields of the app's `ready` event, redacted, so a
   secret an app put in a field of its own no longer stays in them.
 - `icm stop --shutdown` leaves a managed simulator or emulator running when it cannot read which
