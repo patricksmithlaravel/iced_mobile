@@ -39,6 +39,13 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - When `icm run android --wait-ready` runs out, the error says only what the readiness polls saw,
   where it used to say the app was alive. After Android relaunched the activity, it says so, where
   it used to say the wait ended before the resumed-activity probe starts.
+- `icm stop ios-sim`, `icm run ios-sim --attach` and the next `icm run` on another simulator take
+  the pid in an iOS Simulator session for the app only while that process is the one `icm run`
+  launched (and `logs` and `input` report it running on the same test): its start time is recorded
+  beside the pid, as the log collector's now is. Before, any process under the number counted, so
+  `icm stop ios-sim` ran `simctl terminate` for an app that had exited and failed, and a run on
+  another simulator ended the app there. A session an older icm wrote has no start time and says the
+  app is not running; end that app with `xcrun simctl terminate <udid> <bundle id>`.
 - `icm stop android` takes the emulator on a session's serial for the one its run booted only while
   that emulator's process is verified. `icm run` records the process's start time beside its pid,
   and a pid that has exited, that another process has taken, or that an older session recorded

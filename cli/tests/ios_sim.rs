@@ -404,6 +404,148 @@ fn run_logs_shot_and_stop() {
     assert!(session["collector_pid"].is_null());
 }
 
+/// A live process that is not the app, and not icm's child: what a pid
+/// recorded for an app that has exited can name later. Killed and reaped
+/// when dropped.
+struct Unrelated(std::process::Child);
+
+impl Unrelated {
+    fn start() -> Unrelated {
+        Unrelated(
+            Command::new("sleep")
+                .arg("120")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    fn running(&mut self) -> bool {
+        self.0.try_wait().unwrap().is_none()
+    }
+}
+
+impl Drop for Unrelated {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl Fake {
+    /// The ios-sim session an earlier `run` left on `udid`, its app's pid
+    /// and `fields` (the pid's identity) as given.
+    fn write_session(&self, udid: &str, pid: u32, fields: Value) {
+        let mut session = json!({
+            "schema": "icm.session/1", "platform": "ios-sim", "run": "r1", "run_dir": null,
+            "state": "running",
+            "device": {"udid": udid, "name": "icm-iphone-17-ios-27.0", "os": "27.0",
+                       "type": "iPhone 17", "managed": true, "fresh": false, "data_path": null},
+            "app_id": "com.acme.fixture", "exe": "fixture-app", "bundle": "/b/Fixture.app",
+            "pid": pid, "launch_unix_ms": 1,
+            "logs": {"stdout": "/o", "stderr": "/e", "oslog": "/l"},
+            "collector_pid": null
+        });
+        session
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let sessions = self.project.join("target/icm/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("ios-sim.json"), session.to_string()).unwrap();
+    }
+}
+
+/// The pid in a session says nothing about the app once the app has
+/// exited: another process can take the number. `app_alive` took any
+/// process under it for the app, so `stop ios-sim` ran `simctl terminate`
+/// for an app that was not running (and failed when that found nothing,
+/// since the pid stayed "alive"), and the next `run` on another simulator
+/// ended the app there the same way.
+#[test]
+fn a_pid_another_process_took_is_not_the_app() {
+    let mut unrelated = Unrelated::start();
+    // A session an older icm wrote (no identity), and one whose identity is
+    // another process's.
+    for (case, fields) in [
+        ("no identity", json!({})),
+        (
+            "another identity",
+            json!({"pid_identity": {"start": "1791334000.000001", "exe": "/x/fixture-app"}}),
+        ),
+    ] {
+        let fake = Fake::new();
+        fake.write_session("OTHER-UDID", unrelated.0.id(), fields.clone());
+
+        let stop = fake.result("ok", &["stop", "ios-sim", "--json", "-q"]);
+        assert_eq!(stop["exit"], 0, "{case}: {stop}");
+        assert!(
+            stop["summary"]
+                .as_str()
+                .unwrap()
+                .contains("com.acme.fixture was not running"),
+            "{case}: {stop}"
+        );
+        assert!(
+            !fake.xcrun_log().contains("simctl terminate"),
+            "{case}: {}",
+            fake.xcrun_log()
+        );
+        assert_eq!(stop["process"]["alive"], false, "{case}: {stop}");
+        assert!(unrelated.running());
+
+        // The next run on another simulator ends what the previous session
+        // left only when that is the app.
+        fake.write_session("OTHER-UDID", unrelated.0.id(), fields);
+        let run = fake.result("ok", &["run", "ios-sim", "--json", "-q"]);
+        assert_eq!(run["exit"], 0, "{case}: {run}");
+        assert!(
+            !fake.xcrun_log().contains("simctl terminate OTHER-UDID"),
+            "{case}: {}",
+            fake.xcrun_log()
+        );
+        assert!(unrelated.running());
+    }
+}
+
+/// A session whose app pid still has the process icm read at launch is the
+/// app: `stop` terminates it, and the session records the identity `run`
+/// read (`run_logs_shot_and_stop` ends the app that way).
+#[test]
+fn a_run_records_the_identity_stop_checks() {
+    let fake = Fake::new();
+    let run = fake.result("ok", &["run", "ios-sim", "--json", "-q"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let session: Value = serde_json::from_str(
+        &std::fs::read_to_string(fake.project.join("target/icm/sessions/ios-sim.json")).unwrap(),
+    )
+    .unwrap();
+    let pid = session["pid"].as_i64().unwrap();
+    let recorded: icm::procid::Identity =
+        serde_json::from_value(session["pid_identity"].clone()).unwrap();
+    assert_eq!(icm::procid::of(pid as i32).unwrap().start, recorded.start);
+    let collector = session["collector_pid"].as_i64().unwrap();
+    let recorded: icm::procid::Identity =
+        serde_json::from_value(session["collector_identity"].clone()).unwrap();
+    assert_eq!(
+        icm::procid::of(collector as i32).unwrap().start,
+        recorded.start
+    );
+
+    let stop = fake.result("ok", &["stop", "ios-sim", "--json", "-q"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(
+        stop["summary"]
+            .as_str()
+            .unwrap()
+            .contains("terminated com.acme.fixture"),
+        "{stop}"
+    );
+    assert!(fake.xcrun_log().contains("simctl terminate FAKE-UDID"));
+}
+
 #[test]
 fn a_panic_exits_ten_with_the_location() {
     let fake = Fake::new();

@@ -54,6 +54,7 @@ use crate::context::{Ctx, Project};
 use crate::error::{Check, Evidence, IcmError, Result};
 use crate::plan::{Plan, Step};
 use crate::process::{self, Cmd};
+use crate::procid::{self, Identity, Verdict};
 use crate::screen::Screen;
 use crate::tools::Xcode;
 use bundle::Bundle;
@@ -722,14 +723,23 @@ fn collector_predicate(exe: &str) -> String {
 
 /// Starts the detached `log stream` collector and waits until it is
 /// attached (its header line arrives), so early records are not lost.
-fn start_collector(xcode: &Xcode, udid: &str, exe: &str, out: &Path) -> Option<i32> {
+/// Returns its pid and what tells that process from any other that has the
+/// pid later, read right after it started.
+fn start_collector(
+    xcode: &Xcode,
+    udid: &str,
+    exe: &str,
+    out: &Path,
+) -> Option<(i32, Option<Identity>)> {
     let cmd = simctl(xcode)
         .args([
             "spawn", udid, "log", "stream", "--level", "debug", "--style", "ndjson",
         ])
         .arg("--predicate")
         .arg(collector_predicate(exe));
-    let pid = process::spawn_detached(&cmd, out, &out.with_extension("err")).ok()?;
+    let pid =
+        i32::try_from(process::spawn_detached(&cmd, out, &out.with_extension("err")).ok()?).ok()?;
+    let identity = procid::of(pid);
     let until = Instant::now() + Duration::from_secs(5);
     while Instant::now() < until {
         if std::fs::metadata(out).is_ok_and(|m| m.len() > 0) {
@@ -737,7 +747,7 @@ fn start_collector(xcode: &Xcode, udid: &str, exe: &str, out: &Path) -> Option<i
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    i32::try_from(pid).ok()
+    Some((pid, identity))
 }
 
 /// What the readiness wait found.
@@ -1386,7 +1396,11 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     let data_path = target.device.data_path.as_deref();
     let oslog = files.join("oslog.ndjson");
     let exe_name = built.bin.clone();
-    let collector_pid = start_collector(&xcode, &target.device.udid, &exe_name, &oslog);
+    let (collector_pid, collector_identity) =
+        match start_collector(&xcode, &target.device.udid, &exe_name, &oslog) {
+            Some((pid, identity)) => (Some(pid), identity),
+            None => (None, None),
+        };
 
     let mut session = Session {
         schema: session::SCHEMA.to_string(),
@@ -1407,6 +1421,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         exe: exe_name.clone(),
         bundle: built.bundle.app.clone(),
         pid: None,
+        pid_identity: None,
         launch_unix_ms: now_ms(),
         logs: SessionLogs {
             stdout: simctl::sim_visible_path(&requested_stdout, data_path),
@@ -1414,6 +1429,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
             oslog,
         },
         collector_pid,
+        collector_identity,
         screen: None,
     };
     let session_path = session::path(&sessions_dir);
@@ -1487,6 +1503,9 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
             )
         })?;
     session.pid = Some(i64::from(pid));
+    // Read now, while the pid is the app's: it is what `stop`, `logs` and
+    // `input` check the pid against later.
+    session.pid_identity = procid::of(pid);
     write_session(&session)?;
 
     let readiness = wait_ready(
@@ -1750,14 +1769,23 @@ enum Followed {
 }
 
 /// Stops the session's `log stream` collector (its process group), but
-/// only while the recorded pid still runs that collector: once it has died
+/// only while the recorded pid still is that collector: once it has died
 /// (the simulator shut down, a reboot) the pid may belong to anything.
+/// The process is the one icm started when its pid still has the identity
+/// recorded for it; a session an older icm wrote has none, and its pid then
+/// counts only while its command line still holds the collector's
+/// arguments for this simulator.
 fn stop_collector(session: &mut Session) {
-    if let Some(pid) = session.collector_pid.take()
-        && crate::sessions::command_line(pid)
-            .is_some_and(|line| is_collector(&line, &session.device.udid))
-    {
-        crate::signals::kill_group(pid, libc::SIGTERM);
+    let identity = session.collector_identity.take();
+    if let Some(pid) = session.collector_pid.take() {
+        let ours = match &identity {
+            Some(identity) => procid::check(pid, identity) == Verdict::Same,
+            None => crate::sessions::command_line(pid)
+                .is_some_and(|line| is_collector(&line, &session.device.udid)),
+        };
+        if ours {
+            crate::signals::kill_group(pid, libc::SIGTERM);
+        }
     }
 }
 
@@ -2237,12 +2265,37 @@ mod tests {
             "collector_pid": null
         }))
         .unwrap();
+        // A session an older icm wrote has no identities.
+        assert!(session.pid_identity.is_none() && session.collector_identity.is_none());
         session.collector_pid = Some(child.id() as i32);
         stop_collector(&mut session);
         assert_eq!(session.collector_pid, None);
         std::thread::sleep(Duration::from_millis(200));
         assert!(child.try_wait().unwrap().is_none(), "sleep was signalled");
-        let _ = child.kill();
+
+        // With an identity recorded the command line does not matter: a
+        // pid that has another start time is never signalled, and the
+        // process icm started is, whatever it runs.
+        session.collector_pid = Some(child.id() as i32);
+        session.collector_identity = Some(Identity {
+            start: "1791334000.000001".to_string(),
+            exe: "/usr/bin/xcrun".to_string(),
+        });
+        stop_collector(&mut session);
+        assert_eq!(session.collector_pid, None);
+        assert_eq!(session.collector_identity, None);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(child.try_wait().unwrap().is_none(), "another process");
+
+        session.collector_pid = Some(child.id() as i32);
+        session.collector_identity = procid::of(child.id() as i32);
+        assert!(session.collector_identity.is_some());
+        stop_collector(&mut session);
+        let until = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < until, "the collector was not signalled");
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let _ = child.wait();
     }
 

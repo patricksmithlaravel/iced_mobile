@@ -6,6 +6,7 @@
 //! run directory, so pruning old runs never removes files the app is
 //! still writing. `run` copies a snapshot into its run directory.
 
+use crate::procid::{self, Identity, Verdict};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -66,12 +67,22 @@ pub struct Session {
     pub bundle: PathBuf,
     /// The app's pid on the host, once launched.
     pub pid: Option<i64>,
+    /// What tells the app's process from any other that has its pid later
+    /// ([`crate::procid`]), read when icm launched it. A session written
+    /// before this has none: its pid verifies nothing, and `app_alive`
+    /// says the app is not running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_identity: Option<Identity>,
     /// The launch mark, milliseconds since the epoch (host clock).
     pub launch_unix_ms: i64,
     /// The live log files.
     pub logs: SessionLogs,
     /// The `log stream` collector's pid (its own process group).
     pub collector_pid: Option<i32>,
+    /// What tells the collector's process from any other that has its pid
+    /// later, read when icm started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collector_identity: Option<Identity>,
     /// The result's `screen` object from the last screenshot.
     #[serde(default)]
     pub screen: Option<serde_json::Value>,
@@ -101,12 +112,16 @@ impl Session {
         crate::output::rundir::write_atomic(&path(sessions_dir), text.as_bytes())
     }
 
-    /// Whether the app's process is alive on the host (simulator apps are
-    /// host processes).
+    /// Whether the app's process runs on the host (simulator apps are host
+    /// processes): its pid still has the process icm read when it launched
+    /// the app. A pid says only that some process has the number, so a pid
+    /// that another process took, and one recorded without an identity
+    /// (an older icm wrote the session), are not the app.
     pub fn app_alive(&self) -> bool {
         self.pid
             .and_then(|pid| i32::try_from(pid).ok())
-            .is_some_and(crate::signals::alive)
+            .zip(self.pid_identity.as_ref())
+            .is_some_and(|(pid, identity)| procid::check(pid, identity) == Verdict::Same)
     }
 }
 
@@ -152,6 +167,7 @@ mod tests {
             exe: "app".into(),
             bundle: "/b/App.app".into(),
             pid: Some(i64::from(std::process::id())),
+            pid_identity: procid::of(std::process::id() as i32),
             launch_unix_ms: 1,
             logs: SessionLogs {
                 stdout: files.join("app.stdout"),
@@ -159,12 +175,24 @@ mod tests {
                 oslog: files.join("oslog.ndjson"),
             },
             collector_pid: None,
+            collector_identity: None,
             screen: None,
         };
         session.write(dir.path()).unwrap();
         let read = Session::read(dir.path()).unwrap();
         assert_eq!(read, session);
         assert!(read.app_alive());
+        // The pid of a live process, with no identity or another's, is not
+        // the app.
+        let mut older = read.clone();
+        older.pid_identity = None;
+        assert!(!older.app_alive());
+        let mut other = read.clone();
+        other.pid_identity = Some(Identity {
+            start: "1791334000.000001".to_string(),
+            exe: String::new(),
+        });
+        assert!(!other.app_alive());
         let text = std::fs::read_to_string(path(dir.path())).unwrap();
         assert!(text.contains("\"type\": \"iPhone 17\""));
 
