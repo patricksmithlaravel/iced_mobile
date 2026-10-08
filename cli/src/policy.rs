@@ -241,8 +241,12 @@ impl Policy {
                 ),
             )
             .fix(
-                "Install a newer icm, whose table is current; `icm print policy` shows this one.",
-                &[&crate::version::install_command(None)],
+                format!(
+                    "Install a newer icm, whose table is current: {}. `icm print policy` \
+                     shows this one.",
+                    crate::version::newest_install().0
+                ),
+                &[&crate::version::newest_install().1],
             )
         } else {
             Check::pass(

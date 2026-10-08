@@ -1072,6 +1072,7 @@ fn compatibility(source: &Source) -> Compatibility {
     if let Some(schema) = keys.schema.as_ref().and_then(toml::Value::as_integer)
         && schema > i64::from(SCHEMA)
     {
+        let (install, list) = crate::version::newest_install();
         too_new.push(
             IcmError::new(
                 CheckId::ConfigTooNew,
@@ -1081,7 +1082,10 @@ fn compatibility(source: &Source) -> Compatibility {
                 ),
             )
             .evidence(source.evidence_for("schema"))
-            .fix_commands([crate::version::install_command(None)]),
+            .fix(
+                format!("Install an icm that reads schema {schema}: {install}. Then rerun."),
+                &[&list],
+            ),
         );
     }
 
@@ -1107,7 +1111,7 @@ fn compatibility(source: &Source) -> Compatibility {
                 ),
             )
             .evidence(source.evidence_for(key))
-            .fix_commands([crate::version::install_command(Some(min))]),
+            .fix_commands([crate::version::install_command(min)]),
         );
     }
 
@@ -2178,6 +2182,35 @@ snapshot = false
 
         let bad = first_error(&format!("min_icm = \"^0.14\"\n{MINIMAL}"));
         assert_eq!(bad.id, "config.invalid");
+
+        // A minimum without `-mobile.N` names no icm (semver orders every
+        // `0.14.1-mobile.N` below `0.14.1`): invalid, with the spelling to
+        // use, not too new with a tag that does not exist. A newer table
+        // beside it is still an unknown key, under no minimum.
+        for (line, key) in [
+            ("min_icm = \"0.14.1\"", "min_icm"),
+            ("icm = \">=0.14.1\"", "icm"),
+        ] {
+            let plain = first_error(&format!("{line}\n{MINIMAL}"));
+            assert_eq!(plain.id, "config.invalid", "{line}");
+            assert_eq!(plain.exit, crate::exit::Exit::Config);
+            assert!(
+                plain.detail.contains(&format!("`{key}` `"))
+                    && plain.detail.contains("0.14.1-mobile.N"),
+                "{}",
+                plain.detail
+            );
+        }
+        let unknown = first_error(&format!(
+            "min_icm = \"0.14.1\"\n{MINIMAL}[future]\nkey = 1\n"
+        ));
+        assert_eq!(unknown.id, "config.unknown_key");
+        assert!(
+            unknown
+                .fix
+                .summary
+                .contains("names no `min_icm` this icm can read")
+        );
     }
 
     #[test]
@@ -2224,20 +2257,30 @@ snapshot = false
             );
             assert_eq!(
                 error.fix.commands,
-                vec![crate::version::install_command(Some(&newer))],
+                vec![crate::version::install_command(&newer)],
                 "{key}"
             );
         }
 
-        // A newer schema, with no minimum to name.
+        // A newer schema, with no minimum to name: the fix says what to
+        // install, and its command (the release tags) runs as it is.
         let schema = format!("{}{extra}", MINIMAL.replace("schema = 1", "schema = 2"));
         let errors = parse_text(&schema).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].id, "config.too_new");
+        assert!(
+            errors[0]
+                .fix
+                .summary
+                .starts_with("Install an icm that reads schema 2: the fix command lists"),
+            "{}",
+            errors[0].fix.summary
+        );
         assert_eq!(
             errors[0].fix.commands,
-            vec![crate::version::install_command(None)]
+            vec![crate::version::newest_install().1]
         );
+        assert!(!errors[0].fix.commands[0].contains('<'));
 
         // Both at once: each is said.
         let both = format!(
