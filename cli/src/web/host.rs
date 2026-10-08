@@ -13,6 +13,14 @@
 //! directory, `{"ok": true, ...}` once the page is loading, or
 //! `{"ok": false, "id": ..., "detail": ...}` (`web.port_busy`,
 //! `web.chrome_failed`), and `icm run web` waits for it.
+//!
+//! The files icm itself writes there that name the page's URL, whose query
+//! may carry a secret, are private and short-lived: `request.json` (mode
+//! 0600) goes once the host has read it, `startup.json` (0600) once `icm
+//! run web` has, and the Chrome profile when the host ends
+//! ([`remove_private_files`] after a host that could not). The host counts
+//! the query's secret-named values as secrets, so its own output
+//! (`session.log`) has them redacted.
 
 use super::cdp::{self, Conn};
 use super::console;
@@ -474,14 +482,39 @@ impl Handler for Control {
     }
 }
 
-/// Writes the startup handshake.
+/// Writes the startup handshake, readable only by the user: it names the
+/// page's URL, whose query may carry a secret. `icm run web` removes it
+/// once it has read it.
 fn startup(files: &Files, value: &Value) {
-    let _ = crate::output::rundir::write_atomic(
+    let _ = crate::output::rundir::write_private(
         &files.startup,
         serde_json::to_string_pretty(value)
             .unwrap_or_default()
             .as_bytes(),
     );
+}
+
+/// Removes what a session leaves in its directory that holds the page's
+/// URL, and so any secret its query carries, without being the page's,
+/// Chrome's or the host's output: the request, the startup handshake and
+/// the Chrome profile (its history, sessions and top sites). The host does
+/// when it ends, and `icm stop web` and the next session do after a host
+/// that could not.
+pub fn remove_private_files(session_dir: &Path) {
+    let files = Files::new(session_dir);
+    let _ = std::fs::remove_file(&files.request);
+    let _ = std::fs::remove_file(&files.startup);
+    let _ = std::fs::remove_dir_all(cdp::profile_dir(session_dir));
+}
+
+/// Removes the Chrome profile when the host ends, however it ends (after
+/// Chrome, which is closed first).
+struct ProfileGuard(PathBuf);
+
+impl Drop for ProfileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn fail(files: &Files, id: CheckId, detail: String) -> IcmError {
@@ -512,6 +545,13 @@ pub fn main(ctx: &mut Ctx, args: &[String]) -> Result<()> {
         .map_err(|error| IcmError::new(CheckId::UsageBadArgs, format!("{path}: {error}")))?;
     let request: Request = serde_json::from_str(&text)
         .map_err(|error| IcmError::new(CheckId::UsageBadArgs, format!("{path}: {error}")))?;
+    // The request holds the query's values as given: read once, then gone.
+    let _ = std::fs::remove_file(path);
+    // A secret-named pair is a secret here too: the host's own output
+    // (`session.log`) names the page's URL.
+    for (key, value) in &request.query {
+        crate::process::remember_secret(key, value);
+    }
     let files = Files::new(&request.session_dir);
     let viewport = Viewport::from_json(&request.viewport)
         .ok_or_else(|| IcmError::new(CheckId::UsageBadArgs, "the request has no viewport"))?;
@@ -520,6 +560,7 @@ pub fn main(ctx: &mut Ctx, args: &[String]) -> Result<()> {
     let _ = std::fs::remove_file(&files.console);
     let profile = cdp::profile_dir(&request.session_dir);
     let _ = std::fs::remove_dir_all(&profile);
+    let _profile = ProfileGuard(profile.clone());
     let _ = std::fs::write(&files.chrome_log, b"");
 
     let listener = server::bind(request.port).map_err(|error| {
@@ -728,6 +769,7 @@ pub fn main(ctx: &mut Ctx, args: &[String]) -> Result<()> {
     state.chrome_alive.store(false, Ordering::SeqCst);
     browser.close();
     sessions::remove(&request.sessions_dir, "web", pid);
+    let _ = std::fs::remove_file(&files.startup);
     state.log.flush();
     ctx.rep.summary(format!("the web session ended: {ended}"));
     if ended == "Chrome exited" {

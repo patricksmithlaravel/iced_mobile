@@ -544,10 +544,18 @@ fn later_commands_without_the_secret_keep_none() {
         "run", "web", "--port", "0", "--settle", "200ms", "--env", &pair,
     ]);
     assert_eq!(run["exit"], 0, "{run}");
-    assert!(secret::holds(&icm.join("sessions/web/console.ndjson")));
-    let kept = icm.join("sessions/web/secrets.json");
+    let session = icm.join("sessions/web");
+    assert!(secret::holds(&session.join("console.ndjson")));
+    let kept = session.join("secrets.json");
     let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+    // What icm itself wrote with the page's URL is gone once read, and the
+    // host's own log names it redacted.
+    assert!(!session.join("request.json").exists());
+    assert!(!session.join("startup.json").exists());
+    let host_log = std::fs::read_to_string(session.join("session.log")).unwrap();
+    assert!(host_log.contains("api_token=<redacted>"), "{host_log}");
+    assert!(!secret::holds(&session.join("session.log")), "{host_log}");
 
     let logs = sandbox.result(&["logs", "web", "--grep", "signed in"]);
     assert_eq!(logs["exit"], 0, "{logs}");
@@ -575,6 +583,17 @@ fn later_commands_without_the_secret_keep_none() {
             .all(|form| !last.contains(form.as_str())),
         "{last}"
     );
+    // After the stop, only the page's and Chrome's own output and the
+    // kept values hold it: the Chrome profile, with the URL in its
+    // history, is gone.
+    assert!(!session.join("chrome-profile").exists());
+    let mut holders: Vec<String> = secret::leaks(&session)
+        .iter()
+        .map(|(path, _)| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    holders.sort();
+    holders.retain(|name| name != "chrome.log");
+    assert_eq!(holders, ["console.ndjson", "secrets.json"]);
 }
 
 #[test]

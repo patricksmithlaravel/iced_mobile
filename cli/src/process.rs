@@ -1162,7 +1162,6 @@ pub const KEPT_SECRETS: &str = "secrets.json";
 /// `shot` or `stop` from a shell without the secret still redact what the
 /// app logged. Without a value the file is removed.
 pub fn keep_secrets(dir: &Path, values: &[Secret]) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     let path = dir.join(KEPT_SECRETS);
     if values.is_empty() {
         return match std::fs::remove_file(&path) {
@@ -1175,18 +1174,7 @@ pub fn keep_secrets(dir: &Path, values: &[Secret]) -> io::Result<()> {
         .map(|(value, min)| serde_json::json!({"value": value, "min": min}))
         .collect();
     let text = serde_json::json!({"v": 1, "values": values}).to_string();
-    std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".{KEPT_SECRETS}.tmp-{}", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
-    {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        file.write_all(text.as_bytes())?;
-    }
-    std::fs::rename(&tmp, &path)
+    crate::output::rundir::write_private(&path, text.as_bytes())
 }
 
 /// Learns the secret values the sessions under `sessions_dir` kept

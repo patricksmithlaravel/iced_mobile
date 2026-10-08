@@ -30,8 +30,10 @@
 //! its plan instead ([`plan`]) and starts nothing.
 //!
 //! The session's live files in `target/icm/sessions/web/` (`console.ndjson`,
-//! `chrome.log`, `session.log`) are the page's, Chrome's and the host's own
-//! output, unredacted. What a command keeps in its run directory (the
+//! `chrome.log`) are the page's and Chrome's own output, unredacted; the
+//! host's `session.log` redacts the query's secret values, and the files
+//! icm writes there that name the page's URL are private and short-lived
+//! ([`host`]). What a command keeps in its run directory (the
 //! console's copy, `logs.ndjson`, `app.log`; the serve check's console and
 //! Chrome log, [`smoke`]) has the secret values icm knows redacted, and a
 //! secret-named `--env` value, which reaches the page in its URL, is one of
@@ -483,7 +485,7 @@ fn start_session(
     std::fs::create_dir_all(&dir)
         .map_err(|error| internal(format!("cannot create {}: {error}", dir.display())))?;
     let files = host::Files::new(&dir);
-    let _ = std::fs::remove_file(&files.startup);
+    host::remove_private_files(&dir);
     let _ = std::fs::write(&files.host_log, b"");
     // A fresh console, and the secret values of the new page's query kept
     // for later commands that read it ([`process::keep_secrets`]).
@@ -509,9 +511,11 @@ fn start_session(
         app: project.app_json(),
         profile: profile.to_string(),
     };
-    std::fs::write(
+    // The request holds the query as given: private, and the host removes
+    // it once it has read it.
+    crate::output::rundir::write_private(
         &files.request,
-        serde_json::to_vec_pretty(&request).unwrap_or_default(),
+        &serde_json::to_vec_pretty(&request).unwrap_or_default(),
     )
     .map_err(|error| internal(format!("cannot write {}: {error}", files.request.display())))?;
 
@@ -589,6 +593,8 @@ fn start_session(
         }
         std::thread::sleep(Duration::from_millis(100));
     };
+    // The handshake names the page's URL: read, it goes.
+    let _ = std::fs::remove_file(&files.startup);
     let ok = startup.get("ok").and_then(Value::as_bool).unwrap_or(false);
     ctx.rep
         .step_end_internal("session.start", ok, started.elapsed().as_millis() as u64);
@@ -1427,7 +1433,10 @@ pub fn app_state(project: &Project) -> crate::session::AppState {
 /// Stops this project's web session for `icm stop`; returns a JSON entry
 /// for the result, or `None` when none was running.
 pub fn stop(project: &Project) -> Option<Value> {
-    let (record, stopped) = client::stop(&project.sessions_dir())?;
+    let stopped = client::stop(&project.sessions_dir());
+    // What a host that was killed could not remove itself.
+    host::remove_private_files(&session_dir(project));
+    let (record, stopped) = stopped?;
     Some(json!({
         "platform": PLATFORM,
         "pid": crate::sessions::record_pid(&record),

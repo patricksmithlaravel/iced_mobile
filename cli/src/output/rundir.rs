@@ -78,6 +78,28 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Writes a file atomically, readable only by the user (mode 0600): a file
+/// that holds a secret value, such as a session's request or its kept
+/// secret values.
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
 /// Points `<root>/latest/<platform>` at a run directory (a relative symlink).
 pub fn link_latest(root: &Path, platform: &str, run_dir: &Path) -> io::Result<()> {
     let latest = root.join("latest");
