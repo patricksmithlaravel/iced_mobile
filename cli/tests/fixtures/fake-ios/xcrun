@@ -94,7 +94,13 @@ simctl)
   getenv)
     # The launchd environment holds only what `launchctl setenv` put there
     # ($S/owner-<udid>); like simctl, an unset variable is a message on
-    # stderr and exit 0.
+    # stderr and exit 0. With $S/getenv-fails, it fails as simctl does
+    # for a simulator it cannot ask.
+    if [ -f "$S/getenv-fails" ]; then
+      echo "An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):" >&2
+      echo "Unable to getenv(\"$2\")" >&2
+      exit 149
+    fi
     if [ -f "$S/owner-$1" ]; then cat "$S/owner-$1"; else echo "'$2' not found" >&2; fi
     ;;
   spawn)
@@ -124,7 +130,12 @@ simctl)
       fi
       ;;
     launchctl)
-      if [ "$2" = setenv ]; then
+      if [ "$2" = setenv ] && [ -f "$S/setenv-fails" ]; then
+        # $S/setenv-fails: the spawn fails, as on a simulator simctl cannot reach.
+        echo "An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):" >&2
+        echo "Process spawn via launchd failed." >&2
+        exit 149
+      elif [ "$2" = setenv ]; then
         printf '%s\n' "$4" > "$S/owner-$udid"
       elif [ -f "$S/app.pid" ] && kill -0 "$(cat "$S/app.pid")" 2>/dev/null; then
         printf '%s\t0\tUIKitApplication:com.acme.fixture[1a2b][rb-legacy]\n' "$(cat "$S/app.pid")"

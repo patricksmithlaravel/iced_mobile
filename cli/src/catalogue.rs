@@ -418,6 +418,9 @@ catalogue! {
     IosSimShared = "ios.sim.shared", Device, Info, Agent,
         "The simulator was booted for another project",
         "`icm stop --shutdown` in the project that booted it shuts it down; to shut it down anyway, run `xcrun simctl shutdown <udid>` for that simulator alone.";
+    IosSimOwnerUnknown = "ios.sim.owner_unknown", Device, Warn, Agent,
+        "icm could not read or write which project booted the simulator",
+        "A simulator whose owner `simctl getenv` cannot read is left running by `icm stop --shutdown`, in case another project uses it: rerun the stop once the simulator answers, or run `xcrun simctl shutdown <udid>` for that simulator alone. A run that could not mark the simulator it booted leaves it to any project's `--shutdown`: the fix sets the mark by hand.";
     IosSimInstallFailed = "ios.sim.install_failed", Device, Fail, Agent,
         "simctl install failed",
         "Read the step log; rerun with `--fresh` if the simulator is in a bad state.";
@@ -513,6 +516,9 @@ catalogue! {
     AndroidEmulatorShared = "android.emulator.shared", Device, Info, Agent,
         "The emulator was booted for another project",
         "When two projects run at once, give each its own emulator (`--avd <name>`, or host.toml android.avd); `icm stop --shutdown` in the project that booted it shuts it down.";
+    AndroidEmulatorOwnerUnknown = "android.emulator.owner_unknown", Device, Warn, Agent,
+        "icm could not read or write which project booted the emulator",
+        "An emulator whose `debug.icm.booted_by` adb cannot read is left running by `icm stop --shutdown`, in case another project uses it: rerun the stop once the emulator answers, or run `adb -s <serial> emu kill` for that emulator alone. A run that could not mark the emulator it booted leaves it to any project's `--shutdown`: the fix sets the property by hand.";
     AndroidEmulatorFailed = "android.emulator.failed", Device, Fail, Agent,
         "The emulator exited while booting",
         "Read the emulator log in the evidence (disk space, memory, a broken AVD), then rerun; `icm devices android` lists the AVDs.";

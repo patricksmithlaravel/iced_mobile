@@ -357,7 +357,8 @@ fn shutdown_managed(
 /// set (never icm's managed one then, which another project may be
 /// running on), else icm's managed simulator for the project's runtime. It
 /// is shut down only when it is booted, managed (`icm-`, never `icm-test-`)
-/// and not booted by icm for another project
+/// and known not to be booted by icm for another project: a simulator
+/// whose owner cannot be read stays up too
 /// ([`crate::platform::ios_sim::owner`]).
 fn shutdown_simulator(ctx: &Ctx, project: &Project, host: &crate::host::HostConfig) -> Vec<String> {
     let Ok(xcode) = crate::tools::xcode(&ctx.env) else {
@@ -423,13 +424,15 @@ fn shutdown_simulator(ctx: &Ctx, project: &Project, host: &crate::host::HostConf
             ));
             continue;
         }
-        if crate::platform::ios_sim::owner::booted_for_another(
+        if crate::platform::ios_sim::owner::keep_running(
             ctx,
             &xcode,
             project,
             &device.name,
             &device.udid,
-        ) {
+        )
+        .is_some()
+        {
             continue;
         }
         let cmd = xcode

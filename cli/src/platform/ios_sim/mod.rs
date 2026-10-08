@@ -1340,7 +1340,13 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     // A managed simulator this run booted is this project's to shut down,
     // and no other project's (`owner`).
     if booted && target.device.is_managed() {
-        owner::claim(ctx, &xcode, &project, &target.device.udid);
+        owner::claim(
+            ctx,
+            &xcode,
+            &project,
+            &target.device.name,
+            &target.device.udid,
+        );
     }
 
     if args.reinstall {
@@ -2120,22 +2126,20 @@ pub fn stop_session(ctx: &mut Ctx, shutdown: bool) -> Result<Option<Value>> {
         format!("{} was not running", session.app_id)
     }];
     // A `--fresh` simulator is this run's alone; a shared managed one stays
-    // up while another project's run booted it.
-    let shared = managed
-        && shutdown
-        && !session.device.fresh
-        && owner::booted_for_another(
+    // up while another project's run booted it, or may have.
+    let kept = if managed && shutdown && !session.device.fresh {
+        owner::keep_running(
             ctx,
             &xcode,
             &project,
             &session.device.name,
             &session.device.udid,
-        );
-    if shared {
-        did.push(format!(
-            "left {} running for another project",
-            session.device.name
-        ));
+        )
+    } else {
+        None
+    };
+    if let Some(why) = kept {
+        did.push(format!("left {} running {why}", session.device.name));
     } else if managed && (shutdown || session.device.fresh) {
         let outcome = ctx.step(
             "simctl.shutdown",

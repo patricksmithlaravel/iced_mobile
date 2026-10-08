@@ -195,10 +195,11 @@ fn the_simulator_check_leaves_out_what_was_booted_before_the_run() {
     let host = Host::new("");
     let accept = host.root.path();
     // `simctl list devices booted -j` from booted.json; `simctl getenv`
-    // from owner-<udid>, empty (and exit 0) when unset, as simctl does.
+    // from owner-<udid>, empty (and exit 0) when unset, as simctl does,
+    // and exit 149 with the file getenv-fails.
     executable(
         &accept.join("bin/xcrun"),
-        "#!/bin/sh\ncase \"$1 $2\" in\n\"simctl list\") cat \"$ACCEPT/booted.json\" ;;\n\"simctl getenv\") cat \"$ACCEPT/owner-$3\" 2>/dev/null ;;\n*) exit 1 ;;\nesac\nexit 0\n",
+        "#!/bin/sh\ncase \"$1 $2\" in\n\"simctl list\") cat \"$ACCEPT/booted.json\" ;;\n\"simctl getenv\") [ -f \"$ACCEPT/getenv-fails\" ] && exit 149; cat \"$ACCEPT/owner-$3\" 2>/dev/null ;;\n*) exit 1 ;;\nesac\nexit 0\n",
     );
     let boot = |devices: &[(&str, &str)]| {
         let list: Vec<String> = devices
@@ -266,6 +267,16 @@ fn the_simulator_check_leaves_out_what_was_booted_before_the_run() {
         "{}",
         text(&output)
     );
+    // Its owner unreadable: icm leaves it running, and so does the check.
+    std::fs::write(accept.join("getenv-fails"), "").unwrap();
+    let output = host.bash("simulators_left SHARED-UDID");
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("its ICM_BOOTED_BY could not be read"),
+        "{}",
+        text(&output)
+    );
+    std::fs::remove_file(accept.join("getenv-fails")).unwrap();
     std::fs::write(accept.join("owner-SHARED-UDID"), "0123456789abcdef\n").unwrap();
     let output = host.bash("simulators_left SHARED-UDID");
     assert!(output.status.success(), "{}", text(&output));

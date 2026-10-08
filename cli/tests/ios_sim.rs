@@ -892,3 +892,107 @@ fn a_run_claims_the_simulator_it_boots() {
     );
     assert!(fake.xcrun_log().contains("simctl shutdown FAKE-UDID"));
 }
+
+/// A simulator whose owner icm cannot read stays up: a failed `simctl
+/// getenv` is not an owner-less simulator, so `stop --shutdown` leaves it
+/// running with a warning that names it.
+#[test]
+fn an_unreadable_owner_keeps_the_simulator_running() {
+    let fake = Fake::new();
+    fake.booted_pair();
+    std::fs::write(fake.state.join("getenv-fails"), "").unwrap();
+
+    let events = fake.events("ok", &["stop", "--all", "--shutdown", "--json"]);
+    let stop = events.last().unwrap();
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["shutdown"], json!([]), "{stop}");
+    let log = fake.xcrun_log();
+    assert!(
+        log.contains("simctl getenv MANAGED-UDID ICM_BOOTED_BY"),
+        "{log}"
+    );
+    assert!(!log.contains("simctl shutdown"), "{log}");
+    let unknown = checks(&events, "ios.sim.owner_unknown");
+    assert_eq!(unknown.len(), 1, "{events:?}");
+    assert_eq!(unknown[0]["status"], "warn");
+    let detail = unknown[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("icm-iphone-17-ios-27.0 (MANAGED-UDID) left running")
+            && detail.contains("exit 149"),
+        "{detail}"
+    );
+    assert_eq!(
+        unknown[0]["fix"]["commands"],
+        json!(["xcrun simctl shutdown MANAGED-UDID"]),
+        "{events:?}"
+    );
+    assert!(checks(&events, "ios.sim.shared").is_empty(), "{events:?}");
+}
+
+/// A run that cannot mark the simulator it booted says so, and the
+/// session's `stop --shutdown` leaves the booted simulator running while
+/// its owner cannot be read; one that is no longer booted needs no warning.
+#[test]
+fn failed_ownership_claims_and_reads_are_reported() {
+    let fake = Fake::new();
+    std::fs::write(fake.state.join("setenv-fails"), "").unwrap();
+    let events = fake.events("ok", &["run", "ios-sim", "--json"]);
+    let run = events.last().unwrap();
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(fake.owner("FAKE-UDID"), None);
+    let unclaimed = checks(&events, "ios.sim.owner_unknown");
+    assert_eq!(unclaimed.len(), 1, "{events:?}");
+    assert_eq!(unclaimed[0]["status"], "warn");
+    let detail = unclaimed[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("could not mark icm-iphone-17-ios-27.0 (FAKE-UDID)")
+            && detail.contains("exit 149"),
+        "{detail}"
+    );
+    std::fs::remove_file(fake.state.join("setenv-fails")).unwrap();
+
+    // The listing the fake prints, with the session's simulator's state.
+    let listing = fake.state.join("devices-created.json");
+    let set_state = |state: &str| {
+        let mut devices: Value =
+            serde_json::from_str(&std::fs::read_to_string(&listing).unwrap()).unwrap();
+        for device in devices["devices"]["com.apple.CoreSimulator.SimRuntime.iOS-27-0"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if device["udid"] == "FAKE-UDID" {
+                device["state"] = json!(state);
+            }
+        }
+        write_json(&listing, &devices);
+    };
+
+    // Booted, and its owner unreadable: left running.
+    set_state("Booted");
+    std::fs::write(fake.state.join("getenv-fails"), "").unwrap();
+    let events = fake.events("ok", &["stop", "ios-sim", "--shutdown", "--json"]);
+    let stop = events.last().unwrap();
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(!fake.xcrun_log().contains("simctl shutdown"), "{stop}");
+    assert_eq!(
+        checks(&events, "ios.sim.owner_unknown").len(),
+        1,
+        "{events:?}"
+    );
+    assert!(
+        stop["summary"]
+            .as_str()
+            .unwrap()
+            .contains("left icm-iphone-17-ios-27.0 running"),
+        "{stop}"
+    );
+
+    // No longer booted: nothing is left running, so no warning.
+    set_state("Shutdown");
+    let events = fake.events("ok", &["stop", "ios-sim", "--shutdown", "--json"]);
+    assert_eq!(events.last().unwrap()["exit"], 0, "{events:?}");
+    assert!(
+        checks(&events, "ios.sim.owner_unknown").is_empty(),
+        "{events:?}"
+    );
+}

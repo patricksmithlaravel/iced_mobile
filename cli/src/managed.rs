@@ -63,6 +63,49 @@ pub fn is_managed(name: &str) -> bool {
     name.starts_with(PREFIX) && !name.starts_with(TEST_PREFIX)
 }
 
+/// Which project icm booted a shared managed device for, as the device
+/// says: the emulator's `debug.icm.booted_by` property
+/// ([`crate::android::session::OWNER_PROP`]) or the simulator's launchd
+/// variable ([`crate::platform::ios_sim::owner::OWNER_ENV`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Owner {
+    /// The device answered with no tag: booted outside icm, or by an icm
+    /// from before owners.
+    Nobody,
+    /// The tag of the project icm booted it for.
+    Project(String),
+    /// The device could not be asked, so whose it is is not known (why).
+    /// `stop --shutdown` leaves such a device running.
+    Unknown(String),
+}
+
+impl Owner {
+    /// The owner a query of the tag gives (`adb shell getprop`, `simctl
+    /// getenv`): its trimmed stdout when it exited 0, which is empty for
+    /// an unset tag; otherwise unknown.
+    pub fn from_query(outcome: &crate::process::Outcome) -> Owner {
+        if !outcome.success() {
+            return Owner::Unknown(failure(outcome));
+        }
+        let value = outcome.stdout_text().trim().to_string();
+        if value.is_empty() {
+            Owner::Nobody
+        } else {
+            Owner::Project(value)
+        }
+    }
+}
+
+/// How a device command failed, in one line: `exit 1: <its last stderr
+/// line>`.
+pub fn failure(outcome: &crate::process::Outcome) -> String {
+    let stderr = outcome.stderr_text();
+    match stderr.lines().map(str::trim).rfind(|line| !line.is_empty()) {
+        Some(line) => format!("{}: {line}", outcome.describe()),
+        None => outcome.describe(),
+    }
+}
+
 /// The emulator ABI for this host (Appendix C item 10): an arm64 image on
 /// Apple Silicon and other arm64 hosts, x86_64 elsewhere.
 pub fn host_abi() -> Abi {
@@ -157,5 +200,53 @@ mod tests {
 
         let env = Env::from_pairs(&[("ANDROID_SDK_HOME", "/s")], Some(home));
         assert_eq!(avd_home(&env), Some(PathBuf::from("/s/.android/avd")));
+    }
+
+    /// An empty answer is nobody; a failed query is not an empty answer.
+    #[test]
+    fn owners_tell_a_failed_query_from_no_tag() {
+        use crate::process::{End, Outcome};
+        let outcome = |end: End, stdout: &str, stderr: &str| Outcome {
+            end,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+            duration: std::time::Duration::ZERO,
+            log: None,
+            stdout_path: None,
+        };
+        // `simctl getenv` of an unset variable: exit 0, a note on stderr.
+        assert_eq!(
+            Owner::from_query(&outcome(End::Exited(0), "", "'ICM_BOOTED_BY' not found\n")),
+            Owner::Nobody
+        );
+        assert_eq!(
+            Owner::from_query(&outcome(End::Exited(0), "\r\n", "")),
+            Owner::Nobody
+        );
+        assert_eq!(
+            Owner::from_query(&outcome(End::Exited(0), "0123456789abcdef\n", "")),
+            Owner::Project("0123456789abcdef".to_string())
+        );
+        assert_eq!(
+            Owner::from_query(&outcome(
+                End::Exited(149),
+                "",
+                "An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):\nUnable to getenv while not booting or booted.\n"
+            )),
+            Owner::Unknown("exit 149: Unable to getenv while not booting or booted.".to_string())
+        );
+        // A tag on stdout from a command that failed is not trusted.
+        assert_eq!(
+            Owner::from_query(&outcome(End::Exited(1), "0123456789abcdef\n", "")),
+            Owner::Unknown("exit 1".to_string())
+        );
+        assert!(matches!(
+            Owner::from_query(&outcome(
+                End::TimedOut(std::time::Duration::from_secs(30)),
+                "",
+                ""
+            )),
+            Owner::Unknown(why) if why.starts_with("timed out")
+        ));
     }
 }

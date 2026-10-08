@@ -216,7 +216,8 @@ simulators_before() {
 # shut down is still booted: one that was not booted when the run started
 # (simulators_before), or UDID, the one the run's ios-sim session used,
 # when no project claimed it (ICM_BOOTED_BY), since `icm stop --shutdown`
-# shuts such a simulator down. One booted before the run is otherwise left
+# shuts such a simulator down; one whose ICM_BOOTED_BY simctl cannot read
+# is left running by icm too. One booted before the run is otherwise left
 # out, with an evidence line. Without the record of simulators_before,
 # every booted icm simulator counts.
 simulators_left() {
@@ -228,8 +229,9 @@ simulators_left() {
             echo "the icm simulator $name ($udid) is still booted, and was not when the run started"
             left=1
         elif [ "$udid" = "$session_udid" ]; then
-            owner=$(xcrun simctl getenv "$udid" ICM_BOOTED_BY 2>/dev/null || true)
-            if [ -n "$owner" ]; then
+            if ! owner=$(xcrun simctl getenv "$udid" ICM_BOOTED_BY 2>/dev/null); then
+                evidence "left $name ($udid) running: the run used it, but its ICM_BOOTED_BY could not be read, so icm stop --shutdown leaves it (ios.sim.owner_unknown)"
+            elif [ -n "$owner" ]; then
                 evidence "left $name ($udid) running: the run used it, but another project's icm booted it (ICM_BOOTED_BY $owner)"
             else
                 echo "the run's ios-sim session used $name ($udid), which no project claimed, and it is still booted"

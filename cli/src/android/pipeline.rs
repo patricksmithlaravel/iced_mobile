@@ -24,6 +24,7 @@ use crate::config::Abi;
 use crate::context::{Ctx, Project};
 use crate::error::{Check, Evidence, IcmError, Result, Status};
 use crate::host::HostConfig;
+use crate::managed::Owner;
 use crate::screen::{Screen, Space, preview_size};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -458,8 +459,10 @@ pub(crate) fn launch_app(ctx: &mut Ctx, args: &RunArgs) -> Result<Launched> {
     // (whose build may have failed before the claim), says so.
     let own = session::owner_tag(&project);
     if session.booted_by_icm {
-        claim_emulator(&adb, &own);
-    } else if let Some(owner) = emulator_owner(&adb).filter(|owner| *owner != own) {
+        claim(ctx, &adb, &own);
+    } else if let Owner::Project(owner) = emulator_owner(&adb)
+        && owner != own
+    {
         ctx.rep.check(Check::info(
             CheckId::AndroidEmulatorShared,
             format!(
@@ -1184,19 +1187,47 @@ fn no_activity(app_id: &str, serial: &str, pid: u32) -> String {
     )
 }
 
-/// Records on an emulator icm booted that it did so for this project
-/// ([`session::OWNER_PROP`]).
-fn claim_emulator(adb: &Adb, own: &str) {
-    let line = format!("setprop {} {}", session::OWNER_PROP, adb::quote(own));
-    let _ = adb::quick(adb.shell(&line), Duration::from_secs(15));
+/// The `adb shell` line that marks an emulator as booted for the project
+/// tagged `own` ([`session::OWNER_PROP`]).
+fn claim_line(own: &str) -> String {
+    format!("setprop {} {}", session::OWNER_PROP, adb::quote(own))
 }
 
-/// The project an icm booted the emulator for ([`session::OWNER_PROP`]),
-/// if one did.
-fn emulator_owner(adb: &Adb) -> Option<String> {
-    adb.getprop(session::OWNER_PROP)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+/// Records on an emulator icm booted that it did so for the project tagged
+/// `own` ([`session::OWNER_PROP`]). When that fails, the emulator looks
+/// booted outside icm, and another project's `stop --shutdown` would shut
+/// it down under this run's app: a WARN `android.emulator.owner_unknown`
+/// says so.
+fn claim(ctx: &Ctx, adb: &Adb, own: &str) {
+    let why = match adb::quick(adb.shell(&claim_line(own)), Duration::from_secs(15)) {
+        Some(outcome) if outcome.success() => return,
+        Some(outcome) => crate::managed::failure(&outcome),
+        None => "adb could not be started".to_string(),
+    };
+    ctx.rep.check(
+        Check::warn(
+            CheckId::AndroidEmulatorOwnerUnknown,
+            format!(
+                "could not mark {} as this project's ({}, `adb shell setprop` {why}): another project's `icm stop --shutdown` may shut it down while this app runs",
+                adb.serial,
+                session::OWNER_PROP
+            ),
+        )
+        .fix(
+            "Mark it once the emulator answers (this project's next run on it tries again), or give this project its own emulator (`--avd <name>`, or host.toml android.avd):",
+            &[&format!("adb -s {} shell {}", adb.serial, claim_line(own))],
+        ),
+    );
+}
+
+/// The project an icm booted the emulator for ([`session::OWNER_PROP`]):
+/// nobody when the property is unset, unknown when adb cannot read it.
+fn emulator_owner(adb: &Adb) -> Owner {
+    let line = format!("getprop {}", adb::quote(session::OWNER_PROP));
+    match adb::quick(adb.shell(&line), Duration::from_secs(15)) {
+        Some(outcome) => Owner::from_query(&outcome),
+        None => Owner::Unknown("adb could not be started".to_string()),
+    }
 }
 
 /// Reports `ready` and `run.ready`; returns how it got ready ("first frame
@@ -2533,18 +2564,41 @@ pub fn stop_session(
         let own = session::owner_tag(project);
         for (serial, pid, ours) in targets {
             if !ours {
-                let owner = Adb::new(tools, &serial)
-                    .ok()
-                    .and_then(|adb| emulator_owner(&adb))
-                    .filter(|owner| *owner != own);
-                if let Some(owner) = owner {
-                    ctx.rep.check(Check::info(
-                        CheckId::AndroidEmulatorShared,
-                        format!(
-                            "{serial} left running: icm booted it for another project (debug.icm.booted_by {owner}), which may still use it; `icm stop --shutdown` there shuts it down"
-                        ),
-                    ));
-                    continue;
+                // Only an emulator known to be nobody's or this project's
+                // is shut down: one whose owner cannot be read may be
+                // another project's.
+                let owner = match Adb::new(tools, &serial) {
+                    Ok(adb) => emulator_owner(&adb),
+                    Err(error) => Owner::Unknown(error.detail),
+                };
+                match owner {
+                    Owner::Nobody => {}
+                    Owner::Project(owner) if owner == own => {}
+                    Owner::Project(owner) => {
+                        ctx.rep.check(Check::info(
+                            CheckId::AndroidEmulatorShared,
+                            format!(
+                                "{serial} left running: icm booted it for another project (debug.icm.booted_by {owner}), which may still use it; `icm stop --shutdown` there shuts it down"
+                            ),
+                        ));
+                        continue;
+                    }
+                    Owner::Unknown(why) => {
+                        ctx.rep.check(
+                            Check::warn(
+                                CheckId::AndroidEmulatorOwnerUnknown,
+                                format!(
+                                    "{serial} left running: icm could not read which project booted it ({}, `adb shell getprop` {why}), and another may still use it",
+                                    session::OWNER_PROP
+                                ),
+                            )
+                            .fix(
+                                "Rerun `icm stop android --shutdown` once the emulator answers; to shut down this emulator anyway, and stop any app on it:",
+                                &[&format!("adb -s {serial} emu kill")],
+                            ),
+                        );
+                        continue;
+                    }
                 }
             }
             ctx.rep.progress(format!("shutting down {serial}"));
@@ -2699,6 +2753,38 @@ mod tests {
 
     /// A context whose output goes nowhere.
     fn quiet_ctx() -> Ctx {
+        recording_ctx().0
+    }
+
+    /// The NDJSON lines a test context wrote.
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Sink {
+        /// The check events written so far with the id `id`.
+        fn checks(&self, id: &str) -> Vec<Value> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|event| event["type"] == "check" && event["id"] == id)
+                .collect()
+        }
+    }
+
+    /// A `run android` context whose events go to the returned sink.
+    fn recording_ctx() -> (Ctx, Sink) {
+        let sink = Sink::default();
         let rep = crate::output::Reporter::with_writers(
             crate::output::Mode {
                 json: true,
@@ -2711,24 +2797,83 @@ mod tests {
                 argv: vec![],
                 save: false,
             },
-            Box::new(std::io::sink()),
+            Box::new(sink.clone()),
             Box::new(std::io::sink()),
         );
-        Ctx::new(crate::cli::GlobalArgs::default(), rep, vec![])
+        (
+            Ctx::new(crate::cli::GlobalArgs::default(), rep, vec![]),
+            sink,
+        )
+    }
+
+    /// A fake adb in `dir` for `emulator-5580`, running the shell `body`
+    /// with `-s <serial>` shifted off (`$1` is adb's command, `$2` the
+    /// line of `adb shell`).
+    fn scripted_adb(dir: &Path, body: &str) -> Adb {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("adb");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\n[ \"$1\" = -s ] && shift 2\n{body}"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Adb::from_program(&path, "emulator-5580")
     }
 
     /// A fake adb in `dir`: `pidof` prints `pids`, and every other command
     /// prints nothing and exits 0 (no events, no activities).
     fn fake_adb(dir: &Path, pids: &str) -> Adb {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("adb");
-        std::fs::write(
-            &path,
-            format!("#!/bin/sh\ncase \"$4\" in\npidof*) echo '{pids}' ;;\nesac\nexit 0\n"),
+        scripted_adb(
+            dir,
+            &format!("case \"$2\" in\npidof*) echo '{pids}' ;;\nesac\nexit 0\n"),
         )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Adb::from_program(&path, "emulator-5580")
+    }
+
+    /// The owner property reads as nobody, a project or unknown, and a
+    /// claim that adb cannot write is reported with a fix that writes it.
+    #[test]
+    fn emulator_owners_and_failed_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        // `getprop` prints what `setprop` stored; with the file `fails`,
+        // both fail as adb does for a device it lost.
+        let adb = scripted_adb(
+            dir.path(),
+            r#"state=$(dirname "$0")
+if [ -f "$state/fails" ]; then echo "error: device offline" >&2; exit 1; fi
+case "$2" in
+"getprop debug.icm.booted_by") cat "$state/tag" 2>/dev/null; echo ;;
+"setprop debug.icm.booted_by "*) echo "${2##* }" > "$state/tag" ;;
+esac
+exit 0
+"#,
+        );
+        let tag = "0123456789abcdef";
+        let (ctx, sink) = recording_ctx();
+        assert_eq!(emulator_owner(&adb), Owner::Nobody);
+        claim(&ctx, &adb, tag);
+        assert_eq!(emulator_owner(&adb), Owner::Project(tag.to_string()));
+        assert!(sink.checks("android.emulator.owner_unknown").is_empty());
+
+        std::fs::write(dir.path().join("fails"), "").unwrap();
+        let Owner::Unknown(why) = emulator_owner(&adb) else {
+            panic!("a failed getprop read as an answer");
+        };
+        assert_eq!(why, "exit 1: error: device offline");
+        claim(&ctx, &adb, tag);
+        let unclaimed = sink.checks("android.emulator.owner_unknown");
+        assert_eq!(unclaimed.len(), 1, "{unclaimed:?}");
+        assert_eq!(unclaimed[0]["status"], "warn");
+        let detail = unclaimed[0]["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with("could not mark emulator-5580 as this project's")
+                && detail.contains("exit 1: error: device offline"),
+            "{detail}"
+        );
+        assert_eq!(
+            unclaimed[0]["fix"]["commands"],
+            json!(["adb -s emulator-5580 shell setprop debug.icm.booted_by 0123456789abcdef"])
+        );
     }
 
     /// A `--wait-ready` that ends before the app's process shows up says
