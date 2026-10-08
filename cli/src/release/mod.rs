@@ -28,7 +28,11 @@
 //! 3. The dist directory `target/icm/dist/<version>+<build>/<target>/` is
 //!    emptied (unless [`Pipeline::keeps_dist`]) and the pipeline builds
 //!    into it ([`Pipeline::build`]).
-//! 4. `artifacts.json`, `UPLOAD.md` and `upload.sh` are written, every file
+//! 4. The core gates what was built: `release.notices` ([`notices`]) and
+//!    `release.secret_in_artifacts`, no value of a secret-named variable in
+//!    icm's environment in the shipped files or the binaries cargo built
+//!    ([`secrets`]).
+//! 5. `artifacts.json`, `UPLOAD.md` and `upload.sh` are written, every file
 //!    is reported as an artifact (its kind is its key in the result's
 //!    `artifacts`), `owner_steps` holds the owner's plan, and
 //!    `dist/latest/<target>` moves to the new directory. Owner items that
@@ -82,6 +86,7 @@ pub mod macos;
 pub mod manifest;
 pub mod notices;
 pub mod owner_plans;
+pub mod secrets;
 pub mod upload;
 pub mod verify;
 pub mod web;
@@ -205,6 +210,10 @@ pub struct Release {
     lock_uncommitted: bool,
     notices_ready: bool,
     files: Vec<FileEntry>,
+    /// The binaries cargo built for the release (executables, cdylibs,
+    /// wasm), searched with the dist directory for secret values
+    /// ([`secrets`]): an archive compresses them.
+    built: Vec<PathBuf>,
 }
 
 impl Release {
@@ -239,6 +248,7 @@ impl Release {
             lock_uncommitted: false,
             notices_ready: false,
             files: Vec::new(),
+            built: Vec::new(),
             project: project.clone(),
             package,
             version,
@@ -1054,6 +1064,17 @@ fn finish(ctx: &Ctx, rel: &mut Release) -> Result<()> {
 
     // `release.notices`: every release carries THIRD_PARTY_NOTICES.
     for check in notices::checks(&rel.dist, &rel.notices) {
+        rel.check(ctx, check);
+    }
+    // `release.secret_in_artifacts`: no value of a secret-named variable
+    // the build inherited ships.
+    let mut roots: Vec<PathBuf> = rel
+        .files()
+        .iter()
+        .map(|file| rel.dist.join(&file.path))
+        .collect();
+    roots.extend(rel.built.iter().cloned());
+    if let Some(check) = secrets::check(&roots, &rel.dist, rel.sign()) {
         rel.check(ctx, check);
     }
 

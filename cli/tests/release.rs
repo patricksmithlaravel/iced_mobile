@@ -948,6 +948,51 @@ fn releases_carry_third_party_notices() {
     );
 }
 
+/// A value of a secret-named variable in icm's environment that the build
+/// baked into what ships fails `release.secret_in_artifacts`, naming the
+/// variable and never the value, and the release is not uploadable; under
+/// `--sign none` it is a WARN. `icm verify` searches again.
+#[test]
+fn a_baked_in_secret_value_is_not_uploadable() {
+    let mut app = App::new();
+    app.ready_for_ios();
+    let token = "zq9x-baked-into-the-app-17";
+    app.set("ICM_TEST_RELEASE_TOKEN", token);
+    app.set("ICM_FAKE_BAKE", "ICM_TEST_RELEASE_TOKEN");
+
+    let signed = app.json(&["__test", "release", "ios"]);
+    assert_eq!(signed["exit"], 1, "{signed}");
+    assert_eq!(signed["release"]["uploadable"], false, "{signed}");
+    assert_eq!(
+        signed["checks"]["failed"],
+        serde_json::json!(["release.secret_in_artifacts"])
+    );
+    let dist = app.abs(&signed["artifacts"]["dist"]);
+    let md = std::fs::read_to_string(dist.join("UPLOAD.md")).unwrap();
+    assert!(md.contains("release.secret_in_artifacts"), "{md}");
+    let events =
+        std::fs::read_to_string(app.abs(&signed["run_dir"]).join("events.ndjson")).unwrap();
+    assert!(
+        events.contains("the value of `ICM_TEST_RELEASE_TOKEN` (secret-named"),
+        "{events}"
+    );
+    assert!(!events.contains(token) && !signed.to_string().contains(token));
+
+    let verify = app.json(&["__test", "verify", "ios"]);
+    assert_eq!(verify["exit"], 1, "{verify}");
+    assert_eq!(
+        verify["checks"]["failed"],
+        serde_json::json!(["release.secret_in_artifacts"])
+    );
+
+    let unsigned = app.json(&["__test", "release", "ios", "--sign", "none"]);
+    assert_eq!(unsigned["exit"], 0, "{unsigned}");
+    assert!(
+        ids(&unsigned, "warnings").contains(&"release.secret_in_artifacts".to_string()),
+        "{unsigned}"
+    );
+}
+
 #[test]
 fn the_ledger_marks_uploads_once() {
     let app = App::new();

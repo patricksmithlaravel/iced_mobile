@@ -99,6 +99,8 @@ New states go into `LifecycleEvent`, which is `#[non_exhaustive]`.
   destroyed Activity from a live one after a rotation, and a rotation warns when the app is locked
   to one axis.
 - Releases: `icm ledger mark-uploaded` refuses a release that cannot have been uploaded, literal
-  signing secrets stay out of every finding and record, `upload.sh` runs `icm diagnose` when a
-  store tool fails, `THIRD_PARTY_NOTICES` lists the Rust standard library, the AppImage leaves
+  signing secrets stay out of every finding and record, a value of a secret-named variable that
+  the build baked into a shipped file fails `release.secret_in_artifacts` (the release is then not
+  uploadable; `icm verify` checks it again), `upload.sh` runs `icm diagnose` when a store tool
+  fails, `THIRD_PARTY_NOTICES` lists the Rust standard library, the AppImage leaves
   `libwayland-client` to the host, and `icm verify macos` accepts a stapled app or DMG.

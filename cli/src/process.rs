@@ -1051,14 +1051,43 @@ fn registry() -> std::sync::MutexGuard<'static, Vec<String>> {
 /// The values of an environment's secret-named variables that count as
 /// secrets: at least 6 bytes, and not a path ([`names_a_path`]).
 fn environment_secrets(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Vec<String> {
-    let mut values = Vec::new();
+    secret_variables(vars)
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect()
+}
+
+/// [`environment_secrets`] with each variable's name, sorted by name.
+fn secret_variables(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Vec<(String, String)> {
+    let mut found = Vec::new();
     for (name, value) in vars {
         let (name, value) = (name.to_string_lossy(), value.to_string_lossy());
         if is_secret_name(&name) && !names_a_path(&name, &value) && value.len() >= 6 {
-            values.push(value.into_owned());
+            found.push((name.into_owned(), value.into_owned()));
         }
     }
-    values
+    found.sort();
+    found
+}
+
+/// The secret-named variables of icm's environment whose values count as
+/// secrets, by name: what a build that inherits the environment can bake
+/// into an app (`option_env!`), which a release searches its files for.
+pub fn environment_secret_variables() -> Vec<(String, String)> {
+    secret_variables(std::env::vars_os())
+}
+
+/// The forms a secret value takes in output and files, the whole value
+/// only ([`secret_values`] also has a multi-line value's lines): raw,
+/// JSON-escaped once and twice (each also with `\/`) and percent-encoded.
+pub fn secret_forms(value: &str) -> Vec<String> {
+    let mut forms = Vec::new();
+    for form in value_forms(value) {
+        if !forms.contains(&form) {
+            forms.push(form);
+        }
+    }
+    forms
 }
 
 /// The words of a variable's name that say its value is a location.
@@ -1225,25 +1254,29 @@ fn add_secret(values: &mut Vec<String>, value: &str, min: usize) {
         if text.len() < min {
             continue;
         }
-        // Escaped once (a JSON string) and twice (a JSON line inside a JSON
-        // record, a raw `log` line in a log), each also with `\/`.
-        let once = json_escaped(text);
-        let twice = json_escaped(&once);
-        let forms = [
-            text.to_string(),
-            once.replace('/', "\\/"),
-            twice.replace('/', "\\/"),
-            once,
-            twice,
-            url_encoded(text),
-        ];
-        for form in forms {
+        for form in value_forms(text) {
             if !values.contains(&form) {
                 values.push(form);
             }
         }
     }
     values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+}
+
+/// A text as it is, escaped once (a JSON string) and twice (a JSON line
+/// inside a JSON record, a raw `log` line in a log), each also with `\/`,
+/// and percent-encoded.
+fn value_forms(text: &str) -> [String; 6] {
+    let once = json_escaped(text);
+    let twice = json_escaped(&once);
+    [
+        text.to_string(),
+        once.replace('/', "\\/"),
+        twice.replace('/', "\\/"),
+        once,
+        twice,
+        url_encoded(text),
+    ]
 }
 
 /// A text as it stands inside a JSON string (serde's escapes).

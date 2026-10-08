@@ -125,6 +125,21 @@ impl Release {
         }
 
         let output = ctx.cargo(name, invocation, &env)?;
+        // What ships comes from these: searched for secret values.
+        for artifact in &output.artifacts {
+            let kinds = ["bin", "cdylib", "staticlib", "dylib"];
+            if artifact
+                .target_kind
+                .iter()
+                .any(|kind| kinds.contains(&kind.as_str()))
+            {
+                for file in artifact.executable.iter().chain(&artifact.filenames) {
+                    if !self.built.contains(file) {
+                        self.built.push(file.clone());
+                    }
+                }
+            }
+        }
         if let Some(stamp) = stamp {
             stamp.write().map_err(|error| {
                 IcmError::new(

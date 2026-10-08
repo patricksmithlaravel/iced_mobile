@@ -802,6 +802,9 @@ catalogue! {
     ReleaseLicenceUnknown = "release.licence_unknown", CheckFailed, Warn, Agent,
         "A package the release ships declares no licence",
         "Check the package's licence before shipping it: ask its authors to declare one, or replace the dependency.";
+    ReleaseSecretInArtifacts = "release.secret_in_artifacts", CheckFailed, Fail, Agent,
+        "A shipped file holds the value of a secret-named variable in icm's environment",
+        "Stop the app reading the variable at build time (`option_env!`, `env!`, a build script), or unset it for the release; a value the app must ship, such as a public client key, goes under a name without TOKEN, KEY, SECRET, PASS or PRIVATE.";
     ReleaseArtifactChanged = "release.artifact_changed", CheckFailed, Fail, Agent,
         "A release file differs from what artifacts.json recorded",
         "Something changed the file after the release (a notarization ticket stapled to a macOS app or DMG is the one change verify accepts); rerun `icm release <target>` rather than editing its outputs.";

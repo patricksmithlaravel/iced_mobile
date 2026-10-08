@@ -97,13 +97,21 @@ impl Pipeline for Fake {
     fn build(&self, ctx: &mut Ctx, rel: &mut Release) -> Result<()> {
         let (name, kind) = upload_file(rel);
         let path: PathBuf = rel.dist.join(&name);
-        let content = format!(
+        let mut content = format!(
             "icm stand-in {} release of {} {}+{}\n",
             rel.target.as_str(),
             rel.config().app.id,
             rel.version,
             rel.build
         );
+        // `ICM_FAKE_BAKE=<variable>`: the artifact holds that variable's
+        // value, as an app that reads it with `option_env!` does.
+        if let Some(value) = std::env::var("ICM_FAKE_BAKE")
+            .ok()
+            .and_then(|name| std::env::var(name).ok())
+        {
+            content.push_str(&format!("baked: {value}\n"));
+        }
         // The notices go where the real pipeline puts them: inside the
         // bundle for zips and the site, declared for the rest.
         let triple = match rel.target {

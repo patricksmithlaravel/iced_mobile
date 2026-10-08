@@ -597,9 +597,12 @@ fn a_web_release_over_budget_and_without_fonts_is_not_uploadable() {
 
 /// The serve check's console in the run directory holds no secret the
 /// page logged: an app built with the value of a secret-named variable in
-/// icm's environment logs it plain, as JSON and in URLs, and the console, Chrome's
-/// log, the events and the result have `<redacted>`, raw or escaped (the
-/// site itself, the release's own code, is in the dist directory).
+/// icm's environment logs it plain, as JSON and in URLs, and the console,
+/// Chrome's log, the events and the result have `<redacted>`, raw or
+/// escaped. The site itself holds the value the build baked in, so
+/// `release.secret_in_artifacts` fails, naming the variable and not its
+/// value, and the release is not uploadable; `icm verify web` with the
+/// variable in its environment says the same.
 #[test]
 fn the_serve_check_keeps_no_secret() {
     if let Some(reason) = skip_reason() {
@@ -609,9 +612,23 @@ fn the_serve_check_keeps_no_secret() {
     let mut app = App::new();
     app.set(secret::NAME, secret::TOKEN);
     let release = app.json(&["release", "web", "--allow-dirty"]);
-    assert_eq!(release["exit"], 0, "{release}");
+    assert_eq!(release["exit"], 1, "{release}");
     assert!(checks(&app, &release, "pass").contains(&"web.serve_smoke".to_string()));
+    assert_eq!(failed(&release), ["release.secret_in_artifacts"]);
+    assert_eq!(release["release"]["uploadable"], false, "{release}");
     let run_dir = app.abs(&release["run_dir"]);
+    let events = std::fs::read_to_string(run_dir.join("events.ndjson")).unwrap();
+    let gate = events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["id"] == "release.secret_in_artifacts")
+        .unwrap();
+    let detail = gate["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with(&format!("the value of `{}` ", secret::NAME))
+            && detail.contains("site/pkg/app-"),
+        "{detail}"
+    );
     let console = std::fs::read_to_string(run_dir.join("smoke/console.ndjson")).unwrap();
     assert!(console.contains("signed in with <redacted>"), "{console}");
     assert!(
@@ -620,6 +637,19 @@ fn the_serve_check_keeps_no_secret() {
     );
     secret::assert_kept_nowhere(&run_dir);
     assert!(secret::leaks(&app.abs(&release["artifacts"]["site"])).len() == 1);
+
+    let verify = app.json(&["verify", "web"]);
+    assert_eq!(verify["exit"], 1, "{verify}");
+    assert_eq!(failed(&verify), ["release.secret_in_artifacts"]);
+    secret::assert_kept_nowhere(&app.abs(&verify["run_dir"]));
+
+    // Without it in the environment there is nothing to search for.
+    app.unset(secret::NAME);
+    let verify = app.json(&["verify", "web"]);
+    assert!(
+        !checks(&app, &verify, "fail").contains(&"release.secret_in_artifacts".to_string()),
+        "{verify}"
+    );
 }
 
 #[test]

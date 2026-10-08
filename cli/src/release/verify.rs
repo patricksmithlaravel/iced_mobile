@@ -9,7 +9,9 @@
 //! change, as macOS does for a ticket stapled to a signed app or DMG,
 //! [`Pipeline::changed_file`]). An artifact built
 //! elsewhere gets every gate at full severity. The target's own gates are
-//! [`super::Pipeline::verify`].
+//! [`super::Pipeline::verify`]. The files `artifacts.json` lists, or the
+//! artifact, are searched for the values of the secret-named variables of
+//! this icm's environment ([`super::secrets`]).
 
 use super::gates::Gates;
 use super::manifest::{self, Manifest};
@@ -73,6 +75,7 @@ pub fn run_with(ctx: &mut Ctx, args: &VerifyArgs, pipeline: &dyn Pipeline) -> Re
     let mut verify = locate(ctx, args)?;
     files(ctx, &mut verify, pipeline)?;
     notices(ctx, &mut verify);
+    secrets(ctx, &mut verify);
     ctx.rep.set(
         "verify",
         json!({
@@ -250,6 +253,34 @@ fn notices(ctx: &Ctx, verify: &mut Verify) {
         ),
     };
     verify.check(ctx, check);
+}
+
+/// `release.secret_in_artifacts` ([`super::secrets`]) over the files the
+/// release's `artifacts.json` lists, else the artifact, with the
+/// secret-named variables of this icm's environment. A deployed site
+/// (`--url`) is not searched.
+fn secrets(ctx: &Ctx, verify: &mut Verify) {
+    if verify.url.is_some() {
+        return;
+    }
+    let (roots, base) = match (&verify.dir, &verify.manifest, &verify.artifact) {
+        (Some(dir), Some(manifest), _) => (
+            manifest
+                .files
+                .iter()
+                .map(|file| dir.join(&file.path))
+                .collect(),
+            dir.clone(),
+        ),
+        (_, _, Some(artifact)) => (
+            vec![artifact.clone()],
+            artifact.parent().map(PathBuf::from).unwrap_or_default(),
+        ),
+        _ => return,
+    };
+    if let Some(check) = super::secrets::check(&roots, &base, verify.gates.mode) {
+        verify.check(ctx, check);
+    }
 }
 
 /// `release.artifact_changed`: every file `artifacts.json` lists still has
