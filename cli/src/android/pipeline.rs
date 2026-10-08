@@ -969,10 +969,17 @@ pub(super) fn wait_ready(
             }
             // Say only what the polls saw. No process now means none was
             // ever seen (one that vanished failed above as died): the app
-            // may still be starting, or may have exited at once.
+            // may still be starting, or may have exited at once. A
+            // relaunch keeps the probe off, whenever the wait ends.
             let detail = if alive.is_empty() {
                 format!(
                     "{app_id} was not ready within {waited}: icm saw no process of it, so it may still be starting or may have exited"
+                )
+            } else if let Some(seen) = relaunched {
+                format!(
+                    "{app_id} is alive but sent no ICM_EVENT{} within {waited}, and Android had relaunched its activity, which icm saw {} before the wait ran out (run.activity_recreated): after a relaunch only the app's ready event counts, as the resumed-activity probe cannot tell an activity that froze from one that draws",
+                    if start_seen { " ready" } else { "" },
+                    crate::time::format_duration(seen.elapsed())
                 )
             } else if start_seen {
                 format!("{app_id} is alive but sent no ICM_EVENT ready within {waited}")
@@ -2941,6 +2948,48 @@ exit 0
             !running.detail.contains("never became the resumed activity"),
             "{}",
             running.detail
+        );
+        assert!(
+            running
+                .detail
+                .contains("before the resumed-activity probe starts"),
+            "{}",
+            running.detail
+        );
+
+        // Android relaunched the activity, which keeps the probe off: a
+        // wait that ran past the probe's start says so, not that the
+        // probe had yet to start.
+        let relaunched = scripted_adb(
+            dir.path(),
+            "case \"$1\" in
+shell) case \"$2\" in pidof*) echo 4321 ;; esac ;;
+logcat) case \"$*\" in *wm_relaunch_resume_activity:I*)
+  echo '1791334001.000   600   610 I wm_relaunch_resume_activity: [0,175822296,8,com.example.app/android.app.NativeActivity,80000000]' ;;
+esac ;;
+esac
+exit 0
+",
+        );
+        let late = wait_ready(
+            &ctx,
+            &relaunched,
+            "com.example.app",
+            "1791334000.123456789",
+            Instant::now() - Duration::from_secs(7),
+            Duration::from_secs(8),
+        )
+        .expect_err("ready without a frame");
+        assert_eq!(late.id, CheckId::RunNotReady.id(), "{}", late.detail);
+        assert!(
+            late.detail.starts_with("com.example.app is alive but ")
+                && late.detail.contains("Android had relaunched its activity")
+                && late.detail.contains("run.activity_recreated")
+                && !late
+                    .detail
+                    .contains("before the resumed-activity probe starts"),
+            "{}",
+            late.detail
         );
     }
 

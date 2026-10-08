@@ -26,7 +26,8 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - Under `--json`, `--help` and usage errors name the command, not the value of a global option
   written before it (`icm --config x.toml run --help`).
 - When `icm run android --wait-ready` runs out, the error says only what the readiness polls saw,
-  where it used to say the app was alive.
+  where it used to say the app was alive. After Android relaunched the activity, it says so, where
+  it used to say the wait ended before the resumed-activity probe starts.
 - `icm stop android --shutdown` takes the emulator on a session's serial for the one its run booted
   only while that emulator's process lives. After it has exited, icm reads the AVD and the owner of
   whatever runs on that serial now, so another project's emulator on the same port stays up, and
