@@ -217,6 +217,13 @@ stop only the platforms they drive and leave the other platforms' devices alone
     of the pid `simctl launch` just printed, and the detached and owner records of a run, which only
     decide whether a run is waited for or kept (a pid that runs counts when the identity cannot
     tell), never a signal; those record an unavailable identity without warning.
+  - A pid on a physical iPhone (`app_pid` in an ios-device record, and the `--pid` of its stored
+    `devicectl device process terminate`) is not a host pid, so `procid` cannot read it, and the
+    phone reuses pids too. `stop` asks the device first (`ios_device::app_process`, through
+    `devicectl device info processes`) and runs the stored command only when the device lists that
+    pid running the app's executable. When it cannot say, nothing is terminated,
+    `ios.device.stop_unconfirmed` warns and the record stays. devicectl lists no start time, so the
+    pid and the executable are all there is to compare.
 - **Commit messages:** `area: imperative summary`, with comma-separated areas when a commit spans
   several (`icm`, `iced`, `winit`, `examples/app`, `docs`, `workspace`, `graphics`, ...). The body
   says why the change is needed and what it changes, and ends with what was verified (the commands
