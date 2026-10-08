@@ -91,6 +91,15 @@ impl Adb {
         })
     }
 
+    /// adb run from `program` (a test's fake adb), bound to `serial`.
+    #[cfg(test)]
+    pub fn from_program(program: &std::path::Path, serial: &str) -> Adb {
+        Adb {
+            base: Cmd::new(program).args(["-s", serial]),
+            serial: serial.to_string(),
+        }
+    }
+
     /// `adb -s <serial> <args…>`.
     pub fn cmd<I, S>(&self, args: I) -> Cmd
     where

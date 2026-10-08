@@ -736,7 +736,7 @@ catalogue! {
         "The app stopped responding (ANR)",
         "Find what blocks the main thread; read the evidence.";
     RunNotReady = "run.not_ready", AppDied, Fail, Agent,
-        "The app is alive but never drew a first frame",
+        "The app drew no first frame within --wait-ready",
         "Read `icm logs <platform> --level warn`; raise `--wait-ready` if it is legitimately slow.";
     RunActivityRecreated = "run.activity_recreated", CheckFailed, Warn, Agent,
         "Android recreated the app's activity",

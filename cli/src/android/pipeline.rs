@@ -875,6 +875,10 @@ pub(super) fn wait_ready(
     let mut pids: BTreeSet<u32> = BTreeSet::new();
     let mut start_seen = false;
     let mut probes = 0;
+    // Whether the resumed-activity probe has looked, and seen the app on
+    // top: what a timeout may say about it.
+    let mut probed = false;
+    let mut resumed_seen = false;
     let mut gone_polls = 0;
     let mut relaunched: Option<Instant> = None;
 
@@ -931,7 +935,9 @@ pub(super) fn wait_ready(
             && !pids.is_empty()
             && launched.elapsed() >= Duration::from_secs(6)
         {
+            probed = true;
             if top_resumed(adb, app_id) {
+                resumed_seen = true;
                 probes += 1;
                 if probes >= 3 {
                     return Ok(Ready {
@@ -958,8 +964,23 @@ pub(super) fn wait_ready(
                     ),
                 ));
             }
-            let detail = if start_seen {
+            // Say only what the polls saw. No process now means none was
+            // ever seen (one that vanished failed above as died): the app
+            // may still be starting, or may have exited at once.
+            let detail = if alive.is_empty() {
+                format!(
+                    "{app_id} was not ready within {waited}: icm saw no process of it, so it may still be starting or may have exited"
+                )
+            } else if start_seen {
                 format!("{app_id} is alive but sent no ICM_EVENT ready within {waited}")
+            } else if !probed {
+                format!(
+                    "{app_id} is alive but sent no ICM_EVENT within {waited}, before the resumed-activity probe starts (6s after launch)"
+                )
+            } else if resumed_seen {
+                format!(
+                    "{app_id} is alive but sent no ICM_EVENT, and was not the resumed activity on three looks in a row, within {waited}"
+                )
             } else {
                 format!("{app_id} is alive but never became the resumed activity within {waited}")
             };
@@ -2675,6 +2696,86 @@ pub fn device_listing(ctx: &mut Ctx) -> Result<(String, Value)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A context whose output goes nowhere.
+    fn quiet_ctx() -> Ctx {
+        let rep = crate::output::Reporter::with_writers(
+            crate::output::Mode {
+                json: true,
+                ..crate::output::Mode::default()
+            },
+            crate::output::RunInfo {
+                run: "20261007T000000Z-run-android-0000".into(),
+                command: "run".into(),
+                target: Some("android".into()),
+                argv: vec![],
+                save: false,
+            },
+            Box::new(std::io::sink()),
+            Box::new(std::io::sink()),
+        );
+        Ctx::new(crate::cli::GlobalArgs::default(), rep, vec![])
+    }
+
+    /// A fake adb in `dir`: `pidof` prints `pids`, and every other command
+    /// prints nothing and exits 0 (no events, no activities).
+    fn fake_adb(dir: &Path, pids: &str) -> Adb {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("adb");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\ncase \"$4\" in\npidof*) echo '{pids}' ;;\nesac\nexit 0\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Adb::from_program(&path, "emulator-5580")
+    }
+
+    /// A `--wait-ready` that ends before the app's process shows up says
+    /// that readiness was not established, never that the app is alive;
+    /// one that ends before the resumed-activity probe starts does not say
+    /// the activity never resumed.
+    #[test]
+    fn a_short_wait_says_only_what_it_saw() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = quiet_ctx();
+        let wait = |adb: &Adb| {
+            wait_ready(
+                &ctx,
+                adb,
+                "com.example.app",
+                "1791334000.123456789",
+                Instant::now(),
+                Duration::from_secs(1),
+            )
+            .expect_err("ready without a frame")
+        };
+
+        let absent = wait(&fake_adb(dir.path(), ""));
+        assert_eq!(absent.id, CheckId::RunNotReady.id(), "{}", absent.detail);
+        assert!(!absent.detail.contains("alive"), "{}", absent.detail);
+        assert!(
+            absent
+                .detail
+                .starts_with("com.example.app was not ready within ")
+                && absent.detail.contains("no process of it"),
+            "{}",
+            absent.detail
+        );
+
+        let running = wait(&fake_adb(dir.path(), "4321"));
+        assert_eq!(running.id, CheckId::RunNotReady.id(), "{}", running.detail);
+        assert!(
+            running.detail.starts_with("com.example.app is alive but "),
+            "{}",
+            running.detail
+        );
+        assert!(
+            !running.detail.contains("never became the resumed activity"),
+            "{}",
+            running.detail
+        );
+    }
 
     /// Readiness comes from the app's own processes: another iced_mobile
     /// app's `ready` or `panic` (every one writes `ICM_EVENT` once the

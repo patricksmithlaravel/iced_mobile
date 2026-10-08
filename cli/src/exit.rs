@@ -124,9 +124,7 @@ impl Exit {
             Exit::NeedsOwner => {
                 "certificates, profiles, keystore password env, licences, store web steps, product decisions"
             }
-            Exit::AppDied => {
-                "crashed, panicked, ANR, or alive but no first frame within --wait-ready"
-            }
+            Exit::AppDied => "crashed, panicked, ANR, or no first frame within --wait-ready",
             Exit::Internal => "bug in icm",
             Exit::Interrupted => "interrupted by SIGINT, SIGTERM or SIGHUP",
         }
