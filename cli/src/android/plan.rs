@@ -236,7 +236,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     plan.push(Step::internal(
         "android.stop",
         &format!(
-            "am force-stop {} on the session's device ({}); on a device icm did not boot, always; on an emulator icm booted, after reading its debug.icm.booted_by: not when the emulator process icm started has exited, nor when the property names another project or cannot be read, and otherwise when it names this project, or when it is unset and either that process is verified to still run (it has the start time icm recorded) or the emulator runs an icm-* AVD",
+            "am force-stop {} on the session's device ({}); on a device icm did not boot, always; on an emulator icm booted, after reading its debug.icm.booted_by: not when the property names another project or cannot be read, and otherwise when it names this project, or when it is unset and either the emulator process icm started is verified to still run (it has the start time icm recorded) or the emulator runs an icm-* AVD; a record whose process has ended or was replaced is decided as one that verifies nothing, by the property, and its pid is never signalled",
             project.config.config.app.id,
             crate::paths::display(&project.sessions_dir().join("android.json"))
         ),
@@ -244,7 +244,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     if args.shutdown {
         plan.push(Step::internal(
             "android.shutdown",
-            "adb emu kill for the emulator icm booted for this project, and for a running icm-* AVD no other project claims, after reading debug.icm.booted_by (the same rules as for the app); an emulator that ignores it for 30 s (or what --timeout leaves) gets SIGTERM to its process, but only while that is the process icm started, and one that is still running then is reported (WARN android.emulator.shutdown_failed) and its record kept, not reported as stopped",
+            "adb emu kill for the emulator a record says icm booted for this project, and for a running icm-* AVD no other project claims, after reading debug.icm.booted_by (the same rules as for the app, whether or not the record's process still verifies); an emulator that ignores it for 30 s (or what --timeout leaves) gets SIGTERM to its process, but only while that is the process icm started, and one that is still running then is reported (WARN android.emulator.shutdown_failed) and its record kept, not reported as stopped",
         ));
     }
     finish(ctx, plan, "stop android");

@@ -2512,6 +2512,19 @@ fn may_act(owner: &Owner, own: &str, proven: bool) -> std::result::Result<(), Le
     }
 }
 
+/// What a record says of the emulator process it names, as part of a message
+/// about an emulator that nothing else shows to be this project's. `None`:
+/// no record names the emulator.
+fn cannot_confirm(process: Option<&session::Process>) -> &'static str {
+    match process {
+        Some(session::Process::Gone) => "the recorded emulator process has ended or was replaced",
+        Some(session::Process::Unverified) => {
+            "the recorded emulator process cannot be confirmed (the record has no process identity, or the OS would not describe it)"
+        }
+        _ => "icm has no record that it booted it",
+    }
+}
+
 /// What `stop` has read from the devices: each serial's owner, once.
 struct Owners<'a> {
     tools: &'a Toolset,
@@ -2576,6 +2589,10 @@ struct Target {
     /// The emulator process icm started, when it is verified to run: its
     /// pid and the identity that was recorded for it.
     process: Option<(u32, crate::procid::Identity)>,
+    /// What the first record that names the emulator says of its process
+    /// when no record's is the verified one (it ended or was replaced, or it
+    /// cannot be told); for the message about an emulator left running.
+    unconfirmed: Option<session::Process>,
 }
 
 /// Stops this project's app on its device (`am force-stop`) and, with
@@ -2587,8 +2604,11 @@ struct Target {
 /// another process can have its pid and another emulator its serial. A
 /// record counts as the emulator on its serial only while its process is
 /// verified against the identity icm recorded when it started it
-/// ([`session::Process`]); an older record without one proves nothing. And
-/// whatever the records say, the emulator's owner property is read before
+/// ([`session::Process`]); an older record without one proves nothing, and
+/// neither does one whose process has ended or was replaced. Such a record
+/// still names a serial that is online, and icm then decides as the device's
+/// owner property says, never skipping the emulator because of the record.
+/// So whatever the records say, the emulator's owner property is read before
 /// the app is force-stopped or the emulator shut down ([`may_act`]), and the
 /// emulator's process is signalled only while it is that verified one.
 pub fn stop_session(
@@ -2630,62 +2650,59 @@ pub fn stop_session(
 
     // The app is force-stopped on a device icm did not boot (the one the
     // run was told to use) as before. On an emulator icm booted, only while
-    // that emulator is this project's: the emulator process the session
-    // recorded is verified to run, or it exited and the serial holds
-    // another emulator now (another project's, or one booted by hand), so
-    // the app is not force-stopped there; and either way the device must
-    // not name another project as its owner.
+    // that emulator is this project's, which the device's owner property
+    // says: the record's process, verified to run, or one of icm's AVDs,
+    // stands in for an unset property, and another project's tag or a
+    // property that cannot be read leaves the app running. A record whose
+    // process has ended or was replaced is no different from one with no
+    // identity: the serial is online, and icm cannot tell from the record
+    // whether it holds the emulator its run booted, so the owner decides.
     if let Some(session) = &session
         && online(&session.serial)
     {
         let proceed = if !session.booted_by_icm {
             true
         } else {
-            match session.emulator_process() {
-                // The emulator the app ran on has exited, and the app with
-                // it: nothing of this project's is left to stop on the
-                // serial, whatever emulator holds it now.
-                session::Process::Gone => false,
-                process => {
-                    let proven = matches!(process, session::Process::Verified { .. })
-                        || managed_on(&session.serial);
-                    match may_act(&owners.of(&session.serial), &own, proven) {
-                        Ok(()) => true,
-                        Err(Leave::Unknown(why)) => {
-                            owner_unknown(
-                                ctx,
-                                &session.serial,
-                                &why,
-                                &format!("kept running with {app_id} on it"),
-                            );
-                            let _ = told.insert(session.serial.clone());
-                            false
-                        }
-                        Err(Leave::Unproven) => {
-                            ctx.rep.check(Check::info(
-                                CheckId::RunNoSession,
-                                format!(
-                                    "{app_id} was not force-stopped on {}: the emulator process the session recorded cannot be checked (the session has no process identity, or the OS would not describe it), and the emulator runs no AVD icm manages and carries no mark of this project",
-                                    session.serial
-                                ),
-                            ));
-                            false
-                        }
-                        // Another project's: said once, here or by
-                        // `--shutdown` below, whichever meets it first.
-                        Err(Leave::Shared(owner)) => {
-                            if told.insert(session.serial.clone()) {
-                                emulator_shared(
-                                    ctx,
-                                    &session.serial,
-                                    &owner,
-                                    &format!("kept running with {app_id} on it"),
-                                    Some(&app_id),
-                                );
-                            }
-                            false
-                        }
+            let process = session.emulator_process();
+            let proven =
+                matches!(process, session::Process::Verified { .. }) || managed_on(&session.serial);
+            match may_act(&owners.of(&session.serial), &own, proven) {
+                Ok(()) => true,
+                Err(Leave::Unknown(why)) => {
+                    owner_unknown(
+                        ctx,
+                        &session.serial,
+                        &why,
+                        &format!("kept running with {app_id} on it"),
+                    );
+                    let _ = told.insert(session.serial.clone());
+                    false
+                }
+                Err(Leave::Unproven) => {
+                    ctx.rep.check(Check::info(
+                        CheckId::RunNoSession,
+                        format!(
+                            "{app_id} was not force-stopped on {}: {}; the emulator runs no AVD icm manages and {} is unset, so nothing shows it is this project's",
+                            session.serial,
+                            cannot_confirm(Some(&process)),
+                            session::OWNER_PROP
+                        ),
+                    ));
+                    false
+                }
+                // Another project's: said once, here or by
+                // `--shutdown` below, whichever meets it first.
+                Err(Leave::Shared(owner)) => {
+                    if told.insert(session.serial.clone()) {
+                        emulator_shared(
+                            ctx,
+                            &session.serial,
+                            &owner,
+                            &format!("kept running with {app_id} on it"),
+                            Some(&app_id),
+                        );
                     }
+                    false
                 }
             }
         };
@@ -2710,40 +2727,42 @@ pub fn stop_session(
     if shutdown {
         let running = running_now.get_or_init(|| device::running_emulators(tools, &listed));
         let mut targets: Vec<Target> = Vec::new();
-        let mut add = |serial: &str, process: Option<(u32, crate::procid::Identity)>| match targets
-            .iter_mut()
-            .find(|target| target.serial == serial)
-        {
-            Some(target) => target.process = target.process.take().or(process),
-            None => targets.push(Target {
-                serial: serial.to_string(),
-                process,
-            }),
-        };
-        let verified = |process: session::Process| match process {
-            session::Process::Verified { pid, identity } => Some((pid, identity)),
-            _ => None,
+        // A record's verdict on its emulator process, or `None` for an
+        // emulator no record names (a managed AVD).
+        let mut add = |serial: &str, record: Option<session::Process>| {
+            let at = match targets.iter().position(|target| target.serial == serial) {
+                Some(at) => at,
+                None => {
+                    targets.push(Target {
+                        serial: serial.to_string(),
+                        process: None,
+                        unconfirmed: None,
+                    });
+                    targets.len() - 1
+                }
+            };
+            let target = &mut targets[at];
+            match record {
+                Some(session::Process::Verified { pid, identity }) => {
+                    target.process = target.process.take().or(Some((pid, identity)));
+                }
+                Some(unconfirmed) => {
+                    target.unconfirmed = target.unconfirmed.take().or(Some(unconfirmed));
+                }
+                None => {}
+            }
         };
         if let Some(session) = &session
             && online(&session.serial)
         {
-            match session.emulator_process() {
-                _ if !session.booted_by_icm => {
-                    // Whose it is, the owner check below reads from the device.
-                    if managed_on(&session.serial) {
-                        add(&session.serial, None);
-                    }
-                }
-                process @ session::Process::Verified { .. } => {
-                    add(&session.serial, verified(process));
-                }
-                // Recorded, but not provable: the device must say it is ours.
-                session::Process::Unverified => add(&session.serial, None),
-                session::Process::Gone => {
-                    if managed_on(&session.serial) {
-                        add(&session.serial, None);
-                    }
-                }
+            if session.booted_by_icm {
+                // Recorded, whether or not the record proves it: the device
+                // must say the emulator is ours, so a record whose process
+                // ended or was replaced is no reason to skip it.
+                add(&session.serial, Some(session.emulator_process()));
+            } else if managed_on(&session.serial) {
+                // Whose it is, the owner check below reads from the device.
+                add(&session.serial, None);
             }
         }
         let default = device::default_avd(host, project.config.config.android.target_sdk);
@@ -2758,12 +2777,13 @@ pub fn stop_session(
         // `icm stop android` removed the session that named it.
         for booted in session::booted(project) {
             if online(&booted.serial) {
-                add(&booted.serial, verified(booted.process()));
+                add(&booted.serial, Some(booted.process()));
             }
         }
         if let Some(session) = &session
             && online(&session.serial)
             && session.kind == "emulator"
+            && !session.booted_by_icm
             && !targets.iter().any(|target| target.serial == session.serial)
         {
             let avd = avd_on(&session.serial);
@@ -2776,7 +2796,12 @@ pub fn stop_session(
                 ),
             ));
         }
-        for Target { serial, process } in targets {
+        for Target {
+            serial,
+            process,
+            unconfirmed,
+        } in targets
+        {
             // The owner is read for every emulator, the ones a record says
             // icm booted too: a record can outlive its emulator, and
             // whoever runs on the serial now may be another project.
@@ -2801,8 +2826,10 @@ pub fn stop_session(
                     ctx.rep.check(Check::info(
                         CheckId::RunNoSession,
                         format!(
-                            "{serial} ({}) left running: nothing shows icm booted it for this project (its record cannot be checked against the process now running, and debug.icm.booted_by is unset)",
-                            avd_on(&serial).as_deref().unwrap_or("unknown AVD")
+                            "{serial} ({}) left running: {}; it runs no AVD icm manages and {} is unset, so nothing shows icm booted it for this project",
+                            avd_on(&serial).as_deref().unwrap_or("unknown AVD"),
+                            cannot_confirm(unconfirmed.as_ref()),
+                            session::OWNER_PROP
                         ),
                     ));
                     continue;

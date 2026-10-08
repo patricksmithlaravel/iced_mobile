@@ -148,8 +148,11 @@ pub enum Process {
         /// What the pid was checked against.
         identity: Identity,
     },
-    /// The process has exited, or another process has its pid: the serial
-    /// may hold any emulator now.
+    /// The process has exited, or another process has its pid. That is all
+    /// icm knows: whether the emulator on the serial is still the one it
+    /// started, a later one or somebody else's, only the device's owner
+    /// property says, so it decides as for [`Process::Unverified`]. The pid
+    /// is never signalled.
     Gone,
     /// The record cannot say: it holds no pid, or no identity to compare
     /// the pid's process with (an older icm wrote it), or the OS would not
@@ -270,10 +273,12 @@ pub fn write_booted(project: &Project, booted: &Booted) {
     }
 }
 
-/// The emulators icm booted for this project whose records may still hold:
-/// every record except those whose process has exited or whose pid another
-/// process has taken. [`Booted::verified`] tells the ones that are known to
-/// run from the ones an older icm wrote.
+/// The emulators icm booted for this project that have a record, whatever
+/// their recorded process is now ([`Booted::process`]): [`Booted::verified`]
+/// tells the ones that are known to run from the rest. A record whose
+/// process has ended or was replaced still names a serial that may hold the
+/// emulator, so `stop` reads that device's owner; a rerun carries forward
+/// only the verified ones.
 pub fn booted(project: &Project) -> Vec<Booted> {
     let Ok(read) = std::fs::read_dir(booted_dir(project)) else {
         return Vec::new();
@@ -281,7 +286,6 @@ pub fn booted(project: &Project) -> Vec<Booted> {
     read.flatten()
         .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
         .filter_map(|text| serde_json::from_str::<Booted>(&text).ok())
-        .filter(|booted| booted.process() != Process::Gone)
         .collect()
 }
 

@@ -346,7 +346,9 @@ fn a_stale_session_never_shuts_down_another_projects_emulator() {
     );
 
     // Nobody's, but no icm AVD: the owner's own AVD on the reused port is
-    // never taken for the session's.
+    // never taken for the session's. Neither the app nor the emulator is
+    // touched, and each INFO says what icm knows: the recorded process has
+    // ended or was replaced, and the property is unset.
     std::fs::remove_file(sandbox.root.path().join("booted-by")).unwrap();
     std::fs::write(sandbox.log(), "").unwrap();
     std::fs::write(
@@ -373,18 +375,25 @@ fn a_stale_session_never_shuts_down_another_projects_emulator() {
     let calls = sandbox.adb_calls();
     assert!(!calls.contains("emu kill"), "{calls}");
     assert!(!calls.contains("force-stop"), "{calls}");
-    let left: Vec<&Value> = events
+    let left: Vec<&str> = checks(&events, "run.no_session")
         .iter()
-        .filter(|event| event["type"] == "check" && event["id"] == "run.no_session")
+        .map(|event| event["detail"].as_str().unwrap())
         .collect();
-    assert_eq!(left.len(), 1, "{events:?}");
+    assert_eq!(left.len(), 2, "{events:?}");
     assert!(
-        left[0]["detail"]
-            .as_str()
-            .unwrap()
-            .starts_with("emulator-5580 (owners_pixel) left running"),
-        "{events:?}"
+        left[0].starts_with("com.acme.fixture was not force-stopped on emulator-5580: the recorded emulator process has ended or was replaced;"),
+        "{left:?}"
     );
+    assert!(
+        left[1].starts_with("emulator-5580 (owners_pixel) left running: the recorded emulator process has ended or was replaced;"),
+        "{left:?}"
+    );
+    for detail in &left {
+        assert!(
+            detail.contains("debug.icm.booted_by is unset") && !detail.contains("did not boot"),
+            "{detail}"
+        );
+    }
 }
 
 impl Sandbox {
@@ -771,26 +780,19 @@ fn an_older_record_is_acted_on_only_as_far_as_the_devices_mark_goes() {
 }
 
 /// A record whose emulator process is gone is no proof, whether it holds
-/// an identity or not: the serial may hold another emulator, so the app is
-/// not force-stopped there and the owner is read.
+/// an identity or not: the serial may hold another emulator, so the owner is
+/// read and decides, whatever the record says. Another project's emulator is
+/// left alone with the app on it; one the device marks as this project's is
+/// stopped, since the mark says icm booted it for the project.
 #[test]
 fn a_record_of_an_exited_emulator_proves_nothing() {
     let sandbox = Sandbox::new();
     sandbox.owned_by("fedcba9876543210");
     let process = Emulator::start();
     let identity = process.identity();
-    // SAFETY: kill(2) on a process this test started.
-    unsafe {
-        let _ = libc::kill(process.0 as i32, libc::SIGKILL);
-    }
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while process.running() && std::time::Instant::now() < until {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert!(!process.running());
-    sandbox.write_session(serde_json::json!({
-        "emulator_pid": process.0, "emulator_identity": identity
-    }));
+    process.end();
+    let record = serde_json::json!({"emulator_pid": process.0, "emulator_identity": identity});
+    sandbox.write_session(record.clone());
     let events = sandbox.shutdown();
     let result = events.last().unwrap();
     assert_eq!(result["exit"], 0, "{result}");
@@ -806,6 +808,256 @@ fn a_record_of_an_exited_emulator_proves_nothing() {
         1,
         "{events:?}"
     );
+
+    // The same record on an emulator this project booted and marked.
+    sandbox.owned_by(&sandbox.own_tag());
+    std::fs::write(sandbox.log(), "").unwrap();
+    sandbox.write_session(record);
+    let events = sandbox.shutdown();
+    let result = events.last().unwrap();
+    assert_eq!(result["exit"], 0, "{result}");
+    let calls = sandbox.adb_calls();
+    assert!(calls.contains("shell am force-stop"), "{calls}");
+    assert!(calls.contains("-s emulator-5580 emu kill"), "{calls}");
+    assert_eq!(
+        result["stopped"],
+        serde_json::json!([
+            {"platform": "android", "app": "com.acme.fixture", "serial": "emulator-5580"},
+            {"platform": "android", "emulator": "emulator-5580"}
+        ]),
+        "{result}"
+    );
+}
+
+/// A record whose emulator process no longer matches (another process has
+/// its pid, as after the pid was reused) says only that icm cannot confirm
+/// the process. While its serial is online, `stop --shutdown` decides as it
+/// does for a record from before identities, by the device's
+/// `debug.icm.booted_by`, on an `icm-test-*` AVD that nothing else vouches
+/// for:
+///
+/// - this project's tag: the app is force-stopped and the emulator shut down
+///   with `emu kill`, and the recorded pid is never signalled;
+/// - another project's: both are left running, INFO `android.emulator.shared`;
+/// - unset: both are left running (fail-closed), and INFO `run.no_session`
+///   says what icm knows, that the recorded emulator process has ended or
+///   was replaced and the property is unset, never that icm did not boot it;
+/// - unreadable: both are left running, WARN `android.emulator.owner_unknown`.
+///
+/// Before, a mismatched session left the app and the emulator running without
+/// reading the property and said icm did not boot an emulator its record says
+/// it booted, and a mismatched per-serial record was not looked at at all.
+#[test]
+fn a_record_whose_process_no_longer_matches_goes_by_the_devices_owner() {
+    for records in ["a session and its record", "only the per-serial record"] {
+        let with_session = records.starts_with("a session");
+        for owner in [
+            "this project's tag",
+            "another project's tag",
+            "unset",
+            "unreadable",
+        ] {
+            let case = format!("{records}, owner {owner}");
+            let sandbox = Sandbox::new();
+            match owner {
+                "this project's tag" => sandbox.owned_by(&sandbox.own_tag()),
+                "another project's tag" => sandbox.owned_by("fedcba9876543210"),
+                "unset" => {}
+                _ => std::fs::write(sandbox.root.path().join("getprop-fails"), "").unwrap(),
+            }
+            // A live process that has the recorded pid but not the recorded
+            // identity; `emu kill` is not told it is the emulator's.
+            let process = Emulator::start();
+            let fields = serde_json::json!({
+                "avd": "icm-test-api36",
+                "emulator_pid": process.0, "emulator_identity": another_identity()
+            });
+            if with_session {
+                sandbox.write_session(fields.clone());
+            }
+            sandbox.write_booted(fields);
+
+            let events = sandbox.events(
+                &["stop", "android", "--shutdown"],
+                &[("FAKE_AVD", "icm-test-api36")],
+            );
+            let record = sandbox.sessions().join("android-booted/emulator-5580.json");
+            let (shared, unknown, unproven) = (
+                checks(&events, "android.emulator.shared"),
+                checks(&events, "android.emulator.owner_unknown"),
+                checks(&events, "run.no_session"),
+            );
+            // What each says about the app and about the emulator.
+            let where_it_was_left = if with_session {
+                "emulator-5580 kept running with com.acme.fixture on it"
+            } else {
+                "emulator-5580 left running"
+            };
+            if owner == "this project's tag" {
+                let result = events.last().unwrap();
+                assert_eq!(result["exit"], 0, "{case}: {result}");
+                let calls = sandbox.adb_calls();
+                assert!(
+                    calls.contains("-s emulator-5580 shell getprop debug.icm.booted_by"),
+                    "{case}: {calls}"
+                );
+                assert_eq!(
+                    calls.contains("shell am force-stop com.acme.fixture"),
+                    with_session,
+                    "{case}: {calls}"
+                );
+                assert!(
+                    calls.contains("-s emulator-5580 emu kill"),
+                    "{case}: {calls}"
+                );
+                let mut stopped = vec![];
+                if with_session {
+                    stopped.push(serde_json::json!(
+                        {"platform": "android", "app": "com.acme.fixture", "serial": "emulator-5580"}
+                    ));
+                }
+                stopped
+                    .push(serde_json::json!({"platform": "android", "emulator": "emulator-5580"}));
+                assert_eq!(result["stopped"], Value::Array(stopped), "{case}: {result}");
+                assert!(
+                    shared.is_empty() && unknown.is_empty() && unproven.is_empty(),
+                    "{case}: {events:?}"
+                );
+                assert!(process.running(), "{case}: the recorded pid was signalled");
+                assert!(!record.exists(), "{case}: the record outlived the emulator");
+                assert!(!sandbox.sessions().join("android.json").exists(), "{case}");
+                continue;
+            }
+            assert_left_alone(&sandbox, &events, &process, &case);
+            assert!(record.exists(), "{case}: the record of a running emulator");
+            assert!(!sandbox.sessions().join("android.json").exists(), "{case}");
+            match owner {
+                "another project's tag" => {
+                    assert_eq!(shared.len(), 1, "{case}: {events:?}");
+                    let detail = shared[0]["detail"].as_str().unwrap();
+                    assert!(
+                        detail.starts_with(where_it_was_left)
+                            && detail.contains("fedcba9876543210"),
+                        "{case}: {detail}"
+                    );
+                    assert!(unknown.is_empty() && unproven.is_empty(), "{case}");
+                }
+                "unreadable" => {
+                    assert_eq!(unknown.len(), 1, "{case}: {events:?}");
+                    assert_eq!(unknown[0]["status"], "warn", "{case}");
+                    assert!(
+                        unknown[0]["detail"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with(where_it_was_left),
+                        "{case}: {events:?}"
+                    );
+                    assert_eq!(
+                        unknown[0]["fix"]["commands"],
+                        serde_json::json!(["adb -s emulator-5580 emu kill"]),
+                        "{case}"
+                    );
+                    assert!(shared.is_empty() && unproven.is_empty(), "{case}");
+                }
+                _ => {
+                    // The app, when a session names it, then the emulator.
+                    let details: Vec<&str> = unproven
+                        .iter()
+                        .map(|check| check["detail"].as_str().unwrap())
+                        .collect();
+                    assert_eq!(
+                        details.len(),
+                        1 + usize::from(with_session),
+                        "{case}: {events:?}"
+                    );
+                    for detail in &details {
+                        assert!(
+                            detail.contains(
+                                "the recorded emulator process has ended or was replaced;"
+                            ) && detail.contains("debug.icm.booted_by is unset"),
+                            "{case}: {detail}"
+                        );
+                        assert!(!detail.contains("did not boot"), "{case}: {detail}");
+                    }
+                    if with_session {
+                        assert!(
+                            details[0].starts_with(
+                                "com.acme.fixture was not force-stopped on emulator-5580:"
+                            ),
+                            "{case}: {details:?}"
+                        );
+                    }
+                    assert!(
+                        details
+                            .last()
+                            .unwrap()
+                            .starts_with("emulator-5580 (icm-test-api36) left running:"),
+                        "{case}: {details:?}"
+                    );
+                    for check in &unproven {
+                        assert_eq!(check["status"], "info", "{case}");
+                    }
+                    assert!(shared.is_empty() && unknown.is_empty(), "{case}");
+                }
+            }
+        }
+    }
+}
+
+/// The recorded pid of a process that does not match is never signalled,
+/// even for an emulator that is this project's by its mark and ignores
+/// `emu kill`: there is nothing icm may end, so it is reported as still
+/// running, with its record kept.
+#[test]
+fn a_mismatched_emulator_process_is_not_signalled_when_emu_kill_is_ignored() {
+    let sandbox = Sandbox::new();
+    sandbox.owned_by(&sandbox.own_tag());
+    std::fs::write(sandbox.root.path().join("ignores-emu-kill"), "").unwrap();
+    let process = Emulator::start();
+    let fields = serde_json::json!({
+        "avd": "icm-test-api36",
+        "emulator_pid": process.0, "emulator_identity": another_identity()
+    });
+    sandbox.write_session(fields.clone());
+    sandbox.write_booted(fields);
+
+    let events = sandbox.events(
+        &["stop", "android", "--shutdown", "--timeout", "2s"],
+        &[("FAKE_AVD", "icm-test-api36")],
+    );
+    let result = events.last().unwrap();
+    assert_eq!(result["exit"], 0, "{result}");
+    let calls = sandbox.adb_calls();
+    assert!(calls.contains("shell am force-stop"), "{calls}");
+    assert!(calls.contains("-s emulator-5580 emu kill"), "{calls}");
+    assert_eq!(
+        result["stopped"],
+        serde_json::json!([
+            {"platform": "android", "app": "com.acme.fixture", "serial": "emulator-5580"}
+        ]),
+        "{result}"
+    );
+    assert_eq!(
+        result["still_running"],
+        serde_json::json!(["emulator-5580"]),
+        "{result}"
+    );
+    let failed = checks(&events, "android.emulator.shutdown_failed");
+    assert_eq!(failed.len(), 1, "{events:?}");
+    assert!(
+        failed[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("no verified process"),
+        "{events:?}"
+    );
+    assert!(
+        sandbox
+            .sessions()
+            .join("android-booted/emulator-5580.json")
+            .exists()
+    );
+    assert!(process.running(), "the recorded pid was signalled");
 }
 
 /// A device icm did not boot (the one the run was told to use, a phone or
@@ -877,9 +1129,9 @@ fn an_older_session_on_an_unmarked_emulator_needs_a_managed_avd() {
 
 /// What `--dry-run` says `stop` does is what it does: the app is force-stopped
 /// on an emulator icm booted only after its owner property is read, and not
-/// when its process has exited or the property names another project or
-/// cannot be read; `--shutdown` also says what happens to an emulator that
-/// ignores `emu kill`.
+/// when the property names another project or cannot be read, whatever the
+/// record's process is now; `--shutdown` also says what happens to an
+/// emulator that ignores `emu kill`.
 #[test]
 fn the_stop_plan_states_the_rules_stop_follows() {
     let sandbox = Sandbox::new();
@@ -899,7 +1151,7 @@ fn the_stop_plan_states_the_rules_stop_follows() {
         "am force-stop com.acme.fixture",
         "on a device icm did not boot, always",
         "after reading its debug.icm.booted_by",
-        "has exited",
+        "ended or was replaced",
         "names another project or cannot be read",
         "names this project",
         "verified to still run",
@@ -907,6 +1159,8 @@ fn the_stop_plan_states_the_rules_stop_follows() {
     ] {
         assert!(steps[0].contains(phrase), "{phrase}: {}", steps[0]);
     }
+    // An ended process is no reason to leave the app alone.
+    assert!(!steps[0].contains("has exited"), "{}", steps[0]);
     for phrase in [
         "adb emu kill",
         "same rules as for the app",
@@ -922,18 +1176,29 @@ fn the_stop_plan_states_the_rules_stop_follows() {
 }
 
 /// `emu kill` can be ignored. With no process icm can verify (no record at
-/// all, or one an older icm wrote) the emulator is still listed when the wait
-/// ends and there is nothing to signal: it is not reported as stopped, its
-/// record stays, and a WARN names it, with the command that tries again. The
-/// pid an older record names is never signalled.
+/// all, one an older icm wrote, or one whose identity another process has
+/// now) the emulator is still listed when the wait ends and there is nothing
+/// to signal: it is not reported as stopped, its record stays, and a WARN
+/// names it, with the command that tries again. The pid such a record names
+/// is never signalled.
 #[test]
 fn an_emulator_that_ignores_emu_kill_is_not_reported_stopped() {
-    for case in ["no record", "a record an older icm wrote"] {
+    for case in [
+        "no record",
+        "a record an older icm wrote",
+        "a record with another process's identity",
+    ] {
         let sandbox = Sandbox::new();
         std::fs::write(sandbox.root.path().join("ignores-emu-kill"), "").unwrap();
         let process = Emulator::start();
-        if case != "no record" {
-            sandbox.write_booted(serde_json::json!({"emulator_pid": process.0}));
+        match case {
+            "no record" => {}
+            "a record an older icm wrote" => {
+                sandbox.write_booted(serde_json::json!({"emulator_pid": process.0}));
+            }
+            _ => sandbox.write_booted(serde_json::json!({
+                "emulator_pid": process.0, "emulator_identity": another_identity()
+            })),
         }
 
         // `--timeout` bounds the wait for the emulator to go.
