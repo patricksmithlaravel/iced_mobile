@@ -555,9 +555,10 @@
 //!
 //! Launching the app again a moment after Back, before Android has destroyed
 //! the Activity it finished, starts a second Activity while the first one
-//! still runs. android-activity 0.6.0 aborts the process then; with 0.6.1,
-//! iced cannot build the second event loop and the process ends. Android
-//! then starts the new Activity in a new process, or the next launch does.
+//! still runs. iced cannot build the second event loop then, and the process
+//! ends (android-activity 0.6.0, older than iced now accepts, aborted it).
+//! Android then starts the new Activity in a new process, or the next launch
+//! does.
 //!
 //! # Dark mode
 //!

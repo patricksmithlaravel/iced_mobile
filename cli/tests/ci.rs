@@ -2,8 +2,10 @@
 //! the release tag rule `.github/ci/tag.sh` enforces and the docs that name
 //! the release, the workflows running the checks AGENTS.md lists, the
 //! scripts they name, and nothing in them that formats path dependencies,
-//! reads a secret or uploads, publishes or notarizes. They read the fork's
-//! files around `cli/` and run no workflow.
+//! reads a secret or uploads, publishes or notarizes. Also the crate
+//! versions the fork's `Cargo.lock`, which CI and the checkout's examples
+//! build, must not fall below. They read the fork's files around `cli/` and
+//! run no workflow.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -280,4 +282,48 @@ fn ci_never_formats_path_dependencies_reads_secrets_or_uploads() {
         }
     }
     assert!(offenders.is_empty(), "forbidden in .github: {offenders:#?}");
+}
+
+/// The versions of `name` in a `Cargo.lock`.
+fn locked_versions(lock: &str, name: &str) -> Vec<(u64, u64, u64)> {
+    lock.split("[[package]]")
+        .filter(|package| {
+            package
+                .lines()
+                .any(|line| line.trim() == format!("name = \"{name}\""))
+        })
+        .filter_map(|package| {
+            let version = package
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("version = "))?
+                .trim_matches('"');
+            let mut numbers = version
+                .split(['.', '-', '+'])
+                .map(|part| part.parse::<u64>().unwrap_or(0));
+            Some((
+                numbers.next()?,
+                numbers.next().unwrap_or(0),
+                numbers.next().unwrap_or(0),
+            ))
+        })
+        .collect()
+}
+
+/// android-activity 0.6.0's NativeActivity asks InputMethodManager to show
+/// the soft keyboard for its NativeContentView, which is never the served
+/// view on Android 16 (API 36, where the served view is the DecorView): the
+/// request fails at PHASE_CLIENT_VIEW_SERVED and no keyboard shows, so a
+/// text_input cannot be typed into on the screen. 0.6.1 passes the
+/// DecorView. iced_winit requires 0.6.1 on Android, and the fork's lock,
+/// which builds `examples/app` from the checkout, must hold it too.
+#[test]
+fn the_lock_has_an_android_activity_that_shows_the_keyboard() {
+    let versions = locked_versions(&read("Cargo.lock"), "android-activity");
+    assert!(!versions.is_empty(), "Cargo.lock has no android-activity");
+    for version in versions {
+        assert!(
+            version >= (0, 6, 1),
+            "Cargo.lock has android-activity {version:?}, whose soft keyboard never shows on API 36; run `cargo update -p android-activity` at the root"
+        );
+    }
 }

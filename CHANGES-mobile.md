@@ -13,6 +13,11 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   `\t` as Tab, deciding per insertion, so a Return typed right after another key in the same turn
   of the event loop is no longer lost.
 - **Android:** the safe area is published again when the app changes its own scale factor.
+- **Android:** the on-screen keyboard shows on Android 16 (API 36). iced_winit requires
+  android-activity 0.6.1, and the fork's `Cargo.lock` holds it: 0.6.0 asked Android to show the
+  keyboard for a view that is not the served one there, so tapping a `text_input` showed none. An
+  app whose `Cargo.lock` still has 0.6.0 gets 0.6.1 when it moves to the next release's tag, or now
+  with `cargo update -p android-activity`.
 - `icm logs desktop` of an app that ended by itself never takes a variable of the same name in its
   own shell for a secret the app inherited: it reads the run's redacted copies and warns
   `desktop.logs.secret_unknown` whatever the shell holds. Before, a shell where that variable held

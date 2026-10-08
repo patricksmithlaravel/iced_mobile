@@ -48,6 +48,11 @@ sysinfo.workspace = true
 sysinfo.optional = true
 
 [target.'cfg(target_os = "android")'.dependencies]
+# Only a version floor: winit brings android-activity and picks its activity
+# feature. 0.6.0's NativeActivity asks Android to show the soft keyboard for a
+# view that is never the served one on Android 16 (API 36), so no keyboard
+# ever shows; 0.6.1 asks for the window's DecorView.
+android-activity.workspace = true
 jni.workspace = true
 ndk-context.workspace = true
 
