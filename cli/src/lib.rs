@@ -308,6 +308,61 @@ fn is_quiet_flag(arg: &str) -> bool {
             && arg.contains('q'))
 }
 
+/// The command `argv` names, for a command line clap refused: the first
+/// word that is neither an option nor an option's value. Which options take
+/// a value comes from clap's definition, so in `icm --config x.toml run`
+/// the command is `run`, not `x.toml`. An alias gives the command's name;
+/// a word that names no command (an external one) is returned as written.
+fn named_subcommand(argv: &[String]) -> Option<String> {
+    use clap::CommandFactory;
+    let mut icm = Cli::command();
+    icm.build();
+    let takes_value = |option: Option<&clap::Arg>| {
+        option.is_some_and(|option| option.get_action().takes_values())
+    };
+    let mut words = argv.iter().skip(1);
+    while let Some(word) = words.next() {
+        if word == "--" {
+            return words.next().cloned();
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            // `--name=value` carries its value.
+            if !long.contains('=')
+                && takes_value(icm.get_arguments().find(|option| {
+                    option.get_long() == Some(long)
+                        || option
+                            .get_all_aliases()
+                            .is_some_and(|aliases| aliases.contains(&long))
+                }))
+            {
+                let _ = words.next();
+            }
+            continue;
+        }
+        if let Some(shorts) = word.strip_prefix('-').filter(|shorts| !shorts.is_empty()) {
+            // A cluster (`-qv`): the first short option that takes a value
+            // takes the rest of the word, or else the next word.
+            for (at, short) in shorts.char_indices() {
+                if takes_value(
+                    icm.get_arguments()
+                        .find(|option| option.get_short() == Some(short)),
+                ) {
+                    if at + short.len_utf8() == shorts.len() {
+                        let _ = words.next();
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        return Some(
+            icm.find_subcommand(word)
+                .map_or_else(|| word.clone(), |command| command.get_name().to_string()),
+        );
+    }
+    None
+}
+
 /// The `detail` of a usage error: clap's message without its usage and
 /// help footer.
 pub fn usage_detail(rendered: &str) -> String {
@@ -329,7 +384,7 @@ fn usage_error(error: &clap::Error, argv: &[String]) -> Exit {
     let args = &argv[1.min(argv.len())..];
     let json = args.iter().any(|a| a == "--json") || env_flag("ICM_JSON");
     let quiet = args.iter().any(|a| is_quiet_flag(a));
-    let subcommand = args.iter().find(|arg| !arg.starts_with('-')).cloned();
+    let subcommand = named_subcommand(argv);
 
     if matches!(
         error.kind(),
@@ -423,6 +478,39 @@ fn help_or_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A global option's value is not the command, however the options are
+    /// written and ordered.
+    #[test]
+    fn the_command_skips_option_values() {
+        let named = |args: &[&str]| {
+            let argv: Vec<String> = std::iter::once("icm")
+                .chain(args.iter().copied())
+                .map(str::to_string)
+                .collect();
+            named_subcommand(&argv)
+        };
+        let run = Some("run".to_string());
+        assert_eq!(named(&["run", "--help"]), run);
+        assert_eq!(named(&["--config", "x.toml", "run", "--help"]), run);
+        assert_eq!(named(&["--config=x.toml", "run"]), run);
+        assert_eq!(named(&["--timeout", "90s", "-q", "run"]), run);
+        assert_eq!(named(&["--color", "never", "--json", "run"]), run);
+        assert_eq!(named(&["--wait-lock", "5s", "-qv", "run"]), run);
+        // `--config run`: `run` is the path, `stop` the command.
+        assert_eq!(
+            named(&["--config", "run", "stop", "-h"]),
+            Some("stop".to_string())
+        );
+        assert_eq!(named(&["--", "run"]), run);
+        // An unknown word is still what was asked for.
+        assert_eq!(
+            named(&["--timeout", "1m", "clean"]),
+            Some("clean".to_string())
+        );
+        assert_eq!(named(&["--timeout", "90s", "--json"]), None);
+        assert_eq!(named(&[]), None);
+    }
 
     #[test]
     fn usage_details_drop_the_footer() {

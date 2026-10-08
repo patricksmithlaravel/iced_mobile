@@ -196,6 +196,37 @@ fn help_and_version_answer_json_with_a_result() {
         "{help}"
     );
 
+    // A global option's value before the command is not the command: the
+    // help still names `run` (and `stop`), whatever comes first.
+    for args in [
+        &["--config", "x.toml", "run", "--help", "--json", "-q"][..],
+        &["--timeout", "90s", "run", "--help", "--json", "-q"],
+        &["--color", "never", "run", "--help", "--json", "-q"],
+        &["--wait-lock=5s", "-v", "run", "-h", "--json", "-q"],
+        &["-q", "--json", "--config", "run", "stop", "--help"],
+    ] {
+        let help = result(&sandbox.run(args));
+        assert_eq!(help["exit"], 0, "{args:?}: {help}");
+        let named = if args.contains(&"stop") {
+            "stop"
+        } else {
+            "run"
+        };
+        assert_eq!(help["target"], named, "{args:?}: {help}");
+        assert_eq!(
+            help["summary"],
+            format!("the help of `icm {named}`"),
+            "{args:?}: {help}"
+        );
+        assert!(
+            help["help"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("Usage: icm {named}")),
+            "{args:?}: {help}"
+        );
+    }
+
     // Human mode is unchanged: the text, exit 0.
     let output = sandbox.run(&["run", "--help"]);
     assert_eq!(output.status.code(), Some(0));
@@ -242,9 +273,17 @@ fn usage_errors_exit_two_with_a_result() {
         .unwrap();
     assert_eq!(result(&output)["exit"], 2);
 
+    // A usage error names the command, not a global option's value.
+    let output = sandbox.run(&["--config", "x.toml", "run", "nowhere", "--json", "-q"]);
+    let failed = result(&output);
+    assert_eq!(failed["exit"], 2, "{failed}");
+    assert_eq!(failed["command"], "run", "{failed}");
+
     // No subcommand.
     let output = sandbox.run(&["--json"]);
     assert_eq!(result(&output)["exit"], 2);
+    let output = sandbox.run(&["--timeout", "90s", "--json"]);
+    assert_eq!(result(&output)["command"], "icm");
 
     // Usage errors leave no run directory behind.
     assert!(!sandbox.runs().exists());
