@@ -1063,19 +1063,20 @@ fn stop_ends_sessions_and_ps_lists_them() {
     let sessions = sandbox.cwd.join("target/icm/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
 
-    // A platform without its own stop (ios-device until phase 2) goes
-    // through the session file alone.
+    // A record whose platform has no stop of its own goes through the
+    // session file alone: its stop commands run as they stand. (ios-device's
+    // does not: its command names a pid on the phone, so the device is asked
+    // first; `tests/ios_device.rs`.) `stop <platform>` can name only the
+    // platforms icm knows, so this record belongs to one it does not.
     let pid = orphan_sleep();
     let marker = sandbox.path("stopped.txt");
-    let shut = sandbox.path("shutdown.txt");
     std::fs::write(
-        sessions.join("ios-device.json"),
+        sessions.join("other-device.json"),
         serde_json::json!({
-            "v": 1, "platform": "ios-device", "run": "20261006T000000Z-run-ios-device-0000",
+            "v": 1, "platform": "other-device", "run": "20261006T000000Z-run-other-device-0000",
             "pid": pid, "url": "http://127.0.0.1:9/",
-            "device": {"kind": "device", "id": "X", "name": "icm-iphone-17-ios-27.0", "managed": true},
+            "device": {"kind": "device", "id": "X", "name": "Owner device", "managed": false},
             "stop": [["/bin/sh", "-c", format!("echo stopped > '{}'", marker.display())]],
-            "shutdown": [["/bin/sh", "-c", format!("echo shut > '{}'", shut.display())]],
             "ports": {"http": 9}
         })
         .to_string(),
@@ -1084,16 +1085,39 @@ fn stop_ends_sessions_and_ps_lists_them() {
 
     let listed = sandbox.json(&["ps"]);
     assert_eq!(listed["exit"], 0, "{listed}");
-    assert_eq!(listed["sessions"][0]["platform"], "ios-device");
+    assert_eq!(listed["sessions"][0]["platform"], "other-device");
     assert_eq!(listed["sessions"][0]["running"], true);
     assert_eq!(listed["sessions"][0]["alive"][0], pid);
     assert_eq!(listed["next"][0]["cmd"], "icm stop --all --json -q");
 
+    let stopped = sandbox.json(&["stop", "--all"]);
+    assert_eq!(stopped["exit"], 0, "{stopped}");
+    assert!(wait_gone(pid), "the session's process is still running");
+    assert_eq!(stopped["stopped"][0]["processes"][0], pid);
+    assert_eq!(stopped["stopped"][0]["app"], serde_json::Value::Null);
+    assert!(marker.is_file(), "the stop command did not run");
+    assert!(!sessions.join("other-device.json").exists());
+
+    // An ios-device record with no stop command (no app pid was found) is
+    // ended through the file too, and `--shutdown` runs the shutdown
+    // commands of a device icm created.
+    let pid = orphan_sleep();
+    let shut = sandbox.path("shutdown.txt");
+    std::fs::write(
+        sessions.join("ios-device.json"),
+        serde_json::json!({
+            "v": 1, "platform": "ios-device", "run": "20261006T000000Z-run-ios-device-0000",
+            "pid": pid,
+            "device": {"kind": "device", "id": "X", "name": "icm-iphone-17-ios-27.0", "managed": true},
+            "shutdown": [["/bin/sh", "-c", format!("echo shut > '{}'", shut.display())]]
+        })
+        .to_string(),
+    )
+    .unwrap();
     let stopped = sandbox.json(&["stop", "ios-device", "--shutdown"]);
     assert_eq!(stopped["exit"], 0, "{stopped}");
     assert!(wait_gone(pid), "the session's process is still running");
     assert_eq!(stopped["stopped"][0]["processes"][0], pid);
-    assert!(marker.is_file(), "the stop command did not run");
     assert!(shut.is_file(), "the shutdown command did not run");
     assert!(!sessions.join("ios-device.json").exists());
 
@@ -1115,9 +1139,9 @@ fn stop_ends_sessions_and_ps_lists_them() {
 #[test]
 fn stop_never_signals_a_reused_pid_or_shuts_down_foreign_devices() {
     let sandbox = Sandbox::with_fixture("app");
-    // A platform without its own stop (ios-device until phase 2) goes
-    // through the session file alone; the dev platforms' own stops have
-    // their own tests.
+    // A record that no platform's own stop handles goes through the
+    // session file alone (ios-device's is such a record, which has no stop
+    // command here); the dev platforms' own stops have their own tests.
     let sessions = sandbox.cwd.join("target/icm/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
 

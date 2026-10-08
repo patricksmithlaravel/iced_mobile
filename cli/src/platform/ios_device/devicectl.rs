@@ -198,6 +198,60 @@ pub fn app_pids(text: &str, bundle: &str, executable: &str) -> Vec<i64> {
         .unwrap_or_default()
 }
 
+/// One process of `devicectl device info processes`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    /// Its pid on the device.
+    pub pid: i64,
+    /// Its executable as devicectl writes it (a `file://` URL), when it
+    /// names one.
+    pub executable: Option<String>,
+}
+
+impl Listed {
+    /// The executable without its `file://`, or `?`.
+    pub fn program(&self) -> &str {
+        let path = self.executable.as_deref().unwrap_or("?");
+        path.strip_prefix("file://").unwrap_or(path)
+    }
+}
+
+/// Every running process in `devicectl device info processes
+/// --json-output` JSON, or why the text is not such a listing. A failed
+/// devicectl writes JSON too (`info.outcome` `failed`, an `error`), so
+/// that, or any text without `result.runningProcesses`, is an error, never
+/// an empty device: a listing that could not be had says nothing about
+/// what runs.
+pub fn running_processes(text: &str) -> Result<Vec<Listed>, String> {
+    let json: Value = serde_json::from_str(text)
+        .map_err(|error| format!("devicectl's process list is not JSON: {error}"))?;
+    if let Some(outcome) = json.pointer("/info/outcome").and_then(Value::as_str)
+        && outcome != "success"
+    {
+        let said = json
+            .pointer("/error/localizedDescription")
+            .and_then(Value::as_str)
+            .unwrap_or("no reason given");
+        return Err(format!("devicectl's outcome was {outcome}: {said}"));
+    }
+    let processes = json
+        .pointer("/result/runningProcesses")
+        .and_then(Value::as_array)
+        .ok_or("devicectl's process list has no result.runningProcesses")?;
+    Ok(processes
+        .iter()
+        .filter_map(|process| {
+            Some(Listed {
+                pid: process.get("processIdentifier").and_then(Value::as_i64)?,
+                executable: process
+                    .get("executable")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect())
+}
+
 /// A physical device entry as devicectl 642 writes it (icm's tests and
 /// fake tools).
 pub fn fixture_device(name: &str, udid: &str, connected: bool, developer_mode: bool) -> Value {
@@ -254,6 +308,39 @@ mod tests {
         assert_eq!(devices[2].os, "18.3");
         assert!(devices[2].connected);
         assert!(parse_devices("{}").is_err());
+    }
+
+    #[test]
+    fn a_process_list_that_could_not_be_had_is_no_empty_device() {
+        let text = json!({"info": {"outcome": "success"}, "result": {"runningProcesses": [
+            {"executable": "file:///private/var/containers/Bundle/Application/X/App.app/app", "processIdentifier": 812},
+            {"processIdentifier": 1}
+        ]}})
+        .to_string();
+        let listed = running_processes(&text).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].pid, 812);
+        assert_eq!(
+            listed[0].program(),
+            "/private/var/containers/Bundle/Application/X/App.app/app"
+        );
+        assert_eq!(listed[1].executable, None);
+        assert_eq!(listed[1].program(), "?");
+        // A device that runs nothing answers with an empty list.
+        assert!(
+            running_processes(r#"{"result":{"runningProcesses":[]}}"#)
+                .unwrap()
+                .is_empty()
+        );
+        // What a failed devicectl writes, and what is no listing at all.
+        let failed = json!({"info": {"outcome": "failed"},
+            "error": {"localizedDescription": "The device is not connected."}})
+        .to_string();
+        let error = running_processes(&failed).unwrap_err();
+        assert!(error.contains("not connected"), "{error}");
+        assert!(running_processes(r#"{"result":{}}"#).is_err());
+        assert!(running_processes("").is_err());
+        assert!(running_processes("not json").is_err());
     }
 
     #[test]

@@ -15,7 +15,9 @@
 # ICM_FAKE_DSYM=empty writes no line table), dwarfdump --debug-line,
 # strip, assetutil (ICM_FAKE_ICON=clear reports a transparent icon) and
 # devicectl (devices from $S/devicectl-devices.json; `leak` and
-# `leak-panic` log the secret on the console too).
+# `leak-panic` log the secret on the console too; `device info processes`
+# lists the app while its fake console runs, or what $S/processes.json says,
+# and fails while $S/processes-fail exists).
 S="$ICM_FAKE_STATE"
 {
   echo "$*"
@@ -293,8 +295,19 @@ devicectl)
     esac
     ;;
   "device info")
-    if [ -f "$S/device-app.pid" ] && kill -0 "$(cat "$S/device-app.pid")" 2> /dev/null; then
-      printf '{"result":{"runningProcesses":[{"executable":"file:///private/var/containers/Bundle/Application/X/Fixture.app/fixture-app","processIdentifier":4242}]}}\n' > "$json"
+    if [ -f "$S/processes-fail" ]; then
+      # $S/processes-fail: devicectl cannot reach the device. It writes its
+      # failure as JSON, and exits 1.
+      printf '{"info":{"outcome":"failed"},"error":{"localizedDescription":"The device is not connected."}}\n' > "$json"
+      echo "ERROR: The device is not connected." >&2
+      exit 1
+    elif [ -f "$S/processes.json" ]; then
+      # $S/processes.json: what the device lists, whatever the "app" does.
+      cp "$S/processes.json" "$json"
+    elif [ -f "$S/device-app.pid" ] && kill -0 "$(cat "$S/device-app.pid")" 2> /dev/null; then
+      # The app's executable inside its bundle is the binary icm built
+      # ($ICM_FAKE_BIN, as the fake cargo names it).
+      printf '{"result":{"runningProcesses":[{"executable":"file:///private/var/containers/Bundle/Application/X/Fixture.app/%s","processIdentifier":4242}]}}\n' "${ICM_FAKE_BIN:-fixture-app}" > "$json"
     else
       printf '{"result":{"runningProcesses":[]}}\n' > "$json"
     fi

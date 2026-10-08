@@ -16,9 +16,10 @@
 //!  "url":"http://127.0.0.1:8787/"}
 //! ```
 //!
-//! `icm stop <platform>` runs the `stop` commands, then sends SIGTERM (and
-//! after a grace period SIGKILL) to each recorded process, to its whole
-//! group when it leads one. A pid is signalled only while it still is the
+//! `icm stop <platform>` runs the `stop` commands (an ios-device record's,
+//! which names a pid on the phone, only after the device has listed that
+//! pid as the app), then sends SIGTERM (and after a grace period SIGKILL)
+//! to each recorded process, to its whole group when it leads one. A pid is signalled only while it still is the
 //! process icm started: it has the `identity` recorded for it (the
 //! process's start time, [`crate::procid`]; `identity` beside `pid`, and
 //! on each entry of `pids`), or, in a record written before identities, it

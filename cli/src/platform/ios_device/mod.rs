@@ -832,6 +832,136 @@ fn app_env(values: &[String]) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
+/// The command that terminates the app's process on the device, which `run`
+/// stores in the session's `stop`. `stop` runs it only when [`app_process`]
+/// finds the device listing that pid as the app.
+fn terminate_argv(udid: &str, pid: i64) -> Vec<String> {
+    [
+        "xcrun",
+        "devicectl",
+        "device",
+        "process",
+        "terminate",
+        "--device",
+        udid,
+        "--pid",
+        &pid.to_string(),
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+/// What the device says about the app process a session recorded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppProcess {
+    /// The device lists the recorded pid running the app's executable, so
+    /// the recorded stop command ends the app icm launched. (devicectl
+    /// lists no start time to tell a later process with the same pid and
+    /// executable apart; the pid and executable together are what there is.)
+    Running,
+    /// The device answered, and the recorded pid is not the app: no process
+    /// has it, or another one does (what is said). Nothing to terminate.
+    NotRunning(String),
+    /// icm could not tell: the device or devicectl would not answer, or the
+    /// record does not say what to look for (why). The recorded pid may
+    /// name any process on the phone, so nothing is terminated.
+    Unconfirmed(String),
+}
+
+/// Whether the recorded app pid, listed by the device, is the app: the pid
+/// must run `<bundle>/<executable>`. A process of the app under another pid
+/// is not what icm launched, so it is not the one to end.
+fn judge_app_process(
+    listing: &[devicectl::Listed],
+    bundle: &str,
+    executable: &str,
+    pid: i64,
+) -> AppProcess {
+    let suffix = format!("/{bundle}/{executable}");
+    let is_app = |process: &devicectl::Listed| {
+        process
+            .executable
+            .as_deref()
+            .is_some_and(|path| path.ends_with(&suffix))
+    };
+    match listing.iter().find(|process| process.pid == pid) {
+        Some(process) if is_app(process) => AppProcess::Running,
+        Some(process) => AppProcess::NotRunning(format!(
+            "pid {pid} is {} on the device now, not the app",
+            process.program()
+        )),
+        None => {
+            let others: Vec<String> = listing
+                .iter()
+                .filter(|process| is_app(process))
+                .map(|process| process.pid.to_string())
+                .collect();
+            AppProcess::NotRunning(if others.is_empty() {
+                format!("no process has pid {pid} on the device")
+            } else {
+                format!(
+                    "no process has pid {pid} on the device; the app runs as pid {}, which icm did not launch",
+                    others.join(", ")
+                )
+            })
+        }
+    }
+}
+
+/// Asks the device whether the app process `session` recorded is still the
+/// app (`devicectl device info processes`), before `stop` runs the recorded
+/// terminate command: a pid on the phone is reused like any other, and the
+/// command would end whatever process has it now. Anything that stops the
+/// question from being answered, or the record from saying what to look
+/// for, is [`AppProcess::Unconfirmed`], never a reason to terminate.
+pub fn app_process(ctx: &Ctx, session: &Session) -> AppProcess {
+    let unconfirmed = |why: String| AppProcess::Unconfirmed(why);
+    let Some(device) = session.device.as_ref().filter(|d| !d.id.is_empty()) else {
+        return unconfirmed("the record names no device".into());
+    };
+    let Some(pid) = session.extra.get("app_pid").and_then(Value::as_i64) else {
+        return unconfirmed("the record names no app pid".into());
+    };
+    let app = |key: &str| {
+        session
+            .app
+            .as_ref()
+            .and_then(|app| app.get(key))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let (Some(bundle), Some(executable)) = (app("bundle"), app("bin")) else {
+        return unconfirmed("the record does not name the app's bundle and executable".into());
+    };
+    // The stored command is the one for this device and pid: a record that
+    // says otherwise would end a process the check below did not look at.
+    let expected = terminate_argv(&device.id, pid);
+    if let Some(other) = session.stop.iter().find(|argv| **argv != expected) {
+        return unconfirmed(format!(
+            "the record's stop command (`{}`) is not the one for pid {pid} on {}",
+            other.join(" "),
+            device.id
+        ));
+    }
+    let xcode = match host_xcode(ctx) {
+        Ok(xcode) => xcode,
+        Err(error) => return unconfirmed(error.detail),
+    };
+    let text = match devicectl_json(
+        ctx,
+        &xcode,
+        &["device", "info", "processes", "--device", &device.id],
+        "processes",
+    ) {
+        Ok(text) => text,
+        Err(error) => return unconfirmed(error.detail),
+    };
+    match devicectl::running_processes(&text) {
+        Ok(listing) => judge_app_process(&listing, bundle, executable, pid),
+        Err(why) => unconfirmed(why),
+    }
+}
+
 /// Ends this project's previous device session (its console process; the
 /// app itself is replaced by `--terminate-existing`).
 fn end_previous(sessions_dir: &Path) {
@@ -1089,17 +1219,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     // The session, for logs, shot, stop and ps.
     let mut stop = Vec::new();
     if let Some(pid) = app_pid {
-        stop.push(vec![
-            "xcrun".to_string(),
-            "devicectl".into(),
-            "device".into(),
-            "process".into(),
-            "terminate".into(),
-            "--device".into(),
-            device.udid.clone(),
-            "--pid".into(),
-            pid.to_string(),
-        ]);
+        stop.push(terminate_argv(&device.udid, i64::from(pid)));
     }
     let mut record = Session {
         v: 1,
@@ -1326,6 +1446,62 @@ mod tests {
                 .unwrap_err()
                 .detail
                 .contains("no physical")
+        );
+    }
+
+    fn listed(pid: i64, executable: Option<&str>) -> devicectl::Listed {
+        devicectl::Listed {
+            pid,
+            executable: executable.map(str::to_string),
+        }
+    }
+
+    /// Only the recorded pid, running the app's executable, is the app.
+    #[test]
+    fn the_recorded_pid_is_the_app_only_while_it_runs_the_apps_executable() {
+        let app = "file:///private/var/containers/Bundle/Application/X/Fixture.app/fixture-app";
+        let judge = |listing: &[devicectl::Listed]| {
+            judge_app_process(listing, "Fixture.app", "fixture-app", 4242)
+        };
+        assert_eq!(
+            judge(&[
+                listed(50, Some("file:///usr/libexec/backboardd")),
+                listed(4242, Some(app))
+            ]),
+            AppProcess::Running
+        );
+        // Another process has the pid.
+        let AppProcess::NotRunning(why) =
+            judge(&[listed(4242, Some("file:///usr/libexec/backboardd"))])
+        else {
+            panic!("another process under the pid was taken for the app");
+        };
+        assert!(why.contains("/usr/libexec/backboardd"), "{why}");
+        let AppProcess::NotRunning(why) = judge(&[listed(4242, None)]) else {
+            panic!("a process with no executable was taken for the app");
+        };
+        assert!(why.contains("pid 4242 is ?"), "{why}");
+        // The app runs under another pid: not the one icm launched.
+        let AppProcess::NotRunning(why) = judge(&[listed(5000, Some(app))]) else {
+            panic!("the app under another pid was taken for the recorded one");
+        };
+        assert!(why.contains("the app runs as pid 5000"), "{why}");
+        // Nothing runs.
+        assert!(
+            matches!(judge(&[]), AppProcess::NotRunning(why) if why.contains("no process has pid 4242"))
+        );
+        // Another app's executable of the same name is not this app's.
+        assert!(matches!(
+            judge_app_process(&[listed(4242, Some(app))], "Other.app", "fixture-app", 4242),
+            AppProcess::NotRunning(_)
+        ));
+    }
+
+    #[test]
+    fn the_stop_command_is_the_one_run_stores() {
+        assert_eq!(
+            terminate_argv("UDID-1", 812).join(" "),
+            "xcrun devicectl device process terminate --device UDID-1 --pid 812"
         );
     }
 

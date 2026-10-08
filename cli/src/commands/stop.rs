@@ -12,9 +12,14 @@
 //! asks the session over its control channel first). Any other record
 //! ([`crate::session`]) is ended by what it says: its stop commands run,
 //! the processes icm started get SIGTERM (then SIGKILL), and the file is
-//! removed. `--shutdown` also shuts down the icm-managed simulator or
-//! emulator (`icm-` names only, never `icm-test-` ones, never a device
-//! icm did not create, and never one icm booted for another project:
+//! removed. An ios-device record's stop command names a pid on the phone,
+//! so the device is asked first whether that pid is still the app
+//! ([`crate::platform::ios_device::app_process`]); when it cannot say, the
+//! command does not run, a WARN says so and the record stays (the result's
+//! `unverified` lists the device). `--shutdown` also shuts down the
+//! icm-managed simulator or emulator (`icm-` names only, never `icm-test-`
+//! ones, never a device icm did not create, and never one icm booted for
+//! another project:
 //! [`crate::platform::ios_sim::owner`], [`crate::android::session::OWNER_PROP`]).
 //! For iOS, with an ios-sim session only the session's simulator is a
 //! candidate, and its own stop decides; without one, only the simulator
@@ -69,6 +74,9 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     // ones it could not confirm it shut down (adb would not say).
     let mut still_running: Vec<String> = Vec::new();
     let mut unverified: Vec<String> = Vec::new();
+    // The apps on physical devices whose process the device would not
+    // confirm, as (device id, device name): nothing was terminated.
+    let mut apps_unconfirmed: Vec<(String, String)> = Vec::new();
     for platform in &platforms {
         match stop_platform(
             ctx,
@@ -111,7 +119,26 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
             continue;
         }
         match session {
-            Ok(session) => stopped.push(stop_one(ctx, &path, &session, args.shutdown)),
+            Ok(session) => {
+                let entry = stop_one(ctx, &path, &session, args.shutdown);
+                // Not stopped: its record stays, and the WARN says why.
+                if entry["app"] == "unconfirmed" {
+                    let device = session.device.clone().unwrap_or_default();
+                    let id = if device.id.is_empty() {
+                        platform.clone()
+                    } else {
+                        device.id.clone()
+                    };
+                    let name = if device.name.is_empty() {
+                        id.clone()
+                    } else {
+                        device.name
+                    };
+                    apps_unconfirmed.push((id, name));
+                } else {
+                    stopped.push(entry);
+                }
+            }
             Err(message) => {
                 ctx.rep.check(
                     Check::warn(CheckId::RunNoSession, message).evidence(Evidence::file(&path)),
@@ -152,7 +179,16 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     ctx.rep.set("stopped", Value::Array(stopped));
     ctx.rep.set("shutdown", json!(shut_down));
     ctx.rep.set("still_running", json!(still_running));
-    ctx.rep.set("unverified", json!(unverified));
+    ctx.rep.set(
+        "unverified",
+        json!(
+            unverified
+                .iter()
+                .cloned()
+                .chain(apps_unconfirmed.iter().map(|(id, _)| id.clone()))
+                .collect::<Vec<_>>()
+        ),
+    );
     let what = match args.platform {
         Some(platform) => platform.as_str().to_string(),
         None => "every platform".to_string(),
@@ -162,13 +198,28 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         (n, 0) => format!("stopped {n} session(s)"),
         (n, d) => format!("stopped {n} session(s) and shut down {d} managed device(s)"),
     };
-    ctx.rep.summary(
-        match crate::android::pipeline::not_shut_down_note(&still_running, &unverified) {
-            None => summary,
-            Some(note) if count == 0 && shut_down.is_empty() => note,
-            Some(note) => format!("{summary}; {note}"),
-        },
-    );
+    let mut notes: Vec<String> = Vec::new();
+    notes.extend(crate::android::pipeline::not_shut_down_note(
+        &still_running,
+        &unverified,
+    ));
+    if !apps_unconfirmed.is_empty() {
+        notes.push(format!(
+            "the app on {} may still be running (devicectl could not confirm it)",
+            apps_unconfirmed
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    ctx.rep.summary(if notes.is_empty() {
+        summary
+    } else if count == 0 && shut_down.is_empty() {
+        notes.join("; ")
+    } else {
+        format!("{summary}; {}", notes.join("; "))
+    });
     Ok(())
 }
 
@@ -188,7 +239,9 @@ fn plan(ctx: &Ctx, dir: &Path, platforms: &[Platform], shutdown: bool) {
             Platform::IosSim => "xcrun simctl terminate the app and stop the log collector",
             Platform::Android => "am force-stop the app on the session's device",
             Platform::Web => "ask the session host to stop, then signal it and headless Chrome",
-            Platform::IosDevice => "end the processes the record names",
+            Platform::IosDevice => {
+                "ask the device (devicectl device info processes) whether the recorded pid is still the app and terminate it only then, and end the console process the record names while it is still the one icm started"
+            }
         };
         plan.push(crate::plan::Step::internal(
             &format!("{}.stop", platform.as_str()),
@@ -268,16 +321,76 @@ fn stop_platform(
     })
 }
 
-/// Stops one session and removes its file.
+/// Stops one session and removes its file, unless the app on its physical
+/// device could not be confirmed (`"app": "unconfirmed"` in the entry): the
+/// record then stays for the next stop.
+///
+/// The record's stop commands run as they are, except for an ios-device
+/// record's. Its command names a pid on the phone, which the phone reuses
+/// like any other, so the device is asked first whether that pid is still
+/// the app ([`crate::platform::ios_device::app_process`]): the command runs
+/// only then (`"app": "terminated"`). When the device lists another process,
+/// or none, there is nothing to end (`"app": "not_running"`); when it cannot
+/// be asked, nothing is ended and a WARN says so. The console process icm
+/// started is ended in every case, once its own identity checks out.
 fn stop_one(ctx: &Ctx, path: &Path, session: &Session, shutdown: bool) -> Value {
+    use crate::platform::ios_device::{self, AppProcess};
     let written = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     let platform = session.platform.clone();
 
+    let remote = (platform == ios_device::PLATFORM && !session.stop.is_empty())
+        .then(|| ios_device::app_process(ctx, session));
     let mut commands = Vec::new();
-    for argv in &session.stop {
-        if let Some(cmd) = command(argv, Duration::from_secs(30)) {
-            run_quietly(ctx, &format!("stop.{platform}"), &cmd);
-            commands.push(cmd.display());
+    let mut app = Value::Null;
+    let mut app_note = Value::Null;
+    match &remote {
+        Some(AppProcess::NotRunning(why)) => {
+            ctx.rep.progress(format!(
+                "{platform}: the app is not running on the device ({why}); nothing to terminate"
+            ));
+            app = json!("not_running");
+            app_note = json!(why);
+        }
+        Some(AppProcess::Unconfirmed(why)) => {
+            let device = session.device.clone().unwrap_or_default();
+            let udid = if device.id.is_empty() {
+                "<udid>"
+            } else {
+                device.id.as_str()
+            };
+            ctx.rep.check(
+                Check::warn(
+                    CheckId::IosDeviceStopUnconfirmed,
+                    format!(
+                        "{platform}: did not terminate the app on {}: {why} (the recorded pid may be any process on the phone now)",
+                        if device.name.is_empty() { udid } else { &device.name }
+                    ),
+                )
+                .fix(
+                    "Connect and unlock the device, then stop again (icm kept the record for that); check what runs before ending anything by hand:",
+                    &[
+                        &format!("xcrun devicectl device info processes --device {udid}"),
+                        "icm stop ios-device --json -q",
+                    ],
+                ),
+            );
+            app = json!("unconfirmed");
+        }
+        Some(AppProcess::Running) | None => {
+            let mut all_ok = true;
+            for argv in &session.stop {
+                if let Some(cmd) = command(argv, Duration::from_secs(30)) {
+                    all_ok &= run_quietly(ctx, &format!("stop.{platform}"), &cmd);
+                    commands.push(cmd.display());
+                }
+            }
+            if remote.is_some() {
+                app = json!(if all_ok {
+                    "terminated"
+                } else {
+                    "terminate_failed"
+                });
+            }
         }
     }
 
@@ -324,9 +437,17 @@ fn stop_one(ctx: &Ctx, path: &Path, session: &Session, shutdown: bool) -> Value 
         }
     }
 
-    let _ = std::fs::remove_file(path);
+    let unconfirmed = app == "unconfirmed";
+    if !unconfirmed {
+        let _ = std::fs::remove_file(path);
+    }
     ctx.rep.progress(format!(
-        "{platform}: stopped{}{}",
+        "{platform}: {}{}{}",
+        if unconfirmed {
+            "kept the record, the app may still run"
+        } else {
+            "stopped"
+        },
         if ended.is_empty() {
             String::new()
         } else {
@@ -353,6 +474,8 @@ fn stop_one(ctx: &Ctx, path: &Path, session: &Session, shutdown: bool) -> Value 
         "already_gone": stale,
         "left_running": unverified.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
         "commands": commands,
+        "app": app,
+        "app_note": app_note,
         "shutdown": shut,
     })
 }

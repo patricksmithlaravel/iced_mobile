@@ -122,6 +122,17 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   kill` is reported as still running with the failure, not as having ignored the kill. A recorded
   emulator process that the OS would not describe settles nothing either: adb is asked, as it is
   when there is no process.
+- `icm stop ios-device` (and `icm stop --all`) terminates the app on the phone only after the device
+  lists the recorded pid as the app. The record's `devicectl device process terminate --pid` names
+  a pid of the phone, which the phone reuses like any other, so `stop` asks `devicectl device info
+  processes` first and runs the command only when that pid runs the app's executable. When the
+  device lists another process under the pid, or none, nothing is terminated and the record is
+  removed. When the device cannot be asked (not connected or locked, devicectl failing), nothing is
+  terminated, `ios.device.stop_unconfirmed` warns, the device is listed as `unverified` in the
+  result (the summary says the app may still be running), and the record stays so that the next
+  `stop` asks again. icm's own console process is ended in every case. Before, the stored command
+  ran as it stood, so an app that had exited or been restarted left its pid to another process of
+  the phone, which `stop` terminated.
 - Plain `icm stop android` (and `icm stop --all`) says why it left the app running when the device
   names another project as the emulator's owner (`android.emulator.shared`), with the `adb` command
   that stops the app by hand, where it said nothing.

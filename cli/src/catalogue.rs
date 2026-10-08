@@ -487,6 +487,9 @@ catalogue! {
     IosDeviceLaunchFailed = "ios.device.launch_failed", Device, Fail, Agent,
         "devicectl could not launch the app on the device",
         "Unlock the device and read the step log; a first launch may need the developer trusted in Settings > General > VPN & Device Management.";
+    IosDeviceStopUnconfirmed = "ios.device.stop_unconfirmed", Device, Warn, Agent,
+        "icm could not confirm that the recorded process on the device is the app, so it did not terminate it",
+        "Connect and unlock the device, then run `icm stop ios-device` again: icm kept the session's record for that. A pid on the phone is reused like any other, so icm ends the app only after `xcrun devicectl device info processes` lists the recorded pid running the app's executable; to end it yourself, check that list first.";
     IosShotStoreSize = "ios.shot.store_size", Device, Fail, Agent,
         "The simulator's screen is not a size App Store Connect takes for iPhone screenshots",
         "Run the app on a 6.9-inch or 6.5-inch iPhone simulator: `icm run ios-sim --store`, then `icm shot ios-sim --store`.";

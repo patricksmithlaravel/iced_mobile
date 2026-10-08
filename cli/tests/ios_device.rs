@@ -241,19 +241,76 @@ impl Device {
     fn log(&self, name: &str) -> String {
         std::fs::read_to_string(self.state().join(name)).unwrap_or_default()
     }
+
+    /// What the fake device lists for `devicectl device info processes`,
+    /// whatever its fake "app" does.
+    fn list_processes(&self, processes: &[Value]) {
+        std::fs::write(
+            self.state().join("processes.json"),
+            json!({"info": {"outcome": "success"}, "result": {"runningProcesses": processes}})
+                .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The fake device's listing is back to following its fake "app".
+    fn list_processes_as_the_app_runs(&self) {
+        let _ = std::fs::remove_file(self.state().join("processes.json"));
+    }
+
+    /// Whether a command of `xcrun devicectl device process terminate` ran.
+    fn terminated(&self) -> bool {
+        self.log("xcrun.log")
+            .lines()
+            .any(|line| line.starts_with("devicectl device process terminate "))
+    }
+
+    fn session_path(&self) -> PathBuf {
+        self.dir().join("target/icm/sessions/ios-device.json")
+    }
+
+    fn session(&self) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(self.session_path()).unwrap()).unwrap()
+    }
+}
+
+/// The app's executable on the fake device: the binary the fake cargo built
+/// (`ICM_FAKE_BIN`, which `Device::json` sets), in the bundle `Fixture.app`.
+const APP_EXECUTABLE: &str =
+    "file:///private/var/containers/Bundle/Application/X/Fixture.app/release-app";
+
+fn process(pid: i64, executable: &str) -> Value {
+    json!({"executable": executable, "processIdentifier": pid})
+}
+
+/// Ends what the fake devicectl left running under `pid`, a number a file
+/// of the test holds: its console, a `sleep 30` once the script has exec'd
+/// it. Whatever has ended since may have left the number to another
+/// process, so one shell command looks at the process and signals it only
+/// while it still is that `sleep 30`.
+fn end_fake_console(pid: &str) {
+    let _ = Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"[ "$(/bin/ps -p "$1" -o command= 2>/dev/null)" = "sleep 30" ] && kill "$1""#,
+            "sh",
+            pid.trim(),
+        ])
+        .stderr(Stdio::null())
+        .status();
 }
 
 impl Drop for Device {
     fn drop(&mut self) {
         if let Ok(pid) = std::fs::read_to_string(self.state().join("device-app.pid")) {
-            let _ = Command::new("kill").arg(pid.trim()).status();
+            end_fake_console(&pid);
         }
         if let Ok(text) =
             std::fs::read_to_string(self.dir().join("target/icm/sessions/ios-device.json"))
             && let Ok(session) = serde_json::from_str::<Value>(&text)
             && let Some(pid) = session["pid"].as_i64()
         {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
+            end_fake_console(&pid.to_string());
         }
     }
 }
@@ -355,17 +412,29 @@ fn run_logs_shot_and_stop_on_a_device() {
     let ps = device.json(&["ps"]);
     assert_eq!(ps["exit"], 0, "{ps}");
 
+    let before = device.log("xcrun.log").len();
     let stop = device.json(&["stop", "ios-device"]);
     assert_eq!(stop["exit"], 0, "{stop}");
-    assert!(device.log("xcrun.log").contains(&format!(
-        "devicectl device process terminate --device {UDID} --pid 4242"
-    )));
+    // The device was asked what runs under the recorded pid first, and only
+    // because it lists the app there is the recorded command run.
+    let calls: Vec<String> = device.log("xcrun.log")[before..]
+        .lines()
+        .filter(|line| line.starts_with("devicectl "))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(calls.len(), 2, "{calls:?}");
     assert!(
-        !device
-            .dir()
-            .join("target/icm/sessions/ios-device.json")
-            .exists()
+        calls[0].starts_with(&format!("devicectl device info processes --device {UDID} ")),
+        "{calls:?}"
     );
+    assert_eq!(
+        calls[1],
+        format!("devicectl device process terminate --device {UDID} --pid 4242")
+    );
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
+    assert!(!device.session_path().exists());
 }
 
 /// `run` records the identity of the console process it starts, and `stop`
@@ -387,9 +456,13 @@ fn stop_signals_only_the_console_process_icm_started() {
     let alive = || icm::procid::of(pid as i32).is_some();
 
     // Another process has the pid now: the record keeps the identity of
-    // the one that had it. `stop` runs no command here, only the pid's test.
+    // the one that had it. The record's stop command stays, and the device
+    // lists no app (the fake one is that console process, which this test
+    // keeps out of the stop command's reach), so only the pid's test is
+    // left to decide.
+    assert!(!session["stop"].as_array().unwrap().is_empty());
+    device.list_processes(&[]);
     session["identity"] = json!({"start": "1791334000.000001", "exe": "/usr/bin/xcrun"});
-    session["stop"] = json!([]);
     std::fs::write(&path, session.to_string()).unwrap();
     let stop = device.json(&["stop", "ios-device"]);
     assert_eq!(stop["exit"], 0, "{stop}");
@@ -398,6 +471,7 @@ fn stop_signals_only_the_console_process_icm_started() {
     std::thread::sleep(std::time::Duration::from_millis(300));
     assert!(alive(), "a process that only has the pid was signalled");
     assert!(!path.exists());
+    assert!(!device.terminated(), "{}", device.log("xcrun.log"));
 
     // With the identity run recorded, the process is ended.
     session["identity"] = serde_json::to_value(&recorded).unwrap();
@@ -405,6 +479,190 @@ fn stop_signals_only_the_console_process_icm_started() {
     let stop = device.json(&["stop", "ios-device"]);
     assert_eq!(stop["stopped"][0]["processes"], json!([pid]), "{stop}");
     assert!(!alive());
+    assert!(!device.terminated(), "{}", device.log("xcrun.log"));
+}
+
+/// `stop` used to run the record's `devicectl device process terminate
+/// --device <udid> --pid <pid>` as it stood. The pid is the app's on the
+/// phone, where pids are reused like anywhere: an app that had exited, or
+/// been restarted by hand, left the pid to another process, which the
+/// command then terminated. The device is asked first, and the stored
+/// command (kept in the record here) is run only when the device lists that
+/// pid as the app: not when another process has it, not when no process
+/// does, and the app running under another pid is not the one icm launched.
+#[test]
+fn stop_leaves_a_process_that_took_the_apps_pid_alone() {
+    for (case, listing, why) in [
+        (
+            "another process has the pid",
+            vec![
+                process(50, "file:///usr/libexec/backboardd"),
+                process(
+                    4242,
+                    "file:///private/var/containers/Bundle/Application/Y/Other.app/other",
+                ),
+            ],
+            "pid 4242 is /private/var/containers/Bundle/Application/Y/Other.app/other on the device now",
+        ),
+        (
+            "the app runs under another pid",
+            vec![process(5000, APP_EXECUTABLE)],
+            "the app runs as pid 5000",
+        ),
+        (
+            "nothing has the pid",
+            vec![process(50, "file:///usr/libexec/backboardd")],
+            "no process has pid 4242",
+        ),
+    ] {
+        let device = Device::new();
+        let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+        assert_eq!(run["exit"], 0, "{case}: {run}");
+        assert_eq!(run["process"]["pid"], 4242, "{case}: {run}");
+        let stored = device.session()["stop"].clone();
+        assert_eq!(stored.as_array().unwrap().len(), 1, "{case}");
+        device.list_processes(&listing);
+
+        let stop = device.json(&["stop", "ios-device"]);
+        assert_eq!(stop["exit"], 0, "{case}: {stop}");
+        let xcrun = device.log("xcrun.log");
+        assert!(
+            xcrun.contains(&format!("devicectl device info processes --device {UDID} ")),
+            "{case}: the device was not asked: {xcrun}"
+        );
+        assert!(
+            !device.terminated(),
+            "{case}: the recorded command ran for a pid the device does not list as the app: {xcrun}"
+        );
+        assert_eq!(stop["stopped"][0]["app"], "not_running", "{case}: {stop}");
+        let note = stop["stopped"][0]["app_note"].as_str().unwrap();
+        assert!(note.contains(why), "{case}: {note}");
+        assert_eq!(stop["stopped"][0]["commands"], json!([]), "{case}: {stop}");
+        assert_eq!(stop["unverified"], json!([]), "{case}: {stop}");
+        assert_eq!(stop["warnings"], json!([]), "{case}: {stop}");
+        assert_eq!(stop["checks"]["failed"], json!([]), "{case}: {stop}");
+        assert!(!device.session_path().exists(), "{case}");
+    }
+}
+
+/// When the device cannot be asked (not connected, locked, devicectl
+/// failing), whose process the recorded pid is cannot be told either, so
+/// nothing is terminated: a WARN says so, the result lists the device as
+/// `unverified` instead of reporting the app stopped, and the record stays
+/// so that the next stop can ask again. The console process icm started is
+/// ended all the same, since its own identity is checked locally.
+#[test]
+fn stop_terminates_nothing_it_could_not_confirm_and_keeps_the_record() {
+    let device = Device::new();
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let stored = device.session()["stop"].clone();
+    let console_pid = device.session()["pid"].as_i64().unwrap() as i32;
+    std::fs::write(device.state().join("processes-fail"), "").unwrap();
+
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(!device.terminated(), "{}", device.log("xcrun.log"));
+    assert_eq!(stop["stopped"], json!([]), "{stop}");
+    assert_eq!(stop["unverified"], json!([UDID]), "{stop}");
+    assert_eq!(
+        stop["summary"],
+        "the app on Jo's iPhone may still be running (devicectl could not confirm it)",
+        "{stop}"
+    );
+    let warned: Vec<&Value> = stop["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["id"] == "ios.device.stop_unconfirmed")
+        .collect();
+    assert_eq!(warned.len(), 1, "{stop}");
+    let detail = warned[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("ios-device: did not terminate the app on Jo's iPhone: ")
+            && detail.contains("not connected"),
+        "{detail}"
+    );
+    assert_eq!(
+        warned[0]["fix"]["commands"],
+        json!([
+            format!("xcrun devicectl device info processes --device {UDID}"),
+            "icm stop ios-device --json -q"
+        ])
+    );
+    // The record stays, with its stop command; icm's own console is gone.
+    assert_eq!(device.session()["stop"], stored);
+    assert!(icm::procid::of(console_pid).is_none(), "the console runs");
+
+    // The device answers again, and lists the app under the recorded pid:
+    // the retry terminates it with the stored command and removes the record.
+    std::fs::remove_file(device.state().join("processes-fail")).unwrap();
+    device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(device.terminated(), "{}", device.log("xcrun.log"));
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
+    assert!(!device.session_path().exists());
+}
+
+/// A device that answers with text that is no process list is not an empty
+/// device: devicectl writes its failures as JSON too.
+#[test]
+fn an_answer_that_is_no_process_list_confirms_nothing() {
+    for (case, text) in [
+        ("an empty answer", ""),
+        (
+            "a failure written as JSON",
+            r#"{"info":{"outcome":"failed"},"error":{"localizedDescription":"locked"}}"#,
+        ),
+        ("a listing without the processes", r#"{"result":{}}"#),
+    ] {
+        let device = Device::new();
+        let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+        assert_eq!(run["exit"], 0, "{case}: {run}");
+        std::fs::write(device.state().join("processes.json"), text).unwrap();
+
+        let stop = device.json(&["stop", "ios-device"]);
+        assert_eq!(stop["exit"], 0, "{case}: {stop}");
+        assert!(!device.terminated(), "{case}");
+        assert_eq!(stop["unverified"], json!([UDID]), "{case}: {stop}");
+        assert!(device.session_path().exists(), "{case}");
+    }
+}
+
+/// The stored command must be the one for the pid and device the record
+/// names: the device is asked about `app_pid`, so a command for another
+/// pid would end a process nothing checked.
+#[test]
+fn a_stored_command_for_another_pid_is_not_run() {
+    let device = Device::new();
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let mut session = device.session();
+    session["stop"][0][8] = json!("99");
+    std::fs::write(device.session_path(), session.to_string()).unwrap();
+    device.list_processes(&[
+        process(4242, APP_EXECUTABLE),
+        process(99, "file:///sbin/launchd"),
+    ]);
+
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(!device.terminated(), "{}", device.log("xcrun.log"));
+    assert_eq!(stop["unverified"], json!([UDID]), "{stop}");
+    let detail = stop["warnings"][0]["detail"].as_str().unwrap();
+    assert!(detail.contains("is not the one for pid 4242"), "{detail}");
+    assert!(device.session_path().exists());
+
+    // The same record with its own command is run.
+    session["stop"][0][8] = json!("4242");
+    std::fs::write(device.session_path(), session.to_string()).unwrap();
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert!(device.terminated());
+    device.list_processes_as_the_app_runs();
 }
 
 #[test]
