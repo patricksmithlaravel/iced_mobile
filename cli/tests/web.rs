@@ -618,13 +618,28 @@ fn later_commands_without_the_secret_keep_none() {
 fn a_pid_another_process_took_is_not_the_web_session() {
     let sandbox = Sandbox::new();
     // Another project's session host, say: its command line holds the marker.
-    let mut other = Command::new("sh")
-        .args(["-c", "sleep 120; true", "icm", "__session web"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut other = {
+        use std::os::unix::process::CommandExt;
+        Command::new("sh")
+            .args(["-c", "sleep 120; true", "icm", "__session web"])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    // The shell's `sleep` goes with its group, whatever fails below.
+    struct Group(i32);
+    impl Drop for Group {
+        fn drop(&mut self) {
+            // SAFETY: kill(2) on a process group this test started.
+            unsafe {
+                let _ = libc::kill(-self.0, libc::SIGKILL);
+            }
+        }
+    }
+    let _group = Group(other.id() as i32);
     let sessions = sandbox.project.path().join("target/icm/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     for (case, extra) in [
