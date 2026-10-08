@@ -368,6 +368,45 @@ fn run_logs_shot_and_stop_on_a_device() {
     );
 }
 
+/// `run` records the identity of the console process it starts, and `stop`
+/// signals that process only while its pid still has it. The record's pid
+/// was the only test before and, with the file's write time, a pid that
+/// another process took after the file was last written still passed.
+#[test]
+fn stop_signals_only_the_console_process_icm_started() {
+    let device = Device::new();
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let path = device.dir().join("target/icm/sessions/ios-device.json");
+    let mut session: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let pid = session["pid"].as_i64().unwrap();
+    let recorded: icm::procid::Identity =
+        serde_json::from_value(session["identity"].clone()).unwrap();
+    assert_eq!(icm::procid::of(pid as i32).unwrap().start, recorded.start);
+    let alive = || icm::procid::of(pid as i32).is_some();
+
+    // Another process has the pid now: the record keeps the identity of
+    // the one that had it. `stop` runs no command here, only the pid's test.
+    session["identity"] = json!({"start": "1791334000.000001", "exe": "/usr/bin/xcrun"});
+    session["stop"] = json!([]);
+    std::fs::write(&path, session.to_string()).unwrap();
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["stopped"][0]["already_gone"], json!([pid]), "{stop}");
+    assert_eq!(stop["stopped"][0]["processes"], json!([]), "{stop}");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(alive(), "a process that only has the pid was signalled");
+    assert!(!path.exists());
+
+    // With the identity run recorded, the process is ended.
+    session["identity"] = serde_json::to_value(&recorded).unwrap();
+    std::fs::write(&path, session.to_string()).unwrap();
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["stopped"][0]["processes"], json!([pid]), "{stop}");
+    assert!(!alive());
+}
+
 #[test]
 fn a_panic_on_the_device_is_reported() {
     let mut device = Device::new();

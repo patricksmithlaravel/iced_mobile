@@ -683,6 +683,9 @@ pub fn main(ctx: &mut Ctx, args: &[String]) -> Result<()> {
         "platform": "web",
         "pid": pid,
         "pgid": pid,
+        // What the pid is now, for a later command to check before it
+        // signals the pid (a pid is reused once this process exits).
+        "identity": crate::procid::of(pid),
         "marker": MARKER,
         "run": request.run,
         "run_dir": request.run_dir,

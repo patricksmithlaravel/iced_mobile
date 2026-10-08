@@ -7,6 +7,7 @@
 //! ```json
 //! {"v":1, "platform":"ios-sim", "run":"<run id>", "started":"2026-10-06T21:03:11Z",
 //!  "pid":14879,                                   // the app or session host icm started
+//!  "identity":{"start":"1791334000.123456"},      // what that process was (procid)
 //!  "pids":[{"pid":14880,"what":"emulator"}],      // more processes icm started
 //!  "app":{"id":"com.example.app"},
 //!  "device":{"kind":"simulator","id":"6F1…","name":"icm-iphone-17-ios-27.0","managed":true},
@@ -17,11 +18,15 @@
 //!
 //! `icm stop <platform>` runs the `stop` commands, then sends SIGTERM (and
 //! after a grace period SIGKILL) to each recorded process, to its whole
-//! group when it leads one. A pid is signalled only while it is alive and
-//! the process started before the session file was last written, so a pid
-//! reused after a reboot is never touched. `--shutdown` also runs the
+//! group when it leads one. A pid is signalled only while it still is the
+//! process icm started: it has the `identity` recorded for it (the
+//! process's start time, [`crate::procid`]; `identity` beside `pid`, and
+//! on each entry of `pids`), or, in a record written before identities, it
+//! is alive and started before the session file was last written, so a pid
+//! that another process took is never touched. `--shutdown` also runs the
 //! `shutdown` commands when the device is icm-managed (`icm-` names only).
 
+use crate::procid::{self, Identity, Verdict};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -45,6 +50,10 @@ pub struct Session {
     /// The app's process, or the session host's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<i32>,
+    /// What `pid` was when icm started it ([`crate::procid`]); a record
+    /// from before identities has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Identity>,
     /// More processes icm started for the session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pids: Vec<SessionProcess>,
@@ -80,6 +89,9 @@ pub struct SessionProcess {
     /// What it is (`server`, `chrome`, `emulator`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub what: String,
+    /// What it was when icm started it ([`crate::procid`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Identity>,
 }
 
 /// The device a session runs on.
@@ -184,12 +196,38 @@ impl Session {
         pids.retain(|pid| *pid > 1 && *pid != std::process::id() as i32);
         pids
     }
+
+    /// What the record says `pid` was when icm started it, if it says.
+    pub fn identity_of(&self, pid: i32) -> Option<&Identity> {
+        if self.pid == Some(pid) {
+            return self.identity.as_ref();
+        }
+        self.pids
+            .iter()
+            .find(|process| process.pid == pid)
+            .and_then(|process| process.identity.as_ref())
+    }
+
+    /// Whether `pid`, one of the record's, is still the process icm
+    /// started ([`is_ours`]); `written` is when the file was last written.
+    pub fn is_ours(&self, pid: i32, written: Option<SystemTime>) -> bool {
+        is_ours(pid, self.identity_of(pid), written)
+    }
 }
 
-/// Whether a recorded pid is still the process the session started: alive,
-/// and started no later than the session file was last written.
-pub fn is_ours(pid: i32, written: Option<SystemTime>) -> bool {
-    if pid <= 1 || !crate::signals::alive(pid) {
+/// Whether a recorded pid is still the process the session started. With
+/// the `identity` recorded for it, the pid must still have it. Without one
+/// (a record from before identities) it must be alive and have started no
+/// later than the session file was last written, which a pid that another
+/// process took, or one reused after a reboot, does not satisfy.
+pub fn is_ours(pid: i32, identity: Option<&Identity>, written: Option<SystemTime>) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    if let Some(identity) = identity {
+        return procid::check(pid, identity) == Verdict::Same;
+    }
+    if !crate::signals::alive(pid) {
         return false;
     }
     let Some(written) = written else {
@@ -312,13 +350,54 @@ mod tests {
     #[test]
     fn our_own_processes_are_ours_and_later_ones_are_not() {
         let me = std::process::id() as i32;
-        assert!(is_ours(me, Some(SystemTime::now())));
+        // A record from before identities: alive and started before the
+        // file was written.
+        assert!(is_ours(me, None, Some(SystemTime::now())));
         // A file written before this process started cannot name it.
         assert!(!is_ours(
             me,
+            None,
             Some(SystemTime::now() - Duration::from_secs(10 * 86_400))
         ));
-        assert!(!is_ours(me, None));
-        assert!(!is_ours(1, Some(SystemTime::now())));
+        assert!(!is_ours(me, None, None));
+        assert!(!is_ours(1, None, Some(SystemTime::now())));
+    }
+
+    /// With an identity the pid must still have it, whenever the file was
+    /// written: another process's pid is not ours, and ours is, however
+    /// old the file is.
+    #[test]
+    fn a_recorded_identity_decides_which_process_a_pid_is() {
+        let me = std::process::id() as i32;
+        let mine = procid::of(me).unwrap();
+        let other = Identity {
+            start: "1791334000.000001".to_string(),
+            exe: String::new(),
+        };
+        let old = Some(SystemTime::now() - Duration::from_secs(10 * 86_400));
+        assert!(is_ours(me, Some(&mine), old));
+        assert!(is_ours(me, Some(&mine), None));
+        assert!(!is_ours(me, Some(&other), Some(SystemTime::now())));
+        assert!(!is_ours(1, Some(&mine), Some(SystemTime::now())));
+
+        // The record's own pid and the pids it lists carry their own.
+        let session = Session {
+            pid: Some(me),
+            identity: Some(other.clone()),
+            pids: vec![SessionProcess {
+                pid: me + 1,
+                what: "chrome".to_string(),
+                identity: Some(mine.clone()),
+            }],
+            ..Session::default()
+        };
+        assert_eq!(session.identity_of(me), Some(&other));
+        assert_eq!(session.identity_of(me + 1), Some(&mine));
+        assert_eq!(session.identity_of(me + 2), None);
+        assert!(!session.is_ours(me, Some(SystemTime::now())));
+        let text = serde_json::to_string(&session).unwrap();
+        let back: Session = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.identity_of(me), Some(&other));
+        assert_eq!(back.pids[0].identity.as_ref(), Some(&mine));
     }
 }

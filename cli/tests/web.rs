@@ -609,6 +609,66 @@ fn later_commands_without_the_secret_keep_none() {
     secret::assert_inherited_nowhere(&target);
 }
 
+/// The marker in a web record says only that the pid is some icm session
+/// host, and a record without even that names no process: a pid another
+/// process took, even another session host, is not the one this record's
+/// host was. `stop web` signalled any process under the pid whose command
+/// line held the marker (or, for a record without one, any process).
+#[test]
+fn a_pid_another_process_took_is_not_the_web_session() {
+    let sandbox = Sandbox::new();
+    // Another project's session host, say: its command line holds the marker.
+    let mut other = Command::new("sh")
+        .args(["-c", "sleep 120; true", "icm", "__session web"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let sessions = sandbox.project.path().join("target/icm/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    for (case, extra) in [
+        (
+            "an identity that is not the process's",
+            serde_json::json!({
+                "identity": {"start": "1791334000.000001", "exe": "/x/icm"},
+                "marker": "__session web"
+            }),
+        ),
+        ("neither an identity nor a marker", serde_json::json!({})),
+    ] {
+        let mut record = serde_json::json!({
+            "schema": "icm.session/1", "platform": "web", "pid": other.id(),
+            "run": "r1", "started": "2026-10-06T00:00:00Z"
+        });
+        record
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        std::fs::write(sessions.join("web.json"), record.to_string()).unwrap();
+
+        let ps = sandbox.result(&["ps"]);
+        assert_eq!(
+            ps["sessions"][0]["alive"],
+            serde_json::json!([]),
+            "{case}: {ps}"
+        );
+        let stop = sandbox.result(&["stop", "web"]);
+        assert_eq!(stop["exit"], 0, "{case}: {stop}");
+        assert_eq!(
+            stop["stopped"][0]["stopped"], "was not running",
+            "{case}: {stop}"
+        );
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "{case}: the other process was signalled"
+        );
+        assert!(!sessions.join("web.json").exists(), "{case}");
+    }
+    let _ = other.kill();
+    let _ = other.wait();
+}
+
 #[test]
 fn web_commands_without_a_session() {
     let sandbox = Sandbox::new();

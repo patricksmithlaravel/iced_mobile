@@ -839,7 +839,7 @@ fn end_previous(sessions_dir: &Path) {
     if let Ok(previous) = session::read(&path) {
         let written = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         for pid in previous.all_pids() {
-            if session::is_ours(pid, written) {
+            if previous.is_ours(pid, written) {
                 let _ = session::terminate(pid, Duration::from_secs(3));
             }
         }
@@ -995,6 +995,9 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     )
     .map_err(|error| IcmError::new(CheckId::IosDeviceLaunchFailed, error.to_string()))?
         as i32;
+    // What the console process is now, for the record `stop` checks its pid
+    // against (a pid is reused once the process ends).
+    let console_identity = crate::procid::of(console_pid);
     // The secret values the app was handed (its `--env`) stay known to
     // later commands that read its console.
     let _ = process::keep_secrets(&files, &process::handed_secrets(&launch));
@@ -1097,6 +1100,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         run: Some(run_id.clone()),
         started: Some(crate::time::Utc::now().rfc3339()),
         pid: Some(console_pid),
+        identity: console_identity,
         app: Some(json!({"id": config.app.id, "bin": built.bin, "bundle": app_name})),
         device: Some(SessionDevice {
             kind: "device".into(),

@@ -242,7 +242,7 @@ fn stop_one(ctx: &Ctx, path: &Path, session: &Session, shutdown: bool) -> Value 
     let mut ended = Vec::new();
     let mut stale = Vec::new();
     for pid in session.all_pids() {
-        if session::is_ours(pid, written) {
+        if session.is_ours(pid, written) {
             if session::terminate(pid, GRACE) {
                 ended.push(pid);
             } else {
@@ -472,20 +472,23 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
         match session {
             Ok(session) => {
                 let written = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                // A record with a command-line `marker` (the web session
-                // host) also needs it in the process's command line.
-                let marked = session.extra.get("marker").and_then(Value::as_str);
-                let alive: Vec<i32> = session
-                    .all_pids()
-                    .into_iter()
-                    .filter(|pid| session::is_ours(*pid, written))
-                    .filter(|pid| {
-                        marked.is_none_or(|marker| {
-                            crate::sessions::command_line(*pid)
-                                .is_some_and(|line| line.contains(marker))
-                        })
-                    })
-                    .collect();
+                // The web session has one definition of alive, the one
+                // `stop web` signals by ([`crate::sessions::alive`]): the
+                // identity icm recorded for the host, or the marker a
+                // record from before identities holds. Any other record
+                // is checked as `stop` checks it ([`Session::is_ours`]).
+                let alive: Vec<i32> = if session.platform == "web" {
+                    crate::sessions::read(&dir, "web")
+                        .filter(crate::sessions::alive)
+                        .map(|_| session.all_pids())
+                        .unwrap_or_default()
+                } else {
+                    session
+                        .all_pids()
+                        .into_iter()
+                        .filter(|pid| session.is_ours(*pid, written))
+                        .collect()
+                };
                 // Android records the device's serial at the top level.
                 let device = session
                     .device

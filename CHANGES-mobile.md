@@ -39,6 +39,14 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - When `icm run android --wait-ready` runs out, the error says only what the readiness polls saw,
   where it used to say the app was alive. After Android relaunched the activity, it says so, where
   it used to say the wait ended before the resumed-activity probe starts.
+- `icm stop web`, `icm ps` and the web commands take the pid in a web session's record for the
+  session host only while that process is the one that wrote the record: the host records its start
+  time, and the marker (`__session web` in the command line) that matched every session host remains
+  only for records from before. Before, `icm stop web` killed any process under the pid whose
+  command line held the marker, another session host included, and one under a record with no
+  marker. `icm stop ios-device`, `icm ps` and `icm stop --all` check the pids of the other records
+  the same way: the identity `run` recorded for the console process, else the old test of the file's
+  write time.
 - `icm stop ios-sim`, `icm run ios-sim --attach` and the next `icm run` on another simulator take
   the pid in an iOS Simulator session for the app only while that process is the one `icm run`
   launched (and `logs` and `input` report it running on the same test): its start time is recorded
