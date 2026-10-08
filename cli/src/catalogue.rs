@@ -632,6 +632,9 @@ catalogue! {
     WebChromeFailed = "web.chrome_failed", Device, Fail, Agent,
         "Headless Chrome failed to start or connect",
         "Read the session log; check the Chrome path with `icm print tools`.";
+    WebHostIdentity = "web.host_identity", Environment, Fail, Owner,
+        "The OS would not describe the web session host's own process, so no later command could tell it from another process or stop it",
+        "Run icm where the OS lets a process read its own start time (macOS `proc_pidinfo`, Linux `/proc/<pid>/stat`), which a restrictive sandbox may refuse, then run again.";
     WebSizeBudget = "web.size_budget", CheckFailed, Fail, Agent,
         "The gzip size of the .wasm exceeds `[web] size_budget_kb`",
         "Reduce the binary or raise the budget.";

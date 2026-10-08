@@ -688,7 +688,7 @@ pub fn main(ctx: &mut Ctx, args: &[String]) -> Result<()> {
         browser.close();
         return Err(fail(
             &files,
-            CheckId::InternalBug,
+            CheckId::WebHostIdentity,
             format!(
                 "cannot read the process identity of this web session host (pid {pid}: {reason}), so no later command could tell it from another process that takes its pid, or stop it"
             ),

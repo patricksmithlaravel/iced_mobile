@@ -159,7 +159,9 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
 
     // A record whose process had already exited stopped nothing, and nor
     // did one that only left a process running, which nothing tells from
-    // another process (`run.identity_unavailable`).
+    // another process (`run.identity_unavailable`): unless the app on its
+    // device was terminated, which is something stopped whatever the
+    // console process's standing.
     let only_left = |entry: &Value| {
         entry["left_running"]
             .as_array()
@@ -167,6 +169,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
             && entry["processes"]
                 .as_array()
                 .is_none_or(|pids| pids.is_empty())
+            && entry["app"] != "terminated"
     };
     let count = stopped
         .iter()
@@ -176,6 +179,26 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
                 && !only_left(entry)
         })
         .count();
+    // The processes left running because nothing tells them from another
+    // process: neither stopped nor gone, so the summary says so, where it
+    // would otherwise say that nothing was running.
+    let left_running: Vec<String> = stopped
+        .iter()
+        .filter_map(|entry| {
+            let pids: Vec<String> = entry["left_running"]
+                .as_array()?
+                .iter()
+                .filter_map(|pid| pid.as_i64().map(|pid| pid.to_string()))
+                .collect();
+            (!pids.is_empty()).then(|| {
+                format!(
+                    "{} pid {} left running (cannot be verified)",
+                    entry["platform"].as_str().unwrap_or("a platform's"),
+                    pids.join(", ")
+                )
+            })
+        })
+        .collect();
     ctx.rep.set("stopped", Value::Array(stopped));
     ctx.rep.set("shutdown", json!(shut_down));
     ctx.rep.set("still_running", json!(still_running));
@@ -203,6 +226,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         &still_running,
         &unverified,
     ));
+    notes.extend(left_running);
     if !apps_unconfirmed.is_empty() {
         notes.push(format!(
             "the app on {} may still be running (devicectl could not confirm it)",

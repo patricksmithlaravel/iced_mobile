@@ -296,15 +296,16 @@ fn process(pid: i64, executable: &str) -> Value {
 }
 
 /// Ends what the fake devicectl left running under `pid`, a number a file
-/// of the test holds: its console, a `sleep 30` once the script has exec'd
-/// it. Whatever has ended since may have left the number to another
-/// process, so one shell command looks at the process and signals it only
-/// while it still is that `sleep 30`.
+/// of the test holds: its console, an `exec sleep 30.<pid>` once the script
+/// has exec'd it (the command line names the process's own pid). Whatever
+/// has ended since may have left the number to another process, so one
+/// shell command looks at the process and signals it only while its command
+/// line is that one.
 fn end_fake_console(pid: &str) {
     let _ = Command::new("/bin/sh")
         .args([
             "-c",
-            r#"[ "$(/bin/ps -p "$1" -o command= 2>/dev/null)" = "sleep 30" ] && kill "$1""#,
+            r#"[ "$(/bin/ps -p "$1" -o command= 2>/dev/null)" = "sleep 30.$1" ] && kill "$1""#,
             "sh",
             pid.trim(),
         ])
@@ -977,6 +978,12 @@ fn stop_leaves_a_console_process_whose_identity_could_not_be_read() {
     assert_eq!(stop["stopped"][0]["left_running"], json!([pid]), "{stop}");
     assert_eq!(stop["stopped"][0]["already_gone"], json!([]), "{stop}");
     assert_eq!(stop["stopped"][0]["processes"], json!([]), "{stop}");
+    // Nothing was stopped, and the summary does not say that nothing ran.
+    assert_eq!(
+        stop["summary"],
+        format!("ios-device pid {pid} left running (cannot be verified)"),
+        "{stop}"
+    );
     let warning = stop["warnings"]
         .as_array()
         .unwrap()
@@ -992,8 +999,96 @@ fn stop_leaves_a_console_process_whose_identity_could_not_be_read() {
         "a process whose identity was unavailable was signalled"
     );
 
-    // SAFETY: kill(2) on the fake console process this test started.
-    unsafe {
-        let _ = libc::kill(pid as i32, libc::SIGKILL);
-    }
+    // The fake console icm started stays up for this test to end, by its
+    // command line, as the `Device` does when it is dropped.
+    end_fake_console(&pid.to_string());
+}
+
+/// The app on the phone was terminated, so something was stopped, whatever
+/// the standing of icm's own console process: the summary says so, and
+/// that the console, whose identity could not be read, was left running.
+/// It said nothing was running for the platform, and a console whose
+/// identity checks out is ended as before.
+#[test]
+fn a_terminated_app_with_a_console_icm_cannot_verify_is_reported_stopped() {
+    let mut device = Device::new();
+    let why = "proc_pidinfo: Operation not permitted";
+    device.set("ICM_FAKE_IDENTITY_UNREADABLE", why);
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    device
+        .env
+        .retain(|(key, _)| key != "ICM_FAKE_IDENTITY_UNREADABLE");
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = device.session()["pid"].as_i64().unwrap();
+    assert!(!device.session()["stop"].as_array().unwrap().is_empty());
+    // The fake terminate command would end the console it knows; this test
+    // keeps it up, and has the device list the app under the recorded pid.
+    std::fs::remove_file(device.state().join("device-app.pid")).unwrap();
+    device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(device.terminated(), "{}", device.log("xcrun.log"));
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert_eq!(stop["stopped"][0]["left_running"], json!([pid]), "{stop}");
+    assert_eq!(stop["stopped"][0]["processes"], json!([]), "{stop}");
+    assert_eq!(
+        stop["summary"],
+        format!("stopped 1 session(s); ios-device pid {pid} left running (cannot be verified)"),
+        "{stop}"
+    );
+    assert!(
+        stop["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["id"] == "run.identity_unavailable"),
+        "{stop}"
+    );
+    assert!(
+        icm::procid::of(pid as i32).is_some(),
+        "the console was ended"
+    );
+    end_fake_console(&pid.to_string());
+}
+
+/// A run that replaces a session whose console process cannot be told from
+/// another process leaves it alone and says so, as `stop` does; the
+/// explain page says that a run that replaces a running session warns.
+#[test]
+fn a_rerun_leaves_a_previous_console_it_cannot_verify_and_says_so() {
+    let mut device = Device::new();
+    let why = "proc_pidinfo: Operation not permitted";
+    device.set("ICM_FAKE_IDENTITY_UNREADABLE", why);
+    let first = device.json(&["run", "ios-device", "--settle", "0s"]);
+    device
+        .env
+        .retain(|(key, _)| key != "ICM_FAKE_IDENTITY_UNREADABLE");
+    assert_eq!(first["exit"], 0, "{first}");
+    let old = device.session()["pid"].as_i64().unwrap();
+
+    let second = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(second["exit"], 0, "{second}");
+    let warning = second["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["id"] == "run.identity_unavailable")
+        .unwrap_or_else(|| panic!("no run.identity_unavailable in {second}"));
+    let detail = warning["detail"].as_str().unwrap();
+    assert!(detail.contains(&format!("pid {old}")), "{detail}");
+    assert!(
+        detail.contains("previous run's console process"),
+        "{detail}"
+    );
+    assert!(detail.contains("Operation not permitted"), "{detail}");
+    assert!(detail.contains("never signalled"), "{detail}");
+    // The new session is the second run's, and the old console was not
+    // signalled.
+    assert_ne!(device.session()["pid"].as_i64().unwrap(), old);
+    assert!(
+        icm::procid::of(old as i32).is_some(),
+        "the old console was ended"
+    );
+    end_fake_console(&old.to_string());
 }

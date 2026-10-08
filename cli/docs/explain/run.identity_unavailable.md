@@ -17,10 +17,17 @@ than process identities wrote, and icm does not judge it by the pid as it
 still does for those: the pid is not taken for the process, and nothing is
 signalled.
 
-The same warning comes from `stop` (and from a run that replaces a running
-session) when a process runs under such a pid, or under a pid whose process
-the OS will not describe now: icm left it alone and says so, since
-"nothing was running" would be false.
+The same warning comes from `stop`, and from the next `run` of the desktop,
+the iOS Simulator and ios-device (which replaces a running session), when a
+process runs under such a pid, or under a pid whose process the OS will not
+describe now: icm left it alone and says so, since "nothing was running"
+would be false. The summary of `stop` names the process it left running
+(`desktop pid 4242 left running (cannot be verified)`), and `logs desktop`
+gives it as the reason it could not read the app's environment when the app
+inherited a secret.
+
+The web session host is stricter: one that cannot read its own identity does
+not start (`web.host_identity`), since nothing could stop it later.
 
 ## Fix
 

@@ -274,9 +274,27 @@ impl Fake {
 
     fn kill_app(&self) {
         if let Ok(pid) = std::fs::read_to_string(self.state.join("app.pid")) {
-            let _ = Command::new("kill").arg(pid.trim()).status();
+            end_fake(pid.trim(), 30);
         }
     }
+}
+
+/// Ends what the fake xcrun left running under `pid`, a number a file of the
+/// test holds: an `exec sleep <seconds>.<pid>`, whose command line names its
+/// own pid. Whatever has ended since (icm's `stop` ended the app) may have
+/// left the number to another process, so one shell command looks at the
+/// process and signals it only while its command line is that one.
+fn end_fake(pid: &str, seconds: u32) {
+    let _ = Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"[ "$(/bin/ps -p "$1" -o command= 2>/dev/null)" = "sleep $2.$1" ] && kill "$1""#,
+            "sh",
+            pid,
+            &seconds.to_string(),
+        ])
+        .stderr(Stdio::null())
+        .status();
 }
 
 impl Drop for Fake {
@@ -288,7 +306,7 @@ impl Drop for Fake {
             && let Ok(session) = serde_json::from_str::<Value>(&text)
             && let Some(pid) = session["collector_pid"].as_i64()
         {
-            let _ = Command::new("kill").arg(format!("-{pid}")).status();
+            end_fake(&pid.to_string(), 20);
         }
     }
 }

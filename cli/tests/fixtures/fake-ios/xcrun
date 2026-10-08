@@ -49,6 +49,14 @@ launched_token() {
   tokens
 }
 tokens
+# Ends the fake process $1, an `exec sleep 30.<its own pid>` (the command line
+# names the pid, so no other process has it), only while the number still
+# names that process: one that has ended may have left the number to another
+# process, which a signal by number would hit.
+end_fake() {
+  [ "$(/bin/ps -p "$1" -o command= 2> /dev/null)" = "sleep 30.$1" ] && kill "$1"
+  return 0
+}
 # One unified-log line of the app; $2 is its message as `log` writes it.
 oslog_line() {
   printf '{"eventType":"logEvent","subsystem":"iced","category":"app","messageType":"Default","processID":%s,"processImagePath":"\\/data\\/Fixture.app\\/fixture-app","timestamp":"%s","eventMessage":"%s"}\n' \
@@ -125,7 +133,7 @@ simctl)
           oslog_line 0 "$json_log"
           oslog_line 0 "GET https:\/\/api.example.com\/v1?lower=$tok_pct"
         fi
-        exec sleep 20
+        exec sleep "20.$$"
       elif [ "$2" = show ] && [ -n "$leak" ]; then
         launched_token
         oslog_line "$(cat "$S/app.pid" 2> /dev/null)" "the system saw $tok_log"
@@ -162,12 +170,12 @@ simctl)
       printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":%s}\n\nthread '"'"'main'"'"' panicked at src/lib.rs:7:5:\nboom\n' "$pid" > "$err"
       ;;
     silent)
-      nohup sleep 30 > /dev/null 2>&1 &
+      nohup sh -c 'exec sleep "30.$$"' > /dev/null 2>&1 &
       pid=$!
       ;;
     leak | leak-panic)
       if [ "$ICM_FAKE_SCENARIO" = leak ]; then
-        nohup sleep 30 > /dev/null 2>&1 &
+        nohup sh -c 'exec sleep "30.$$"' > /dev/null 2>&1 &
       else
         sleep 1 > /dev/null 2>&1 &
       fi
@@ -199,7 +207,7 @@ simctl)
       fi
       ;;
     *)
-      nohup sleep 30 > /dev/null 2>&1 &
+      nohup sh -c 'exec sleep "30.$$"' > /dev/null 2>&1 &
       pid=$!
       printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":%s}\nICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n' "$pid" > "$err"
       echo "hello from stdout" > "$out"
@@ -209,7 +217,7 @@ simctl)
     echo "com.acme.fixture: $pid"
     ;;
   terminate)
-    if [ -f "$S/app.pid" ]; then kill "$(cat "$S/app.pid")" 2> /dev/null; fi
+    if [ -f "$S/app.pid" ]; then end_fake "$(cat "$S/app.pid")"; fi
     true
     ;;
   io)
@@ -280,17 +288,17 @@ devicectl)
         printf 'INFO fixture: payload {"t":"%s"}\n' "$tok_u"
         printf 'ICM_EVENT {"v":1,"kind":"warning","code":"fixture.token","message":"token %s"}\n' "$tok_json"
         printf 'ICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3,"title":"%s"},"backend":"wgpu","account":{"token":"%s"}}\n' "$tok_json" "$tok_json"
-        exec sleep 30
+        exec sleep "30.$$"
         ;;
       *)
         echo $$ > "$S/device-app.pid"
         printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":4242}\nICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n'
-        exec sleep 30
+        exec sleep "30.$$"
         ;;
       esac
       ;;
     terminate)
-      if [ -f "$S/device-app.pid" ]; then kill "$(cat "$S/device-app.pid")" 2> /dev/null; rm -f "$S/device-app.pid"; fi
+      if [ -f "$S/device-app.pid" ]; then end_fake "$(cat "$S/device-app.pid")"; rm -f "$S/device-app.pid"; fi
       ;;
     esac
     ;;

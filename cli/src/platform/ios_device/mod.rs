@@ -962,8 +962,11 @@ pub fn app_process(ctx: &Ctx, session: &Session) -> AppProcess {
 }
 
 /// Ends this project's previous device session (its console process; the
-/// app itself is replaced by `--terminate-existing`).
-fn end_previous(sessions_dir: &Path) {
+/// app itself is replaced by `--terminate-existing`). A console process
+/// that icm cannot tell from another one (its identity is unavailable, or
+/// the OS will not describe it now) is not signalled, and a WARN says it is
+/// left running, as `stop` does.
+fn end_previous(ctx: &Ctx, sessions_dir: &Path) {
     let path = session::path(sessions_dir, PLATFORM);
     if let Ok(previous) = session::read(&path) {
         let written = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
@@ -971,6 +974,13 @@ fn end_previous(sessions_dir: &Path) {
             if previous.is_ours(pid, written) {
                 let _ = session::terminate(pid, Duration::from_secs(3));
             }
+        }
+        for (pid, why) in previous.unverified_pids() {
+            ctx.rep.check(session::unverified_check(
+                "the previous run's console process",
+                pid,
+                &why,
+            ));
         }
         let _ = std::fs::remove_file(&path);
     }
@@ -1094,7 +1104,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
 
     // Launch with the console attached, detached from icm.
     let sessions_dir = project.sessions_dir();
-    end_previous(&sessions_dir);
+    end_previous(ctx, &sessions_dir);
     let run_id = ctx.rep.run_id();
     let files = sessions_dir.join(PLATFORM).join(&run_id);
     std::fs::create_dir_all(&files).map_err(|e| io("create", &files, e))?;

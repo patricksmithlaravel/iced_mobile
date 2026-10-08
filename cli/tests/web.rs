@@ -629,17 +629,25 @@ fn a_pid_another_process_took_is_not_the_web_session() {
             .spawn()
             .unwrap()
     };
-    // The shell's `sleep` goes with its group, whatever fails below.
-    struct Group(i32);
+    // The shell's `sleep` goes with its group, whatever fails below, as
+    // long as the shell still has the start time it had when the test saw
+    // it: a test that has reaped it (its `try_wait`) may have left the
+    // number to another process.
+    struct Group(i32, Option<icm::procid::Identity>);
     impl Drop for Group {
         fn drop(&mut self) {
-            // SAFETY: kill(2) on a process group this test started.
-            unsafe {
-                let _ = libc::kill(-self.0, libc::SIGKILL);
+            if let Some(identity) = &self.1
+                && icm::procid::check(self.0, identity) == icm::procid::Verdict::Same
+            {
+                // SAFETY: kill(2) on a process group this test started,
+                // whose leader was just read to be the process it started.
+                unsafe {
+                    let _ = libc::kill(-self.0, libc::SIGKILL);
+                }
             }
         }
     }
-    let _group = Group(other.id() as i32);
+    let _group = Group(other.id() as i32, icm::procid::of(other.id() as i32));
     let sessions = sandbox.project.path().join("target/icm/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     for (case, extra) in [
@@ -709,8 +717,10 @@ fn a_session_host_that_cannot_read_its_own_identity_does_not_start() {
         &["run", "web"],
         &[("ICM_FAKE_IDENTITY_UNREADABLE", "proc_pidinfo: denied")],
     );
-    assert_eq!(run["exit"], 70, "{run}");
-    assert_eq!(run["errors"][0]["id"], "internal.bug", "{run}");
+    // An OS that will not describe a process to itself is an environment
+    // condition, not a bug in icm.
+    assert_eq!(run["exit"], 4, "{run}");
+    assert_eq!(run["errors"][0]["id"], "web.host_identity", "{run}");
     let detail = run["errors"][0]["detail"].as_str().unwrap();
     assert!(
         detail.contains("cannot read the process identity of this web session host"),

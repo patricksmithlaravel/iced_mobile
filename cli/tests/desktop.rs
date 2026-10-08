@@ -101,16 +101,42 @@ impl Sandbox {
     }
 }
 
-/// Kills the apps a test started, whatever happens.
-struct Apps(Vec<i32>);
+/// The apps a test started, each with the identity its process had when the
+/// test saw it run (its start time, `icm::procid`), killed whatever
+/// happens. An app that has ended, which `stop` or the test itself saw to,
+/// may have left its pid to another process, so a number the test remembers
+/// is signalled only while it still has that identity.
+#[derive(Default)]
+struct Apps(Vec<(i32, Option<icm::procid::Identity>)>);
+
+impl Apps {
+    /// Notes an app the test has seen run.
+    fn push(&mut self, pid: i32) {
+        self.0.push((pid, icm::procid::of(pid)));
+    }
+
+    /// SIGKILL to the process group of the app `pid`, only while that pid
+    /// still has the identity it was noted with.
+    fn kill(&self, pid: i32) {
+        for (noted, identity) in &self.0 {
+            if *noted == pid
+                && let Some(identity) = identity
+                && icm::procid::check(pid, identity) == icm::procid::Verdict::Same
+            {
+                // SAFETY: kill(2) on the process group of an app this test
+                // started, just read to still be that process.
+                unsafe {
+                    let _ = libc::kill(-pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+}
 
 impl Drop for Apps {
     fn drop(&mut self) {
-        for pid in &self.0 {
-            // SAFETY: kill(2) on a pid this test started.
-            unsafe {
-                let _ = libc::kill(-pid, libc::SIGKILL);
-            }
+        for (pid, _) in &self.0 {
+            self.kill(*pid);
         }
     }
 }
@@ -152,12 +178,12 @@ fn ids(list: &Value) -> Vec<String> {
 #[test]
 fn run_logs_shot_and_stop() {
     let sandbox = Sandbox::new();
-    let mut apps = Apps(Vec::new());
+    let mut apps = Apps::default();
 
     let first = sandbox.result(&["run", "desktop", "--settle", "200ms"]);
     assert_eq!(first["exit"], 0, "{first}");
     let pid = first["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     assert!(alive(pid));
     assert_eq!(first["process"]["alive"], true);
     assert_eq!(first["process"]["ready"]["source"], "icm_event");
@@ -212,7 +238,7 @@ fn run_logs_shot_and_stop() {
     let second = sandbox.result(&["run", "desktop", "--settle", "200ms", "--no-shot"]);
     assert_eq!(second["exit"], 0, "{second}");
     let second_pid = second["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(second_pid);
+    apps.push(second_pid);
     assert_eq!(second["replaced"]["pid"], pid);
     wait_dead(pid);
     assert!(alive(second_pid));
@@ -258,7 +284,7 @@ fn run_logs_shot_and_stop() {
     ]);
     assert_eq!(rerun["exit"], 0, "{rerun}");
     let rerun_pid = rerun["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(rerun_pid);
+    apps.push(rerun_pid);
     assert_eq!(sandbox.result(&["stop", "desktop"])["exit"], 0);
     wait_dead(rerun_pid);
 }
@@ -272,12 +298,12 @@ fn run_logs_shot_and_stop() {
 #[test]
 fn another_instance_of_the_program_is_not_the_app() {
     let sandbox = Sandbox::new();
-    let mut apps = Apps(Vec::new());
+    let mut apps = Apps::default();
 
     let run = sandbox.result(&["run", "desktop", "--settle", "100ms", "--no-shot"]);
     assert_eq!(run["exit"], 0, "{run}");
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     let mut record: Value =
         serde_json::from_str(&std::fs::read_to_string(sandbox.session()).unwrap()).unwrap();
     let identity: icm::procid::Identity = serde_json::from_value(record["identity"].clone())
@@ -286,10 +312,7 @@ fn another_instance_of_the_program_is_not_the_app() {
 
     // The app ends; a second instance of the same program takes over the
     // number's place in the record.
-    // SAFETY: kill(2) on the app this test started.
-    unsafe {
-        let _ = libc::kill(-pid, libc::SIGKILL);
-    }
+    apps.kill(pid);
     wait_dead(pid);
     let bundle = sandbox.path(&run["artifacts"]["bundle"]);
     let mut other = {
@@ -303,7 +326,7 @@ fn another_instance_of_the_program_is_not_the_app() {
             .unwrap()
     };
     let other_pid = other.id() as i32;
-    apps.0.push(other_pid);
+    apps.push(other_pid);
     record["pid"] = other_pid.into();
     record["pgid"] = other_pid.into();
     std::fs::write(sandbox.session(), record.to_string()).unwrap();
@@ -324,7 +347,7 @@ fn another_instance_of_the_program_is_not_the_app() {
 #[test]
 fn panics_exits_and_hangs_fail_with_exit_ten() {
     let sandbox = Sandbox::new();
-    let _apps = Apps(Vec::new());
+    let _apps = Apps::default();
 
     let panicked = sandbox.result(&["run", "desktop", "--env", "ICM_FIXTURE=panic"]);
     assert_eq!(panicked["exit"], 10, "{panicked}");
@@ -430,14 +453,14 @@ fn panics_exits_and_hangs_fail_with_exit_ten() {
 #[test]
 fn run_directories_keep_no_secret() {
     let sandbox = Sandbox::new();
-    let mut apps = Apps(Vec::new());
+    let mut apps = Apps::default();
     let env = [(secret::NAME, secret::TOKEN)];
     let icm = sandbox.project.path().join("target/icm");
 
     let run = sandbox.result_with(&["run", "desktop", "--settle", "200ms"], &env);
     assert_eq!(run["exit"], 0, "{run}");
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     let app_log = std::fs::read_to_string(sandbox.path(&run["artifacts"]["app_log"])).unwrap();
     assert!(app_log.contains("signed in with <redacted>"), "{app_log}");
     assert!(app_log.contains("{\"token\":\"<redacted>\"}"), "{app_log}");
@@ -511,7 +534,7 @@ fn run_directories_keep_no_secret() {
 fn later_commands_without_the_secret_keep_none() {
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
-    let mut apps = Apps(Vec::new());
+    let mut apps = Apps::default();
     let target = sandbox.project.path().join("target");
     let icm = target.join("icm");
     let token = format!("{}={}", secret::NAME, secret::TOKEN);
@@ -526,7 +549,7 @@ fn later_commands_without_the_secret_keep_none() {
     );
     assert_eq!(run["exit"], 0, "{run}");
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     let live = icm
         .join("sessions/desktop")
         .join(run["run"].as_str().unwrap());
@@ -569,7 +592,7 @@ fn later_commands_without_the_secret_keep_none() {
         &shell,
     );
     assert_eq!(next["exit"], 0, "{next}");
-    apps.0.push(next["process"]["pid"].as_i64().unwrap() as i32);
+    apps.push(next["process"]["pid"].as_i64().unwrap() as i32);
     assert!(!kept.exists());
     let again = icm
         .join("sessions/desktop")
@@ -597,14 +620,14 @@ fn later_commands_without_the_secret_keep_none() {
 #[test]
 fn later_commands_read_inherited_secrets_from_the_running_app() {
     let sandbox = Sandbox::new();
-    let mut apps = Apps(Vec::new());
+    let mut apps = Apps::default();
     let target = sandbox.project.path().join("target");
     let shell = [(secret::NAME, secret::TOKEN)];
 
     let run = sandbox.result_with(&["run", "desktop", "--settle", "200ms"], &shell);
     assert_eq!(run["exit"], 0, "{run}");
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     let live = target
         .join("icm/sessions/desktop")
         .join(run["run"].as_str().unwrap());
@@ -660,7 +683,7 @@ fn later_commands_read_inherited_secrets_from_the_running_app() {
 #[test]
 fn an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread() {
     let sandbox = Sandbox::new();
-    let mut apps = Apps(Vec::new());
+    let mut apps = Apps::default();
     let target = sandbox.project.path().join("target");
     let icm = target.join("icm");
     let shell = [(secret::NAME, secret::TOKEN)];
@@ -678,7 +701,7 @@ fn an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread() {
     );
     assert_eq!(run["exit"], 0, "{run}");
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     std::fs::write(sandbox.project.path().join("quit"), "").unwrap();
     wait_dead(pid);
     let live = icm
@@ -731,7 +754,7 @@ fn an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread() {
 #[test]
 fn another_value_of_the_same_name_does_not_redact_the_inherited_one() {
     let sandbox = Sandbox::new();
-    let mut apps = Apps(Vec::new());
+    let mut apps = Apps::default();
     let icm = sandbox.project.path().join("target/icm");
     let old = [(secret::NAME, secret::TOKEN)];
     let new = [(secret::NAME, "another-value-24680")];
@@ -749,7 +772,7 @@ fn another_value_of_the_same_name_does_not_redact_the_inherited_one() {
     );
     assert_eq!(run["exit"], 0, "{run}");
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     std::fs::write(sandbox.project.path().join("quit"), "").unwrap();
     wait_dead(pid);
     let live = icm
@@ -818,7 +841,7 @@ fn command_of(pid: i32) -> String {
 /// token.
 fn logs_from_other_shells(mode: &str, becomes: &str, replaced: bool) -> Vec<(String, String)> {
     let sandbox = Sandbox::new();
-    let mut apps = Apps(Vec::new());
+    let mut apps = Apps::default();
     let icm = sandbox.project.path().join("target/icm");
     let old = [(secret::NAME, secret::TOKEN)];
     let new = [(secret::NAME, "another-value-24680")];
@@ -837,7 +860,7 @@ fn logs_from_other_shells(mode: &str, becomes: &str, replaced: bool) -> Vec<(Str
     );
     assert_eq!(run["exit"], 0, "{run}");
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     let live = icm
         .join("sessions/desktop")
         .join(run["run"].as_str().unwrap());
@@ -975,16 +998,21 @@ fn set_identity(sandbox: &Sandbox, identity: Option<Value>) {
 #[test]
 fn an_app_whose_identity_could_not_be_read_is_left_running_and_reported() {
     let sandbox = Sandbox::new();
-    let mut apps = Apps(Vec::new());
+    let mut apps = Apps::default();
     let why = "proc_pidinfo: Operation not permitted";
 
+    // The app inherits a secret from icm's shell, so `logs` has one to be
+    // careful with.
     let run = sandbox.result_with(
         &["run", "desktop", "--settle", "100ms", "--no-shot"],
-        &[("ICM_FAKE_IDENTITY_UNREADABLE", why)],
+        &[
+            ("ICM_FAKE_IDENTITY_UNREADABLE", why),
+            (secret::NAME, secret::TOKEN),
+        ],
     );
     assert_eq!(run["exit"], 0, "{run}");
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     let warning = run["warnings"]
         .as_array()
         .unwrap()
@@ -1028,6 +1056,23 @@ fn an_app_whose_identity_could_not_be_read_is_left_running_and_reported() {
         "{logs}"
     );
     assert_eq!(logs["process"]["alive"], false, "{logs}");
+    // It cannot learn the secret the app inherited, so it reads the run's
+    // redacted copies and says why: a process runs under the pid, which is
+    // not the app having ended.
+    let unknown = logs["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["id"] == "desktop.logs.secret_unknown")
+        .unwrap_or_else(|| panic!("no desktop.logs.secret_unknown in {logs}"));
+    let detail = unknown["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("a process runs under the app's pid that icm cannot tell from the app"),
+        "{detail}"
+    );
+    assert!(detail.contains(why), "{detail}");
+    assert!(!detail.contains("the app has ended"), "{detail}");
+    assert!(!logs.to_string().contains(secret::TOKEN), "{logs}");
     let shot = sandbox.result(&["shot", "desktop"]);
     assert_eq!(shot["exit"], 7, "{shot}");
     assert!(
@@ -1057,24 +1102,21 @@ fn an_app_whose_identity_could_not_be_read_is_left_running_and_reported() {
     assert!(detail.contains(&format!("pid {pid}")), "{detail}");
     assert!(detail.contains("Operation not permitted"), "{detail}");
     assert!(detail.contains("never signalled"), "{detail}");
+    // `stop --all` says the same, where it said that nothing was running.
     let all = sandbox.result(&["stop", "--all"]);
     assert_eq!(all["exit"], 0, "{all}");
-    assert!(
-        all["summary"]
-            .as_str()
-            .unwrap()
-            .contains("nothing was running"),
+    assert_eq!(
+        all["summary"],
+        format!("desktop pid {pid} left running (cannot be verified)"),
         "{all}"
     );
+    assert_eq!(all["stopped"][0]["left_running"], json!([pid]), "{all}");
     std::thread::sleep(Duration::from_millis(300));
     assert!(alive(pid), "the unverified app was signalled");
     assert!(sandbox.session().exists());
 
     // Once nothing runs under the pid it is gone, whatever was recorded.
-    // SAFETY: kill(2) on the app this test started.
-    unsafe {
-        let _ = libc::kill(-pid, libc::SIGKILL);
-    }
+    apps.kill(pid);
     wait_dead(pid);
     let stop = sandbox.result(&["stop", "desktop"]);
     assert_eq!(stop["exit"], 0, "{stop}");
@@ -1086,7 +1128,7 @@ fn an_app_whose_identity_could_not_be_read_is_left_running_and_reported() {
     let run = sandbox.result(&["run", "desktop", "--settle", "100ms", "--no-shot"]);
     assert_eq!(run["exit"], 0, "{run}");
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     set_identity(&sandbox, None);
     let ps = sandbox.result(&["ps"]);
     assert_eq!(ps["sessions"][0]["unverified"], json!([]), "{ps}");
@@ -1153,7 +1195,7 @@ fn dry_runs_print_the_plan() {
 fn run_runs_the_projects_desktop_hooks() {
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
-    let mut apps = Apps(Vec::new());
+    let mut apps = Apps::default();
     let toml = sandbox.project.path().join("icm.toml");
     let mut text = std::fs::read_to_string(&toml).unwrap();
     text.push_str("\n[checks]\ndesktop = [\"checks.sh\"]\n");
@@ -1168,7 +1210,7 @@ fn run_runs_the_projects_desktop_hooks() {
 
     let run = sandbox.result(&["run", "desktop", "--settle", "100ms", "--no-shot"]);
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(pid);
+    apps.push(pid);
     assert_eq!(run["exit"], 0, "{run}");
     assert_eq!(run["hooks"][0]["script"], "checks.sh", "{run}");
     assert_eq!(run["hooks"][0]["ok"], true, "{run}");
@@ -1185,7 +1227,7 @@ fn run_runs_the_projects_desktop_hooks() {
     .unwrap();
     let failed = sandbox.result(&["run", "desktop", "--settle", "100ms", "--no-shot"]);
     let second = failed["process"]["pid"].as_i64().unwrap() as i32;
-    apps.0.push(second);
+    apps.push(second);
     assert_eq!(failed["exit"], 1, "{failed}");
     assert!(
         failed["checks"]["failed"]

@@ -1958,20 +1958,26 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
         .map_err(|error| IcmError::new(CheckId::UsageBadArgs, format!("--since: {error}")))?;
 
     // The running app's session, else the last run's copy.
-    let (mut session, live) = match read_session(&project) {
+    let (mut session, live, undescribed) = match read_session(&project) {
         Some(session) => {
             let standing = standing(&session);
+            let mut undescribed = None;
             if let Standing::Unverified(why) = &standing {
                 ctx.rep.check(crate::session::unverified_check(
                     "the desktop app",
                     session.pid,
                     why,
                 ));
+                undescribed = Some(why.clone());
             }
-            (with_copies(session), standing == Standing::Running)
+            (
+                with_copies(session),
+                standing == Standing::Running,
+                undescribed,
+            )
         }
         None => match last_session(&project) {
-            Some(session) => (with_copies(session), false),
+            Some(session) => (with_copies(session), false, None),
             None => {
                 return Err(no_session(
                     "no desktop app has run in this project yet, so there are no logs",
@@ -1993,10 +1999,14 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
         } else {
             ("their values", "variables of those names")
         };
-        let why = if live {
-            "reading the running app's environment did not return it"
-        } else {
-            "the app has ended"
+        let why = match &undescribed {
+            _ if live => "reading the running app's environment did not return it".to_string(),
+            // A process runs under the pid: the app has not ended as far as
+            // anyone can tell.
+            Some(why) => format!(
+                "a process runs under the app's pid that icm cannot tell from the app: {why}"
+            ),
+            None => "the app has ended".to_string(),
         };
         ctx.rep.check(
             Check::warn(

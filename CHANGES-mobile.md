@@ -35,7 +35,12 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   `run.identity_unavailable` for the desktop app, the iOS Simulator's app and collector,
   ios-device's console and the Android emulator; `icm stop` and `ps` say so when a
   process runs under such a pid (so do the desktop's `logs` and `shot`), and `stop` leaves it
-  running where it would have said "already gone". The web session host does not start without its own identity. `AGENTS.md` and
+  running where it would have said "already gone", and its summary names the process it left
+  running (`desktop pid 4242 left running (cannot be verified)`) where it said that nothing was
+  running; an ios-device app that `stop` terminated counts as stopped whatever the console's
+  standing, and the next ios-device `run` warns about a previous console it cannot verify. The web
+  session host does not start without its own identity (`web.host_identity`, exit 4, where it was
+  `internal.bug`). `AGENTS.md` and
   `docs/icm/DESIGN.md` now say exactly what the identity rule guarantees: it is the start time, not
   the program or the environment.
 - `icm logs desktop` of a running app whose environment could not be read back in full no longer
@@ -130,7 +135,8 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   removed. When the device cannot be asked (not connected or locked, devicectl failing), nothing is
   terminated, `ios.device.stop_unconfirmed` warns, the device is listed as `unverified` in the
   result (the summary says the app may still be running), and the record stays so that the next
-  `stop` asks again. icm's own console process is ended in every case. Before, the stored command
+  `stop` asks again. icm's own console process is ended too while its identity checks out (one whose
+  identity icm could not read is left running, with a warning). Before, the stored command
   ran as it stood, so an app that had exited or been restarted left its pid to another process of
   the phone, which `stop` terminated. The device lists an executable as a file URL with its path
   percent-escaped, so an app named `My App` or `Café` runs in `My%20App.app` or `Caf%C3%A9.app`; the

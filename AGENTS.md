@@ -204,10 +204,11 @@ stop only the platforms they drive and leave the other platforms' devices alone
     or has the environment it started with: an `exec` keeps it.
   - An `unavailable` identity matches no process. Such a pid is never signalled, never taken for the
     process icm started, and never judged by the legacy pid tests below. The run that could not read
-    it warns `run.identity_unavailable`, and `stop` and `ps` say so when a process runs under it,
-    as do the desktop's `logs` and `shot` (as they do for a pid whose process the OS will not
-    describe when read again).
-    The web session host does not start without one.
+    it warns `run.identity_unavailable`, and `stop` and `ps` say so when a process runs under it
+    (`stop`'s summary names it as left running, where it would say nothing ran), as do the
+    desktop's `logs` and `shot` (as they do for a pid whose process the OS will not describe when
+    read again).
+    The web session host does not start without one (`web.host_identity`).
   - A record with no identity at all (written before identities; icm never writes one now) proves
     nothing either. The only pid-based tests left are the legacy ones for such records: the web
     host's command-line marker, the generic write-time test, the desktop executable test and the
