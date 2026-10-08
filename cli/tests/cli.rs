@@ -309,11 +309,25 @@ fn usage_errors_exit_two_with_a_result() {
         .unwrap();
     assert_eq!(result(&output)["exit"], 2);
 
-    // A usage error names the command, not a global option's value.
+    // A usage error names the command, not a global option's value, nor
+    // the word after a misspelled option.
     let output = sandbox.run(&["--config", "x.toml", "run", "nowhere", "--json", "-q"]);
     let failed = result(&output);
     assert_eq!(failed["exit"], 2, "{failed}");
     assert_eq!(failed["command"], "run", "{failed}");
+    let output = sandbox.run(&["--conf", "x.toml", "run", "--help", "--json", "-q"]);
+    let failed = result(&output);
+    assert_eq!(failed["exit"], 2, "{failed}");
+    assert_eq!(failed["command"], "run", "{failed}");
+    assert!(
+        failed["errors"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("'--conf'"),
+        "{failed}"
+    );
+    let output = sandbox.run(&["--conf", "x.toml", "--json", "-q"]);
+    assert_eq!(result(&output)["command"], "icm");
 
     // No subcommand.
     let output = sandbox.run(&["--json"]);

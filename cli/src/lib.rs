@@ -314,54 +314,75 @@ fn is_quiet_flag(arg: &str) -> bool {
 /// The command `argv` names, for a command line clap refused: the first
 /// word that is neither an option nor an option's value. Which options take
 /// a value comes from clap's definition, so in `icm --config x.toml run`
-/// the command is `run`, not `x.toml`. An alias gives the command's name;
-/// a word that names no command (an external one) is returned as written.
+/// the command is `run`, not `x.toml`. An option clap does not define (a
+/// misspelled `--conf`) may take one too, so the word after it is the
+/// command only when it names one: `icm --conf x.toml run` names `run`. An
+/// alias gives the command's name; another word that names no command (an
+/// external one) is returned as written.
 fn named_subcommand(argv: &[String]) -> Option<String> {
     use clap::CommandFactory;
+    fn long<'a>(icm: &'a clap::Command, name: &str) -> Option<&'a clap::Arg> {
+        icm.get_arguments().find(|option| {
+            option.get_long() == Some(name)
+                || option
+                    .get_all_aliases()
+                    .is_some_and(|aliases| aliases.contains(&name))
+        })
+    }
+    fn short(icm: &clap::Command, name: char) -> Option<&clap::Arg> {
+        icm.get_arguments()
+            .find(|option| option.get_short() == Some(name))
+    }
+    let takes_value = |option: &clap::Arg| option.get_action().takes_values();
     let mut icm = Cli::command();
     icm.build();
-    let takes_value = |option: Option<&clap::Arg>| {
-        option.is_some_and(|option| option.get_action().takes_values())
-    };
     let mut words = argv.iter().skip(1);
+    // Whether the word before was an option clap does not define.
+    let mut after_unknown = false;
     while let Some(word) = words.next() {
+        let maybe_value = std::mem::take(&mut after_unknown);
         if word == "--" {
             return words.next().cloned();
         }
-        if let Some(long) = word.strip_prefix("--") {
+        if let Some(name) = word.strip_prefix("--") {
             // `--name=value` carries its value.
-            if !long.contains('=')
-                && takes_value(icm.get_arguments().find(|option| {
-                    option.get_long() == Some(long)
-                        || option
-                            .get_all_aliases()
-                            .is_some_and(|aliases| aliases.contains(&long))
-                }))
-            {
-                let _ = words.next();
+            if !name.contains('=') {
+                match long(&icm, name) {
+                    Some(option) if takes_value(option) => {
+                        let _ = words.next();
+                    }
+                    Some(_) => {}
+                    None => after_unknown = true,
+                }
             }
             continue;
         }
         if let Some(shorts) = word.strip_prefix('-').filter(|shorts| !shorts.is_empty()) {
             // A cluster (`-qv`): the first short option that takes a value
             // takes the rest of the word, or else the next word.
-            for (at, short) in shorts.char_indices() {
-                if takes_value(
-                    icm.get_arguments()
-                        .find(|option| option.get_short() == Some(short)),
-                ) {
-                    if at + short.len_utf8() == shorts.len() {
-                        let _ = words.next();
+            for (at, name) in shorts.char_indices() {
+                match short(&icm, name) {
+                    Some(option) if takes_value(option) => {
+                        if at + name.len_utf8() == shorts.len() {
+                            let _ = words.next();
+                        }
+                        break;
                     }
-                    break;
+                    Some(_) => {}
+                    None => {
+                        after_unknown = true;
+                        break;
+                    }
                 }
             }
             continue;
         }
-        return Some(
-            icm.find_subcommand(word)
-                .map_or_else(|| word.clone(), |command| command.get_name().to_string()),
-        );
+        match icm.find_subcommand(word) {
+            Some(command) => return Some(command.get_name().to_string()),
+            // The value the unknown option before it may take.
+            None if maybe_value => {}
+            None => return Some(word.clone()),
+        }
     }
     None
 }
@@ -547,6 +568,16 @@ mod tests {
             Some("stop".to_string())
         );
         assert_eq!(named(&["--", "run"]), run);
+        // An option clap does not define (a misspelled `--config`) may take
+        // a value: the word after it is not the command unless it names
+        // one.
+        assert_eq!(named(&["--conf", "x.toml", "run", "--help"]), run);
+        assert_eq!(named(&["--timout", "90s", "-q", "run"]), run);
+        assert_eq!(named(&["-Z", "x.toml", "run"]), run);
+        assert_eq!(named(&["-qZ", "x.toml", "run"]), run);
+        assert_eq!(named(&["--conf", "run", "--help"]), run);
+        assert_eq!(named(&["--conf=x.toml", "run"]), run);
+        assert_eq!(named(&["--conf", "x.toml"]), None);
         // An unknown word is still what was asked for.
         assert_eq!(
             named(&["--timeout", "1m", "clean"]),
