@@ -510,6 +510,46 @@ fn a_pid_another_process_took_is_not_the_app() {
     }
 }
 
+/// `icm ps` judges an ios-sim session's app as `stop ios-sim` does: by the
+/// identity `run` recorded (`pid_identity`), not by whether the pid exists
+/// and started before the file was last written, which a rewrite of the file
+/// (`shot`, `run --attach`) after the pid was reused satisfies.
+#[test]
+fn ps_judges_the_ios_sim_app_by_its_identity() {
+    let unrelated = Unrelated::start();
+    let pid = unrelated.0.id();
+    let own = serde_json::to_value(icm::procid::of(pid as i32).unwrap()).unwrap();
+    for (case, fields, running) in [
+        ("no identity", json!({}), false),
+        (
+            "another identity",
+            json!({"pid_identity": {"start": "1791334000.000001", "exe": "/x/fixture-app"}}),
+            false,
+        ),
+        ("the app's identity", json!({"pid_identity": own}), true),
+    ] {
+        let fake = Fake::new();
+        // Written now, after the process started: the old test passes it.
+        fake.write_session("OTHER-UDID", pid, fields);
+
+        let ps = fake.result("ok", &["ps", "--json", "-q"]);
+        assert_eq!(ps["exit"], 0, "{case}: {ps}");
+        let session = &ps["sessions"][0];
+        assert_eq!(session["platform"], "ios-sim", "{case}: {ps}");
+        assert_eq!(session["running"], running, "{case}: {ps}");
+        assert_eq!(
+            session["alive"],
+            if running { json!([pid]) } else { json!([]) },
+            "{case}: {ps}"
+        );
+        assert_eq!(
+            ps["summary"],
+            format!("1 session(s), {} running", u8::from(running)),
+            "{case}: {ps}"
+        );
+    }
+}
+
 /// A session whose app pid still has the process icm read at launch is the
 /// app: `stop` terminates it, and the session records the identity `run`
 /// read (`run_logs_shot_and_stop` ends the app that way).

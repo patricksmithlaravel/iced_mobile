@@ -83,6 +83,9 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - Plain `icm stop android` (and `icm stop --all`) says why it left the app running when the device
   names another project as the emulator's owner (`android.emulator.shared`), with the `adb` command
   that stops the app by hand, where it said nothing.
+- `icm ps` judges an iOS Simulator session's app by the start time `run` recorded, as `icm stop
+  ios-sim` does, where it still listed a pid another process had taken as the running app when the
+  session file had been rewritten since (`shot`, `run --attach`).
 - `icm stop android --dry-run` states the rules the stop follows for the app and the emulator.
 
 ## Changes in v0.14.1-mobile.2

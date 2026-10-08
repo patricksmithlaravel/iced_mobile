@@ -499,19 +499,32 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
                 // The web session has one definition of alive, the one
                 // `stop web` signals by ([`crate::sessions::alive`]): the
                 // identity icm recorded for the host, or the marker a
-                // record from before identities holds. Any other record
-                // is checked as `stop` checks it ([`Session::is_ours`]).
-                let alive: Vec<i32> = if session.platform == "web" {
-                    crate::sessions::read(&dir, "web")
-                        .filter(crate::sessions::alive)
-                        .map(|_| session.all_pids())
-                        .unwrap_or_default()
-                } else {
+                // record from before identities holds. The ios-sim record
+                // keeps its identities beside its own fields
+                // (`pid_identity`), which the generic record does not
+                // read, so its app is judged as `stop ios-sim` judges it
+                // ([`ios_sim::session::Session::app_alive`]); an ios-sim
+                // file that is not its own record falls back to the
+                // generic test. Any other record is checked as `stop`
+                // checks it ([`Session::is_ours`]).
+                let generic = || -> Vec<i32> {
                     session
                         .all_pids()
                         .into_iter()
                         .filter(|pid| session.is_ours(*pid, written))
                         .collect()
+                };
+                let alive: Vec<i32> = match session.platform.as_str() {
+                    "web" => crate::sessions::read(&dir, "web")
+                        .filter(crate::sessions::alive)
+                        .map(|_| session.all_pids())
+                        .unwrap_or_default(),
+                    "ios-sim" => match crate::platform::ios_sim::session::Session::read(&dir) {
+                        Some(record) if record.app_alive() => session.all_pids(),
+                        Some(_) => Vec::new(),
+                        None => generic(),
+                    },
+                    _ => generic(),
                 };
                 // Android records the device's serial at the top level.
                 let device = session
