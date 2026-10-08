@@ -15,8 +15,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_icm");
 /// `icm-api36` (or `$FAKE_AVD`) with a 1080x2400 display at 420 dpi. Every call is appended
 /// to `$FAKE_ADB_LOG`; `emu kill` removes the emulator. `logcat` prints
 /// `logcat.txt` (`events.txt` for `-b events`) next to the log, and `pidof`
-/// the file `pidof` there when it exists (else 4321). With the file
-/// `getprop-fails` there, reading `debug.icm.booted_by` fails.
+/// the file `pidof` there when it exists (else 4321). Reading
+/// `debug.icm.booted_by` prints the file `booted-by` there (else nothing),
+/// and fails with the file `getprop-fails` there.
 const FAKE_ADB: &str = r#"#!/bin/sh
 echo "$*" >> "$FAKE_ADB_LOG"
 state_dir=$(dirname "$FAKE_ADB_LOG")
@@ -36,7 +37,7 @@ case "$1" in
       "getprop ro.build.version.sdk") echo "36" ;;
       "getprop debug.icm.booted_by")
         if [ -f "$state_dir/getprop-fails" ]; then echo "error: closed" >&2; exit 1; fi
-        echo "" ;;
+        if [ -f "$state_dir/booted-by" ]; then cat "$state_dir/booted-by"; else echo ""; fi ;;
       getprop*) echo "" ;;
       "wm density") echo "Physical density: 420" ;;
       "wm size") echo "Physical size: 1080x2400" ;;
@@ -276,6 +277,106 @@ fn an_unreadable_owner_keeps_the_emulator_running() {
         "{result}"
     );
     assert!(sandbox.adb_calls().contains("-s emulator-5580 emu kill"));
+}
+
+/// A session whose emulator icm booted says nothing about the emulator on
+/// its serial once that emulator's process has exited: another project may
+/// have booted the managed AVD on the same port since and claimed it.
+/// `--shutdown` reads the owner then, and leaves that emulator, and the app
+/// on it, alone.
+#[test]
+fn a_stale_session_never_shuts_down_another_projects_emulator() {
+    let sandbox = Sandbox::new();
+    std::fs::write(sandbox.root.path().join("booted-by"), "fedcba9876543210\n").unwrap();
+    let mut exited = Command::new("true").spawn().unwrap();
+    let dead = exited.id();
+    let _ = exited.wait().unwrap();
+    let sessions = sandbox.project.join("target/icm/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(
+        sessions.join("android.json"),
+        serde_json::json!({
+            "schema": "icm.session.android/1", "run": "r1", "serial": "emulator-5580",
+            "kind": "emulator", "avd": "icm-api36", "booted_by_icm": true,
+            "emulator_pid": dead, "abi": "arm64-v8a", "app_id": "com.example.app",
+            "started": "2026-10-06T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = sandbox.run(&["stop", "android", "--shutdown", "--json"], &[]);
+    let events: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let result = events.last().unwrap();
+    assert_eq!(result["exit"], 0, "{result}");
+    let calls = sandbox.adb_calls();
+    assert!(
+        calls.contains("-s emulator-5580 shell getprop debug.icm.booted_by"),
+        "{calls}"
+    );
+    assert!(!calls.contains("emu kill"), "{calls}");
+    assert!(!calls.contains("force-stop"), "{calls}");
+    assert_eq!(result["stopped"], serde_json::json!([]), "{result}");
+    let shared: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "check" && event["id"] == "android.emulator.shared")
+        .collect();
+    assert_eq!(shared.len(), 1, "{events:?}");
+    assert!(
+        shared[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("fedcba9876543210"),
+        "{events:?}"
+    );
+    assert!(
+        !sessions.join("android.json").exists(),
+        "the stale session was kept"
+    );
+
+    // Nobody's, but no icm AVD: the owner's own AVD on the reused port is
+    // never taken for the session's.
+    std::fs::remove_file(sandbox.root.path().join("booted-by")).unwrap();
+    std::fs::write(sandbox.log(), "").unwrap();
+    std::fs::write(
+        sessions.join("android.json"),
+        serde_json::json!({
+            "schema": "icm.session.android/1", "run": "r2", "serial": "emulator-5580",
+            "kind": "emulator", "avd": "icm-api36", "booted_by_icm": true,
+            "emulator_pid": dead, "abi": "arm64-v8a", "app_id": "com.example.app",
+            "started": "2026-10-06T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = sandbox.run(
+        &["stop", "android", "--shutdown", "--json"],
+        &[("FAKE_AVD", "owners_pixel")],
+    );
+    let events: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let result = events.last().unwrap();
+    assert_eq!(result["exit"], 0, "{result}");
+    let calls = sandbox.adb_calls();
+    assert!(!calls.contains("emu kill"), "{calls}");
+    assert!(!calls.contains("force-stop"), "{calls}");
+    let left: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "check" && event["id"] == "run.no_session")
+        .collect();
+    assert_eq!(left.len(), 1, "{events:?}");
+    assert!(
+        left[0]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("emulator-5580 (owners_pixel) left running"),
+        "{events:?}"
+    );
 }
 
 #[test]

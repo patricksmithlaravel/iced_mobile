@@ -2485,9 +2485,25 @@ pub fn stop_session(
             .any(|device| device.serial == serial && device.online())
     };
     let mut stopped: Vec<Value> = Vec::new();
+    // The emulator icm booted for the session is the one on its serial
+    // only while the emulator process icm recorded still runs, the test
+    // the booted records pass too (session::Booted::alive). Once it has
+    // exited, the app went with it, and the serial may hold another
+    // emulator since: another project's, or one booted by hand.
+    let booted_alive = |session: &Session| {
+        session::Booted {
+            emulator_pid: session.emulator_pid,
+            ..session::Booted::default()
+        }
+        .alive()
+    };
+    let exited = |session: &Session| {
+        session.booted_by_icm && session.emulator_pid.is_some() && !booted_alive(session)
+    };
 
     if let Some(session) = &session
         && online(&session.serial)
+        && !exited(session)
     {
         let adb = Adb::new(tools, &session.serial)?;
         let outcome = ctx.step(
@@ -2506,30 +2522,35 @@ pub fn stop_session(
     // made and owns (crate::managed::is_managed), never anyone else's, and
     // never one icm booted for another project (session::OWNER_PROP).
     if shutdown {
+        // The AVD each emulator runs now, which a session's record may no
+        // longer name.
+        let running = device::running_emulators(tools, &listed);
+        let avd_on = |serial: &str| {
+            running
+                .iter()
+                .find(|(s, _)| s == serial)
+                .and_then(|(_, name)| name.clone())
+        };
         // (serial, emulator pid, whether this project's records say icm
         // booted it for this project)
         let mut targets: Vec<(String, Option<u32>, bool)> = Vec::new();
         if let Some(session) = &session
             && online(&session.serial)
-            && (session.booted_by_icm
-                || session
-                    .avd
-                    .as_deref()
-                    .is_some_and(crate::managed::is_managed))
         {
-            targets.push((
-                session.serial.clone(),
-                session.emulator_pid,
-                session.booted_by_icm,
-            ));
+            if session.booted_by_icm && booted_alive(session) {
+                targets.push((session.serial.clone(), session.emulator_pid, true));
+            } else if avd_on(&session.serial).is_some_and(|avd| crate::managed::is_managed(&avd)) {
+                // Whose it is, the owner check below reads from the device.
+                targets.push((session.serial.clone(), None, false));
+            }
         }
         let default = device::default_avd(host, project.config.config.android.target_sdk);
         if crate::managed::is_managed(&default) {
-            for (serial, name) in device::running_emulators(tools, &listed) {
+            for (serial, name) in &running {
                 if name.as_deref() == Some(default.as_str())
-                    && !targets.iter().any(|(s, ..)| *s == serial)
+                    && !targets.iter().any(|(s, ..)| s == serial)
                 {
-                    targets.push((serial, None, false));
+                    targets.push((serial.clone(), None, false));
                 }
             }
         }
@@ -2552,12 +2573,13 @@ pub fn stop_session(
             && session.kind == "emulator"
             && !targets.iter().any(|(serial, ..)| *serial == session.serial)
         {
+            let avd = avd_on(&session.serial);
             ctx.rep.check(Check::info(
                 CheckId::RunNoSession,
                 format!(
                     "{} ({}) left running: icm did not boot it and shuts down only its own AVDs (icm-*, never icm-test-*)",
                     session.serial,
-                    session.avd.as_deref().unwrap_or("unknown AVD")
+                    avd.as_deref().unwrap_or("unknown AVD")
                 ),
             ));
         }
