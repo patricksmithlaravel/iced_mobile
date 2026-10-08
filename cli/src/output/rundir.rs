@@ -129,7 +129,7 @@ pub fn write_owner(dir: &Path) -> io::Result<()> {
     let pid = std::process::id();
     let record = serde_json::json!({
         "pid": pid,
-        "identity": crate::procid::of(pid as i32),
+        "identity": crate::procid::capture(pid as i32),
     });
     write_atomic(&dir.join(OWNER), format!("{record}\n").as_bytes())
 }
@@ -289,6 +289,15 @@ mod tests {
         // From before identities: the pid is all there is.
         write(serde_json::json!({"pid": me}));
         assert!(detached_alive(dir.path()));
+        // An identity icm could not read for its own process (recorded as
+        // such) decides as one the OS will not describe: the run decides
+        // only whether it is waited for and kept, never a signal, so a
+        // pid that runs counts and one that does not is not running.
+        let unread = crate::procid::Identity::unavailable("proc_pidinfo: denied");
+        write(serde_json::json!({"pid": me, "identity": unread}));
+        assert!(detached_alive(dir.path()));
+        write(serde_json::json!({"pid": i32::MAX - 5, "identity": unread}));
+        assert!(!detached_alive(dir.path()));
         write(serde_json::json!({"pid": 0}));
         assert!(!detached_alive(dir.path()));
         // A finished run is not running.

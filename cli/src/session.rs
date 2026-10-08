@@ -23,9 +23,15 @@
 //! process's start time, [`crate::procid`]; `identity` beside `pid`, and
 //! on each entry of `pids`), or, in a record written before identities, it
 //! is alive and started before the session file was last written, so a pid
-//! that another process took is never touched. `--shutdown` also runs the
-//! `shutdown` commands when the device is icm-managed (`icm-` names only).
+//! that another process took is never touched. An `identity` that holds
+//! `unavailable` (icm started the process and could not read it, and says
+//! why) is neither: it matches no process, and the write-time test is not
+//! used for it, so that pid is never signalled; `stop` and `ps` say so
+//! (`run.identity_unavailable`). `--shutdown` also runs the `shutdown`
+//! commands when the device is icm-managed (`icm-` names only).
 
+use crate::catalogue::CheckId;
+use crate::error::Check;
 use crate::procid::{self, Identity, Verdict};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -213,13 +219,30 @@ impl Session {
     pub fn is_ours(&self, pid: i32, written: Option<SystemTime>) -> bool {
         is_ours(pid, self.identity_of(pid), written)
     }
+
+    /// The record's pids that a process runs under and nothing tells from
+    /// another process, each with why: icm could not read the identity when
+    /// it started the process ([`Identity::unavailable`]), or the OS will
+    /// not describe it now. They are not ours ([`Session::is_ours`]), and
+    /// are no more gone than running.
+    pub fn unverified_pids(&self) -> Vec<(i32, String)> {
+        self.all_pids()
+            .into_iter()
+            .filter_map(|pid| match procid::check(pid, self.identity_of(pid)?) {
+                Verdict::Unknown(why) => Some((pid, why)),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// Whether a recorded pid is still the process the session started. With
-/// the `identity` recorded for it, the pid must still have it. Without one
-/// (a record from before identities) it must be alive and have started no
-/// later than the session file was last written, which a pid that another
-/// process took, or one reused after a reboot, does not satisfy.
+/// the `identity` recorded for it, the pid must still have it; an identity
+/// icm could not read when it started the process ([`Identity::unavailable`])
+/// matches no process, so such a pid is never ours. Without one (a record
+/// from before identities) it must be alive and have started no later than
+/// the session file was last written, which a pid that another process
+/// took, or one reused after a reboot, does not satisfy.
 pub fn is_ours(pid: i32, identity: Option<&Identity>, written: Option<SystemTime>) -> bool {
     if pid <= 1 {
         return false;
@@ -240,6 +263,50 @@ pub fn is_ours(pid: i32, identity: Option<&Identity>, written: Option<SystemTime
         },
         None => false,
     }
+}
+
+/// The WARN for a process icm has just started whose identity it could not
+/// read ([`Identity::unavailable`], from [`procid::capture`]) while a
+/// process still runs under its pid: later commands cannot tell it from
+/// another process, so they will not signal it. `what` names the process
+/// (`the desktop app`). `None` for an identity that was read, a record
+/// without one, and a process that has already ended.
+pub fn unavailable_check(what: &str, pid: i32, identity: Option<&Identity>) -> Option<Check> {
+    let identity = identity?;
+    let reason = identity.unavailable.as_deref()?;
+    if procid::check(pid, identity) == Verdict::Gone {
+        return None;
+    }
+    Some(
+        Check::warn(
+            CheckId::RunIdentityUnavailable,
+            format!(
+                "icm could not read the identity of {what} (pid {pid}) when it started it ({reason}), so later commands cannot tell whether that pid is still {what}, and they will not signal it"
+            ),
+        )
+        .fix(
+            format!("When you are done with {what}, check what runs under the pid, and stop it yourself if it is {what}."),
+            &[&format!("ps -p {pid} -o pid,lstart,command")],
+        ),
+    )
+}
+
+/// The WARN for a process found under a recorded pid that nothing tells
+/// from another process (`stop`, a run that replaces a session, `logs`):
+/// `why` is [`Verdict::Unknown`]'s, either that the record's identity is
+/// unavailable or that the OS will not describe the process now. It is
+/// treated as not running and never signalled.
+pub fn unverified_check(what: &str, pid: i32, why: &str) -> Check {
+    Check::warn(
+        CheckId::RunIdentityUnavailable,
+        format!(
+            "a process runs under pid {pid} and icm cannot tell whether it is {what} ({why}), so it counts as not running and is never signalled"
+        ),
+    )
+    .fix(
+        format!("Check what runs under the pid, and stop it yourself if it is {what}."),
+        &[&format!("ps -p {pid} -o pid,lstart,command")],
+    )
 }
 
 /// How long a process has run (`ps -o etime=`).
@@ -373,6 +440,7 @@ mod tests {
         let other = Identity {
             start: "1791334000.000001".to_string(),
             exe: String::new(),
+            unavailable: None,
         };
         let old = Some(SystemTime::now() - Duration::from_secs(10 * 86_400));
         assert!(is_ours(me, Some(&mine), old));
@@ -399,5 +467,99 @@ mod tests {
         let back: Session = serde_json::from_str(&text).unwrap();
         assert_eq!(back.identity_of(me), Some(&other));
         assert_eq!(back.pids[0].identity.as_ref(), Some(&mine));
+    }
+
+    /// A pid whose identity icm could not read when it started the process
+    /// is not judged as a record from before identities is: that one is
+    /// ours while it is alive and the file is no older than the process,
+    /// which can fool a rewrite after a pid was reused; this one is never
+    /// ours, however recent the file, and the record says why.
+    #[test]
+    fn an_identity_icm_could_not_read_is_never_ours() {
+        let me = std::process::id() as i32;
+        let unread = Identity::unavailable("proc_pidinfo: Operation not permitted");
+        let now = Some(SystemTime::now());
+        assert!(is_ours(me, None, now));
+        assert!(!is_ours(me, Some(&unread), now));
+        assert!(!is_ours(me, Some(&unread), None));
+
+        let spawn = || {
+            std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .unwrap()
+        };
+        let (mut first, mut second) = (spawn(), spawn());
+        let (one, two) = (first.id() as i32, second.id() as i32);
+        let session = Session {
+            pid: Some(one),
+            identity: Some(unread.clone()),
+            pids: vec![SessionProcess {
+                pid: two,
+                what: "server".to_string(),
+                // Nothing recorded at all: an older icm's record.
+                identity: None,
+            }],
+            ..Session::default()
+        };
+        assert!(!session.is_ours(one, now));
+        // A process runs under the pid nothing can tell from another: it
+        // is listed as unverified, neither ours nor gone. The older record
+        // has none to be unverified by.
+        assert_eq!(
+            session
+                .unverified_pids()
+                .into_iter()
+                .map(|(pid, why)| (pid, why.contains("Operation not permitted")))
+                .collect::<Vec<_>>(),
+            [(one, true)]
+        );
+        assert_eq!(session.identity_of(two), None);
+        let text = serde_json::to_string(&session).unwrap();
+        let back: Session = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.identity, Some(unread));
+        assert!(
+            text.contains(r#""unavailable":"proc_pidinfo: Operation not permitted""#),
+            "{text}"
+        );
+
+        // Once nothing runs under the pid, it is not unverified either.
+        first.kill().unwrap();
+        let _ = first.wait().unwrap();
+        assert!(session.unverified_pids().is_empty());
+        second.kill().unwrap();
+        let _ = second.wait().unwrap();
+    }
+
+    /// The WARN names the pid and why; it is for a process that still runs
+    /// under the pid, not for one that has ended, an identity that was
+    /// read, or a record without any.
+    #[test]
+    fn the_warning_is_for_a_running_process_icm_could_not_read() {
+        let me = std::process::id() as i32;
+        let unread = Identity::unavailable("proc_pidinfo: Operation not permitted");
+        let check = unavailable_check("the desktop app", me, Some(&unread)).unwrap();
+        assert_eq!(check.id(), "run.identity_unavailable");
+        let text = serde_json::to_string(&check.to_event()).unwrap();
+        assert!(text.contains(&format!("pid {me}")), "{text}");
+        assert!(text.contains("Operation not permitted"), "{text}");
+        assert!(text.contains("will not signal"), "{text}");
+        assert!(unavailable_check("the app", me, procid::of(me).as_ref()).is_none());
+        assert!(unavailable_check("the app", me, None).is_none());
+        // Nothing runs under the pid: nothing to warn about.
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        assert!(unavailable_check("the app", pid, Some(&unread)).is_some());
+        child.kill().unwrap();
+        let _ = child.wait().unwrap();
+        assert!(unavailable_check("the app", pid, Some(&unread)).is_none());
+
+        let check = unverified_check("the desktop app", me, "the OS would not say");
+        let text = serde_json::to_string(&check.to_event()).unwrap();
+        assert!(text.contains("the OS would not say"), "{text}");
+        assert!(text.contains("never signalled"), "{text}");
     }
 }

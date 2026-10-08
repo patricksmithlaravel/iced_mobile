@@ -127,10 +127,24 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         }
     }
 
-    // A record whose process had already exited stopped nothing.
+    // A record whose process had already exited stopped nothing, and nor
+    // did one that only left a process running, which nothing tells from
+    // another process (`run.identity_unavailable`).
+    let only_left = |entry: &Value| {
+        entry["left_running"]
+            .as_array()
+            .is_some_and(|pids| !pids.is_empty())
+            && entry["processes"]
+                .as_array()
+                .is_none_or(|pids| pids.is_empty())
+    };
     let count = stopped
         .iter()
-        .filter(|entry| entry["stopped"] != "was not running" && entry["how"] != "already exited")
+        .filter(|entry| {
+            entry["stopped"] != "was not running"
+                && entry["how"] != "already exited"
+                && !only_left(entry)
+        })
         .count();
     ctx.rep.set("stopped", Value::Array(stopped));
     ctx.rep.set("shutdown", json!(shut_down));
@@ -265,6 +279,9 @@ fn stop_one(ctx: &Ctx, path: &Path, session: &Session, shutdown: bool) -> Value 
 
     let mut ended = Vec::new();
     let mut stale = Vec::new();
+    // Processes that run under a recorded pid and that nothing tells from
+    // another process: neither ended nor already gone.
+    let unverified = session.unverified_pids();
     for pid in session.all_pids() {
         if session.is_ours(pid, written) {
             if session::terminate(pid, GRACE) {
@@ -275,6 +292,12 @@ fn stop_one(ctx: &Ctx, path: &Path, session: &Session, shutdown: bool) -> Value 
                     format!("{platform}: process {pid} did not stop"),
                 ));
             }
+        } else if let Some((_, why)) = unverified.iter().find(|(other, _)| *other == pid) {
+            ctx.rep.check(session::unverified_check(
+                &format!("the {platform} process"),
+                pid,
+                why,
+            ));
         } else {
             stale.push(pid);
         }
@@ -324,6 +347,7 @@ fn stop_one(ctx: &Ctx, path: &Path, session: &Session, shutdown: bool) -> Value 
         "run": session.run,
         "processes": ended,
         "already_gone": stale,
+        "left_running": unverified.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
         "commands": commands,
         "shutdown": shut,
     })
@@ -564,10 +588,34 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
                 } else {
                     ""
                 };
+                // A process runs under a recorded pid and nothing tells it
+                // from another: neither running nor stale. An ios-sim
+                // record keeps its identities beside its own fields, as
+                // for `alive`.
+                let unverified: Vec<(i32, String)> = if host_alive {
+                    Vec::new()
+                } else if session.platform == "ios-sim" {
+                    crate::platform::ios_sim::session::Session::read(&dir)
+                        .map(|record| {
+                            record
+                                .unverified()
+                                .into_iter()
+                                .map(|(_, pid, why)| (pid, why))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    session.unverified_pids()
+                };
                 let is_running = if !host_alive && matches!(state, Some("stopped" | "exited")) {
                     line.push_str(&format!(
                         " {} (its logs stay readable)",
                         state.unwrap_or_default()
+                    ));
+                    false
+                } else if let Some((pid, why)) = unverified.first() {
+                    line.push_str(&format!(
+                        " unverified (pid {pid} cannot be told from another process: {why}; `icm explain run.identity_unavailable`)"
                     ));
                     false
                 } else if !host_alive && has_pids {
@@ -623,6 +671,7 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
                     "started": session.started,
                     "pids": session.all_pids(),
                     "alive": alive,
+                    "unverified": unverified.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
                     "running": is_running,
                     "app_running": match &app {
                         AppState::Running => json!(true),

@@ -224,8 +224,10 @@ pub struct Booting {
     /// The emulator's pid.
     pub pid: u32,
     /// What tells that process from any other that has its pid later,
-    /// read right after it started ([`crate::procid`]); `None` when the
-    /// process was already gone, which a failed boot reports.
+    /// read right after it started ([`crate::procid`]); an
+    /// [`Identity::unavailable`] with the reason when it could not be read
+    /// (the process was already gone, which a failed boot reports, or the
+    /// OS would not describe it).
     pub identity: Option<Identity>,
     /// Its output.
     pub log: PathBuf,
@@ -313,12 +315,21 @@ pub fn start(
         "booting {avd} on emulator-{port} (pid {pid}; log {})",
         crate::paths::display(log)
     ));
+    // Read now, while the pid is the emulator's: what `stop` verifies
+    // before it takes the pid for the emulator or signals it. When the OS
+    // will not say, the record says that icm could not read it.
+    let identity = Some(crate::procid::capture(pid as i32));
+    if let Some(check) =
+        crate::session::unavailable_check("the emulator", pid as i32, identity.as_ref())
+    {
+        ctx.rep.check(check);
+    }
     Ok(Booting {
         avd: avd.to_string(),
         serial: format!("emulator-{port}"),
         port,
         pid,
-        identity: crate::procid::of(pid as i32),
+        identity,
         log: log.to_path_buf(),
     })
 }
@@ -640,6 +651,7 @@ mod tests {
         let recorded = Identity {
             start: "1791334000.000001".to_string(),
             exe: "/sdk/emulator/emulator".to_string(),
+            unavailable: None,
         };
         assert!(!terminate(another.id(), &recorded));
         // Its pid is not the recorded process, so the emulator is gone as

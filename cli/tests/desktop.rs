@@ -3,7 +3,7 @@
 //! gets its own copy of the fixture, cache dir and target dir, and stops
 //! every app it started.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -946,6 +946,158 @@ fn an_app_that_kept_its_process_has_its_inherited_secrets_read() {
             assert!(text.contains("signed in with <redacted>"), "{what}: {text}");
         }
     }
+}
+
+/// Rewrites the session's record of the identity icm read for the app
+/// (the live file `stop`, `logs`, `shot` and `ps` read).
+fn set_identity(sandbox: &Sandbox, identity: Option<Value>) {
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(sandbox.session()).unwrap()).unwrap();
+    match identity {
+        Some(identity) => record["identity"] = identity,
+        None => {
+            let _ = record.as_object_mut().unwrap().remove("identity");
+        }
+    }
+    std::fs::write(sandbox.session(), record.to_string()).unwrap();
+}
+
+/// An app whose process identity icm could not read when it started it
+/// (`ICM_FAKE_IDENTITY_UNREADABLE` makes the read fail, as it does when the
+/// OS will not describe the process) is recorded as that, which is not the
+/// same as a session from before identities, and the run says so
+/// (`run.identity_unavailable`). Every later command treats it as
+/// unverifiable: it is not running and not gone, and it is never signalled,
+/// whatever executable the pid runs; they say so too, where the record
+/// held nothing, the app was judged by its executable as an old record is,
+/// and `stop` signalled it. The session record stays while the process
+/// runs, and `stop` removes it once the pid is free.
+#[test]
+fn an_app_whose_identity_could_not_be_read_is_left_running_and_reported() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps(Vec::new());
+    let why = "proc_pidinfo: Operation not permitted";
+
+    let run = sandbox.result_with(
+        &["run", "desktop", "--settle", "100ms", "--no-shot"],
+        &[("ICM_FAKE_IDENTITY_UNREADABLE", why)],
+    );
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(pid);
+    let warning = run["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["id"] == "run.identity_unavailable")
+        .unwrap_or_else(|| panic!("no run.identity_unavailable in {run}"));
+    let detail = warning["detail"].as_str().unwrap();
+    assert!(detail.contains(&format!("pid {pid}")), "{detail}");
+    assert!(detail.contains("the desktop app"), "{detail}");
+    assert!(detail.contains(why), "{detail}");
+    // The record says that icm tried, and why it could not.
+    let record: Value =
+        serde_json::from_str(&std::fs::read_to_string(sandbox.session()).unwrap()).unwrap();
+    assert_eq!(
+        record["identity"],
+        json!({"start": "", "unavailable": why}),
+        "{record}"
+    );
+
+    // `ps`: neither running nor stale.
+    let ps = sandbox.result(&["ps"]);
+    let desktop = &ps["sessions"][0];
+    assert_eq!(desktop["platform"], "desktop", "{ps}");
+    assert_eq!(desktop["running"], false, "{ps}");
+    assert_eq!(desktop["unverified"], json!([pid]), "{ps}");
+    assert_eq!(desktop["alive"], json!([]), "{ps}");
+    let human = sandbox.run(&["ps"]);
+    let text = String::from_utf8_lossy(&human.stdout).into_owned();
+    assert!(
+        text.contains(&format!("unverified (pid {pid} cannot be told")),
+        "{text}"
+    );
+    assert!(!text.contains("stale"), "{text}");
+
+    // `logs` and `shot` do not take it for the running app, and `shot`
+    // keeps the record.
+    let logs = sandbox.result(&["logs", "desktop"]);
+    assert_eq!(logs["exit"], 0, "{logs}");
+    assert!(
+        ids(&logs["warnings"]).contains(&"run.identity_unavailable".to_string()),
+        "{logs}"
+    );
+    assert_eq!(logs["process"]["alive"], false, "{logs}");
+    let shot = sandbox.result(&["shot", "desktop"]);
+    assert_eq!(shot["exit"], 7, "{shot}");
+    assert!(
+        shot["errors"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("cannot tell whether the desktop app"),
+        "{shot}"
+    );
+    assert!(sandbox.session().exists());
+
+    // `stop` leaves it running, names it, and keeps the record.
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(
+        stop["stopped"][0]["how"], "left running (cannot be verified)",
+        "{stop}"
+    );
+    assert_eq!(stop["stopped"][0]["left_running"], json!([pid]), "{stop}");
+    let warning = stop["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["id"] == "run.identity_unavailable")
+        .unwrap_or_else(|| panic!("no run.identity_unavailable in {stop}"));
+    let detail = warning["detail"].as_str().unwrap();
+    assert!(detail.contains(&format!("pid {pid}")), "{detail}");
+    assert!(detail.contains("Operation not permitted"), "{detail}");
+    assert!(detail.contains("never signalled"), "{detail}");
+    let all = sandbox.result(&["stop", "--all"]);
+    assert_eq!(all["exit"], 0, "{all}");
+    assert!(
+        all["summary"]
+            .as_str()
+            .unwrap()
+            .contains("nothing was running"),
+        "{all}"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(alive(pid), "the unverified app was signalled");
+    assert!(sandbox.session().exists());
+
+    // Once nothing runs under the pid it is gone, whatever was recorded.
+    // SAFETY: kill(2) on the app this test started.
+    unsafe {
+        let _ = libc::kill(-pid, libc::SIGKILL);
+    }
+    wait_dead(pid);
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["stopped"][0]["how"], "already exited", "{stop}");
+    assert!(!sandbox.session().exists());
+
+    // The same app in a session from before identities, which has none, is
+    // still judged by the executable its pid runs, and stopped.
+    let run = sandbox.result(&["run", "desktop", "--settle", "100ms", "--no-shot"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(pid);
+    set_identity(&sandbox, None);
+    let ps = sandbox.result(&["ps"]);
+    assert_eq!(ps["sessions"][0]["unverified"], json!([]), "{ps}");
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["stopped"][0]["how"], "stopped with SIGTERM", "{stop}");
+    assert!(
+        !ids(&stop["warnings"]).contains(&"run.identity_unavailable".to_string()),
+        "{stop}"
+    );
+    wait_dead(pid);
 }
 
 #[test]

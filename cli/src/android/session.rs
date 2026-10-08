@@ -62,8 +62,9 @@ pub struct Session {
     /// The emulator's pid, when icm booted it.
     pub emulator_pid: Option<u32>,
     /// What tells that process from any other that has its pid later
-    /// ([`crate::procid`]), read when icm started it. A session written
-    /// before this has none, and its pid verifies nothing.
+    /// ([`crate::procid`]), read when icm started it, or the reason icm
+    /// could not read it ([`Identity::unavailable`]). A session written
+    /// before this has none. Neither verifies its pid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emulator_identity: Option<Identity>,
     /// The emulator's log, when icm booted it.
@@ -155,9 +156,11 @@ pub enum Process {
     /// is never signalled.
     Gone,
     /// The record cannot say: it holds no pid, or no identity to compare
-    /// the pid's process with (an older icm wrote it), or the OS would not
-    /// describe that process. The pid is never signalled, and the record
-    /// is no proof that the emulator on the serial is this project's.
+    /// the pid's process with (an older icm wrote it, or icm could not read
+    /// the identity when it started the emulator: [`Identity::unavailable`]),
+    /// or the OS would not describe that process. The pid is never
+    /// signalled, and the record is no proof that the emulator on the
+    /// serial is this project's.
     Unverified,
 }
 
@@ -339,13 +342,20 @@ mod tests {
         let other = Identity {
             start: "1791334000.000001".to_string(),
             exe: String::new(),
+            unavailable: None,
         };
         assert_eq!(process(Some(pid), Some(&other)), Process::Gone);
+        // An identity icm could not read when it started the process is
+        // no identity to compare either, as for a record that has none:
+        // the live pid is unverified, never the emulator.
+        let unread = Identity::unavailable("proc_pidinfo: Operation not permitted");
+        assert_eq!(process(Some(pid), Some(&unread)), Process::Unverified);
 
         child.kill().unwrap();
         let _ = child.wait().unwrap();
         assert_eq!(process(Some(pid), Some(&identity)), Process::Gone);
         assert_eq!(process(Some(pid), None), Process::Gone);
+        assert_eq!(process(Some(pid), Some(&unread)), Process::Gone);
 
         let booted = Booted {
             serial: "emulator-5580".to_string(),

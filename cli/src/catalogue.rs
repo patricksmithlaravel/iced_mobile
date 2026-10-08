@@ -762,6 +762,9 @@ catalogue! {
     RunNoSession = "run.no_session", Device, Fail, Agent,
         "No running session for that platform",
         "Start one with `icm run <platform>`.";
+    RunIdentityUnavailable = "run.identity_unavailable", CheckFailed, Warn, Agent,
+        "icm cannot tell whether a process it started is still that process, so it will not signal it",
+        "Stop the process yourself when you are done with it (the detail names its pid).";
 
     // ---- test, harness, hooks, input -----------------------------------------------------
     TestFailed = "test.failed", CheckFailed, Fail, Agent,

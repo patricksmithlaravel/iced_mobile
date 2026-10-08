@@ -651,6 +651,15 @@ fn a_pid_another_process_took_is_not_the_web_session() {
             }),
         ),
         ("neither an identity nor a marker", serde_json::json!({})),
+        // Not a record from before identities, which the marker still
+        // vouches for: icm started the host and could not read it.
+        (
+            "an identity icm could not read, and the marker",
+            serde_json::json!({
+                "identity": {"start": "", "unavailable": "proc_pidinfo: Operation not permitted"},
+                "marker": "__session web"
+            }),
+        ),
     ] {
         let mut record = serde_json::json!({
             "schema": "icm.session/1", "platform": "web", "pid": other.id(),
@@ -682,6 +691,41 @@ fn a_pid_another_process_took_is_not_the_web_session() {
     }
     let _ = other.kill();
     let _ = other.wait();
+}
+
+/// A session host that cannot read its own process identity (here
+/// `ICM_FAKE_IDENTITY_UNREADABLE` makes the read fail) does not start: no
+/// later command would take its record for a live session (a record whose
+/// identity is unavailable is never alive), so nothing could stop it. The
+/// run fails and says why, and leaves no record and no Chrome.
+#[test]
+fn a_session_host_that_cannot_read_its_own_identity_does_not_start() {
+    if let Some(reason) = skip_reason() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let run = sandbox.result_with(
+        &["run", "web"],
+        &[("ICM_FAKE_IDENTITY_UNREADABLE", "proc_pidinfo: denied")],
+    );
+    assert_eq!(run["exit"], 70, "{run}");
+    assert_eq!(run["errors"][0]["id"], "internal.bug", "{run}");
+    let detail = run["errors"][0]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("cannot read the process identity of this web session host"),
+        "{detail}"
+    );
+    assert!(detail.contains("proc_pidinfo: denied"), "{detail}");
+    assert!(
+        !sandbox
+            .project
+            .path()
+            .join("target/icm/sessions/web.json")
+            .exists()
+    );
+    let ps = sandbox.result(&["ps"]);
+    assert_eq!(ps["sessions"].as_array().unwrap().len(), 0, "{ps}");
 }
 
 #[test]

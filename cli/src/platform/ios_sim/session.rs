@@ -123,6 +123,32 @@ impl Session {
             .zip(self.pid_identity.as_ref())
             .is_some_and(|(pid, identity)| procid::check(pid, identity) == Verdict::Same)
     }
+
+    /// What the session recorded that a process runs under and nothing
+    /// tells from another process: `("the app", pid, why)` while the
+    /// session is running, and the collector, each only when icm could not
+    /// read the process's identity when it started it
+    /// ([`Identity::unavailable`]) or the OS will not describe it now.
+    /// Neither is ours, so `stop` and the next run do not signal the
+    /// collector and take the app for not running ([`Session::app_alive`]).
+    pub fn unverified(&self) -> Vec<(&'static str, i32, String)> {
+        let mut found = Vec::new();
+        if let (Some(pid), Some(identity)) = (self.collector_pid, &self.collector_identity)
+            && let Verdict::Unknown(why) = procid::check(pid, identity)
+        {
+            found.push(("the `log stream` collector", pid, why));
+        }
+        if self.state == "running"
+            && let (Some(pid), Some(identity)) = (
+                self.pid.and_then(|pid| i32::try_from(pid).ok()),
+                &self.pid_identity,
+            )
+            && let Verdict::Unknown(why) = procid::check(pid, identity)
+        {
+            found.push(("the app", pid, why));
+        }
+        found
+    }
 }
 
 /// Removes the live-file directories of runs other than `keep`.
@@ -191,8 +217,16 @@ mod tests {
         other.pid_identity = Some(Identity {
             start: "1791334000.000001".to_string(),
             exe: String::new(),
+            unavailable: None,
         });
         assert!(!other.app_alive());
+        // An identity icm could not read is no identity to compare either:
+        // the pid is never the app.
+        other.pid_identity = Some(Identity::unavailable(
+            "proc_pidinfo: Operation not permitted",
+        ));
+        assert!(!other.app_alive());
+        assert!(read.app_alive());
         let text = std::fs::read_to_string(path(dir.path())).unwrap();
         assert!(text.contains("\"type\": \"iPhone 17\""));
 

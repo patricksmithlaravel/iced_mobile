@@ -678,14 +678,28 @@ pub fn main(ctx: &mut Ctx, args: &[String]) -> Result<()> {
     };
 
     let pid = std::process::id() as i32;
+    // What the pid is now, for a later command to check before it signals
+    // the pid (a pid is reused once this process exits). A host the OS will
+    // not describe to itself would be taken for no live session by every
+    // later command (a record whose identity is unavailable is never
+    // alive), and nothing could stop it, so it does not start.
+    let identity = crate::procid::capture(pid);
+    if let Some(reason) = &identity.unavailable {
+        browser.close();
+        return Err(fail(
+            &files,
+            CheckId::InternalBug,
+            format!(
+                "cannot read the process identity of this web session host (pid {pid}: {reason}), so no later command could tell it from another process that takes its pid, or stop it"
+            ),
+        ));
+    }
     let record = json!({
         "schema": sessions::SCHEMA,
         "platform": "web",
         "pid": pid,
         "pgid": pid,
-        // What the pid is now, for a later command to check before it
-        // signals the pid (a pid is reused once this process exits).
-        "identity": crate::procid::of(pid),
+        "identity": identity,
         "marker": MARKER,
         "run": request.run,
         "run_dir": request.run_dir,

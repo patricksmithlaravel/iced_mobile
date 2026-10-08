@@ -550,6 +550,117 @@ fn ps_judges_the_ios_sim_app_by_its_identity() {
     }
 }
 
+/// An app whose process identity icm could not read when it launched it is
+/// recorded as that, which is not a session from before identities: the
+/// pid is not taken for the app (`stop` runs no `simctl terminate`, as for
+/// an older session), and neither is it reported as "was not running":
+/// `stop` warns `run.identity_unavailable` with the pid, why and the
+/// `simctl terminate` that ends the app, and `ps` lists the session as
+/// unverified, neither running nor stale.
+#[test]
+fn an_app_whose_identity_could_not_be_read_is_reported_not_assumed_gone() {
+    let mut unrelated = Unrelated::start();
+    let pid = unrelated.0.id();
+    let fake = Fake::new();
+    let unread = json!({"start": "", "unavailable": "proc_pidinfo: Operation not permitted"});
+    fake.write_session("OTHER-UDID", pid, json!({"pid_identity": unread}));
+
+    let ps = fake.result("ok", &["ps", "--json", "-q"]);
+    let session = &ps["sessions"][0];
+    assert_eq!(session["running"], false, "{ps}");
+    assert_eq!(session["alive"], json!([]), "{ps}");
+    assert_eq!(session["unverified"], json!([pid]), "{ps}");
+
+    let stop = fake.result("ok", &["stop", "ios-sim", "--json", "-q"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(
+        !fake.xcrun_log().contains("simctl terminate"),
+        "{}",
+        fake.xcrun_log()
+    );
+    let warning = stop["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["id"] == "run.identity_unavailable")
+        .unwrap_or_else(|| panic!("no run.identity_unavailable in {stop}"));
+    let detail = warning["detail"].as_str().unwrap();
+    assert!(detail.contains(&format!("pid {pid}")), "{detail}");
+    assert!(detail.contains("the app"), "{detail}");
+    assert!(detail.contains("Operation not permitted"), "{detail}");
+    assert_eq!(
+        warning["fix"]["commands"][0], "xcrun simctl terminate OTHER-UDID com.acme.fixture",
+        "{warning}"
+    );
+    assert!(unrelated.running());
+
+    // A session with no identity at all is an older icm's: judged as
+    // before, not running, and nothing to warn about.
+    let fake = Fake::new();
+    fake.write_session("OTHER-UDID", pid, json!({}));
+    let stop = fake.result("ok", &["stop", "ios-sim", "--json", "-q"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(
+        !stop["warnings"]
+            .to_string()
+            .contains("run.identity_unavailable"),
+        "{stop}"
+    );
+    assert!(unrelated.running());
+}
+
+/// A run that cannot read the identity of the processes it starts
+/// (`ICM_FAKE_IDENTITY_UNREADABLE` makes the read fail, as it does when the
+/// OS will not describe a process) records that, with why, for the app and
+/// the collector, and says so for each. The next commands do not signal
+/// either, and warn of both.
+#[test]
+fn a_run_that_cannot_read_the_identities_records_and_reports_them() {
+    let fake = Fake::new();
+    let why = "proc_pidinfo: Operation not permitted";
+    let run = fake.result_with(
+        "ok",
+        &["run", "ios-sim", "--json", "-q"],
+        &[("ICM_FAKE_IDENTITY_UNREADABLE", why)],
+    );
+    assert_eq!(run["exit"], 0, "{run}");
+    let warned = |result: &Value| -> Vec<String> {
+        result["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|warning| warning["id"] == "run.identity_unavailable")
+            .map(|warning| warning["detail"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let details = warned(&run);
+    assert_eq!(details.len(), 2, "{run}");
+    assert!(details.iter().any(|detail| detail.contains("the app")));
+    assert!(details.iter().any(|detail| detail.contains("collector")));
+    assert!(details.iter().all(|detail| detail.contains(why)));
+
+    let path = fake.project.join("target/icm/sessions/ios-sim.json");
+    let session: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let unread = json!({"start": "", "unavailable": why});
+    assert_eq!(session["pid_identity"], unread, "{session}");
+    assert_eq!(session["collector_identity"], unread, "{session}");
+    let collector = session["collector_pid"].as_i64().unwrap() as i32;
+
+    let stop = fake.result("ok", &["stop", "ios-sim", "--json", "-q"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(warned(&stop).len(), 2, "{stop}");
+    assert!(
+        !fake.xcrun_log().contains("simctl terminate"),
+        "{}",
+        fake.xcrun_log()
+    );
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        icm::procid::of(collector).is_some(),
+        "the collector was signalled"
+    );
+}
+
 /// A session whose app pid still has the process icm read at launch is the
 /// app: `stop` terminates it, and the session records the identity `run`
 /// read (`run_logs_shot_and_stop` ends the app that way).

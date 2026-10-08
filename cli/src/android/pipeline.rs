@@ -2519,7 +2519,7 @@ fn cannot_confirm(process: Option<&session::Process>) -> &'static str {
     match process {
         Some(session::Process::Gone) => "the recorded emulator process has ended or was replaced",
         Some(session::Process::Unverified) => {
-            "the recorded emulator process cannot be confirmed (the record has no process identity, or the OS would not describe it)"
+            "the recorded emulator process cannot be confirmed (the record has no process identity, icm could not read it when it started the emulator, or the OS would not describe the process)"
         }
         _ => "icm has no record that it booted it",
     }

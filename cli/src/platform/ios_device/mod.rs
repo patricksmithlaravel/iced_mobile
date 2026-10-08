@@ -997,7 +997,14 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         as i32;
     // What the console process is now, for the record `stop` checks its pid
     // against (a pid is reused once the process ends).
-    let console_identity = crate::procid::of(console_pid);
+    let console_identity = Some(crate::procid::capture(console_pid));
+    if let Some(check) = crate::session::unavailable_check(
+        "the `devicectl` console process",
+        console_pid,
+        console_identity.as_ref(),
+    ) {
+        ctx.rep.check(check);
+    }
     // The secret values the app was handed (its `--env`) stay known to
     // later commands that read its console.
     let _ = process::keep_secrets(&files, &process::handed_secrets(&launch));

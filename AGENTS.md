@@ -194,16 +194,29 @@ stop only the platforms they drive and leave the other platforms' devices alone
   - A limitation that is fixed or found updates `docs/agents/limitations.md` and the Known
     limitations in `src/mobile.rs`.
 - **A recorded pid is not a process.** Pids are reused, so a record that names a process icm started
-  (a session, an emulator, a log collector) also holds `procid::of(pid)`, read right after the start,
-  and anything that signals the pid, or decides about a device because the process still runs,
-  checks it again with `procid::check` (or a helper over it: `sessions::alive`, `Session::is_ours`,
-  `android::session::process`). New records always carry an identity, and new code treats a record
-  without one as proving nothing: it never signals its pid and never takes a live process under it
-  for the one icm started. The only pid-based tests left are the legacy ones for records written
-  before identities (the web host's command-line marker, the generic write-time test, the desktop
-  executable test and the ios-sim collector's command line); `docs/icm/DESIGN.md` lists them under
-  "Process identity". They go once those records are no longer supported, so do not copy them into
-  new code. `kill(pid, 0)` is for a child the same command spawned.
+  (a session, an emulator, a log collector) also holds `procid::capture(pid)`, read right after the
+  start: the process's start time (its identity), or, when the OS would not describe it or it had
+  already exited, an explicit `unavailable` identity with the reason. Anything that signals the pid,
+  or decides about a device because the process still runs, checks it again with `procid::check` (or
+  a helper over it: `sessions::alive`, `Session::is_ours`, `android::session::process`) and goes on
+  only for `Same`. What that guarantees, and what it does not:
+  - The identity is the start time. It does not say the process still runs the program icm started
+    or has the environment it started with: an `exec` keeps it.
+  - An `unavailable` identity matches no process. Such a pid is never signalled, never taken for the
+    process icm started, and never judged by the legacy pid tests below. The run that could not read
+    it warns `run.identity_unavailable`, and `stop` and `ps` say so when a process runs under it,
+    as do the desktop's `logs` and `shot` (as they do for a pid whose process the OS will not
+    describe when read again).
+    The web session host does not start without one.
+  - A record with no identity at all (written before identities; icm never writes one now) proves
+    nothing either. The only pid-based tests left are the legacy ones for such records: the web
+    host's command-line marker, the generic write-time test, the desktop executable test and the
+    ios-sim collector's command line. `docs/icm/DESIGN.md` lists them under "Process identity".
+    They go once those records are no longer supported, so do not copy them into new code.
+  - Not covered: a child the same command spawned (`waitpid`, `kill(pid, 0)`), the readiness polls
+    of the pid `simctl launch` just printed, and the detached and owner records of a run, which only
+    decide whether a run is waited for or kept (a pid that runs counts when the identity cannot
+    tell), never a signal; those record an unavailable identity without warning.
 - **Commit messages:** `area: imperative summary`, with comma-separated areas when a commit spans
   several (`icm`, `iced`, `winit`, `examples/app`, `docs`, `workspace`, `graphics`, ...). The body
   says why the change is needed and what it changes, and ends with what was verified (the commands

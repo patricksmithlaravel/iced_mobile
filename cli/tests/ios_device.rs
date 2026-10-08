@@ -607,3 +607,75 @@ fn dry_runs_touch_no_device() {
     assert_eq!(device.log("codesign.log"), "");
     assert!(!device.dir().join("target/icm/build").exists());
 }
+
+/// A console process whose identity icm could not read when it started it
+/// (`ICM_FAKE_IDENTITY_UNREADABLE` makes the read fail, as it does when the
+/// OS will not describe the process) is recorded as such, and the run says
+/// so. That is not a record from before identities (judged by the file's
+/// write time): `stop` does not signal the process, and does not report it
+/// as already gone; it says it left it running, with its pid, and `ps`
+/// lists it as unverified, neither running nor stale.
+#[test]
+fn stop_leaves_a_console_process_whose_identity_could_not_be_read() {
+    let mut device = Device::new();
+    let why = "proc_pidinfo: Operation not permitted";
+    device.set("ICM_FAKE_IDENTITY_UNREADABLE", why);
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    device
+        .env
+        .retain(|(key, _)| key != "ICM_FAKE_IDENTITY_UNREADABLE");
+    assert_eq!(run["exit"], 0, "{run}");
+    let warning = run["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["id"] == "run.identity_unavailable")
+        .unwrap_or_else(|| panic!("no run.identity_unavailable in {run}"));
+    let detail = warning["detail"].as_str().unwrap();
+    assert!(detail.contains("console process"), "{detail}");
+    assert!(detail.contains(why), "{detail}");
+    let path = device.dir().join("target/icm/sessions/ios-device.json");
+    let mut session: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let pid = session["pid"].as_i64().unwrap();
+    assert_eq!(
+        session["identity"],
+        json!({"start": "", "unavailable": why}),
+        "{session}"
+    );
+    let alive = || icm::procid::of(pid as i32).is_some();
+    assert!(alive());
+
+    // `stop` runs no command here, only the pid's test.
+    session["stop"] = json!([]);
+    std::fs::write(&path, session.to_string()).unwrap();
+
+    let ps = device.json(&["ps"]);
+    assert_eq!(ps["sessions"][0]["unverified"], json!([pid]), "{ps}");
+    assert_eq!(ps["sessions"][0]["running"], false, "{ps}");
+
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["stopped"][0]["left_running"], json!([pid]), "{stop}");
+    assert_eq!(stop["stopped"][0]["already_gone"], json!([]), "{stop}");
+    assert_eq!(stop["stopped"][0]["processes"], json!([]), "{stop}");
+    let warning = stop["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["id"] == "run.identity_unavailable")
+        .unwrap_or_else(|| panic!("no run.identity_unavailable in {stop}"));
+    let detail = warning["detail"].as_str().unwrap();
+    assert!(detail.contains(&format!("pid {pid}")), "{detail}");
+    assert!(detail.contains("Operation not permitted"), "{detail}");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        alive(),
+        "a process whose identity was unavailable was signalled"
+    );
+
+    // SAFETY: kill(2) on the fake console process this test started.
+    unsafe {
+        let _ = libc::kill(pid as i32, libc::SIGKILL);
+    }
+}

@@ -702,6 +702,9 @@ fn end_previous(ctx: &Ctx, xcode: &Xcode, sessions_dir: &Path, udid: &str) {
     let Some(mut previous) = Session::read(sessions_dir) else {
         return;
     };
+    for check in unverified_checks(&previous) {
+        ctx.rep.check(check);
+    }
     stop_collector(&mut previous);
     if previous.device.udid != udid && previous.app_alive() {
         let _ = ctx.probe(
@@ -739,7 +742,7 @@ fn start_collector(
         .arg(collector_predicate(exe));
     let pid =
         i32::try_from(process::spawn_detached(&cmd, out, &out.with_extension("err")).ok()?).ok()?;
-    let identity = procid::of(pid);
+    let identity = Some(procid::capture(pid));
     let until = Instant::now() + Duration::from_secs(5);
     while Instant::now() < until {
         if std::fs::metadata(out).is_ok_and(|m| m.len() > 0) {
@@ -1401,6 +1404,15 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
             Some((pid, identity)) => (Some(pid), identity),
             None => (None, None),
         };
+    if let Some(pid) = collector_pid
+        && let Some(check) = crate::session::unavailable_check(
+            "the `log stream` collector",
+            pid,
+            collector_identity.as_ref(),
+        )
+    {
+        ctx.rep.check(check);
+    }
 
     let mut session = Session {
         schema: session::SCHEMA.to_string(),
@@ -1505,7 +1517,12 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     session.pid = Some(i64::from(pid));
     // Read now, while the pid is the app's: it is what `stop`, `logs` and
     // `input` check the pid against later.
-    session.pid_identity = procid::of(pid);
+    session.pid_identity = Some(procid::capture(pid));
+    if let Some(check) =
+        crate::session::unavailable_check("the app", pid, session.pid_identity.as_ref())
+    {
+        ctx.rep.check(check);
+    }
     write_session(&session)?;
 
     let readiness = wait_ready(
@@ -1768,13 +1785,41 @@ enum Followed {
     AppGone,
 }
 
+/// The WARNs for what the session recorded that a process runs under and
+/// nothing tells from another process (icm could not read its identity
+/// when it started it, or the OS will not describe it now): `stop` and the
+/// next run do not signal the collector, and take the app for not running
+/// ([`Session::app_alive`]). Read before [`stop_collector`] forgets them.
+fn unverified_checks(session: &Session) -> Vec<Check> {
+    session
+        .unverified()
+        .into_iter()
+        .map(|(what, pid, why)| {
+            let check = crate::session::unverified_check(what, pid, &why);
+            if what == "the app" {
+                check.fix(
+                    "Terminate the app on the simulator yourself, if it is running.",
+                    &[&format!(
+                        "xcrun simctl terminate {} {}",
+                        session.device.udid, session.app_id
+                    )],
+                )
+            } else {
+                check
+            }
+        })
+        .collect()
+}
+
 /// Stops the session's `log stream` collector (its process group), but
 /// only while the recorded pid still is that collector: once it has died
 /// (the simulator shut down, a reboot) the pid may belong to anything.
 /// The process is the one icm started when its pid still has the identity
 /// recorded for it; a session an older icm wrote has none, and its pid then
 /// counts only while its command line still holds the collector's
-/// arguments for this simulator.
+/// arguments for this simulator. An identity icm could not read when it
+/// started the collector ([`Identity::unavailable`]) is not an older
+/// session's: it matches no process, and the command line is not used.
 fn stop_collector(session: &mut Session) {
     let identity = session.collector_identity.take();
     if let Some(pid) = session.collector_pid.take() {
@@ -2145,6 +2190,9 @@ pub fn stop_session(ctx: &mut Ctx, shutdown: bool) -> Result<Option<Value>> {
             return Err(ctx.step_failure("simctl.terminate", CheckId::ToolFailed, &outcome));
         }
     }
+    for check in unverified_checks(&session) {
+        ctx.rep.check(check);
+    }
     stop_collector(&mut session);
 
     let managed = crate::managed::is_managed(&session.device.name);
@@ -2280,6 +2328,7 @@ mod tests {
         session.collector_identity = Some(Identity {
             start: "1791334000.000001".to_string(),
             exe: "/usr/bin/xcrun".to_string(),
+            unavailable: None,
         });
         stop_collector(&mut session);
         assert_eq!(session.collector_pid, None);
@@ -2297,6 +2346,68 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         let _ = child.wait();
+    }
+
+    /// A collector whose identity icm could not read when it started it is
+    /// not a collector an older icm started: the command-line test that
+    /// finds those does not apply, so a process that looks like the
+    /// collector is not signalled, and `stop` warns about it.
+    #[test]
+    fn a_collector_whose_identity_could_not_be_read_is_not_found_by_its_command_line() {
+        let udid = "00000000-AAAA-BBBB-CCCC-000000000001";
+        // `ps` shows a command line that is the collector's for this
+        // simulator; the trailing command keeps the shell from becoming
+        // `sleep`.
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30; true", "x", "spawn", udid, "log", "stream"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let until = Instant::now() + Duration::from_secs(5);
+        while !crate::sessions::command_line(pid).is_some_and(|line| is_collector(&line, udid)) {
+            assert!(Instant::now() < until, "the shell did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mut session: Session = serde_json::from_value(json!({
+            "schema": session::SCHEMA, "platform": "ios-sim", "run": "r", "run_dir": null,
+            "state": "running",
+            "device": {"udid": udid, "name": "icm-x", "os": "27.0", "type": "iPhone 17",
+                       "managed": true, "fresh": false, "data_path": null},
+            "app_id": "com.x", "exe": "app", "bundle": "/b/App.app", "pid": null,
+            "launch_unix_ms": 1,
+            "logs": {"stdout": "/o", "stderr": "/e", "oslog": "/l"},
+            "collector_pid": null
+        }))
+        .unwrap();
+
+        session.collector_pid = Some(pid);
+        session.collector_identity = Some(Identity::unavailable(
+            "proc_pidinfo: Operation not permitted",
+        ));
+        let warned = unverified_checks(&session);
+        assert_eq!(warned.len(), 1);
+        assert_eq!(warned[0].id(), "run.identity_unavailable");
+        stop_collector(&mut session);
+        assert_eq!(session.collector_pid, None);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "an unreadable identity was taken for the collector by its command line"
+        );
+
+        // The same process in a session an older icm wrote, which has no
+        // identity at all, is the collector by its command line, and no
+        // warning is due.
+        session.collector_pid = Some(pid);
+        session.collector_identity = None;
+        assert!(unverified_checks(&session).is_empty());
+        stop_collector(&mut session);
+        let until = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < until, "the collector was not signalled");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

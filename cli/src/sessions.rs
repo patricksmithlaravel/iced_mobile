@@ -326,4 +326,39 @@ mod tests {
         let _ = child.wait();
         assert!(!alive(&record));
     }
+
+    /// A record whose identity icm could not read when it started the
+    /// process is not a record from before identities: the command-line
+    /// marker that still vouches for those (the process holds it) does not
+    /// make it alive, and it is never signalled.
+    #[test]
+    fn an_identity_icm_could_not_read_is_never_alive_by_its_marker() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let unread = serde_json::to_value(Identity::unavailable("proc_pidinfo: denied")).unwrap();
+        let older = json!({"pid": pid, "pgid": pid, "marker": "sleep"});
+        let unavailable = json!({"pid": pid, "pgid": pid, "marker": "sleep", "identity": unread});
+        assert!(alive(&older));
+        assert!(!alive(&unavailable));
+        assert_eq!(
+            record_identity(&unavailable).and_then(|identity| identity.unavailable),
+            Some("proc_pidinfo: denied".to_string())
+        );
+        assert_eq!(
+            terminate(&unavailable, Duration::from_secs(1)),
+            Stopped::NotRunning
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(child.try_wait().unwrap().is_none(), "it was signalled");
+        // The older record is ended by its marker, as before.
+        assert_eq!(
+            terminate(&older, Duration::from_secs(5)),
+            Stopped::Terminated
+        );
+        let _ = child.wait();
+    }
 }

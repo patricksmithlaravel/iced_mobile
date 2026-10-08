@@ -15,27 +15,84 @@
 //! and the program it ran then, for the messages. [`check`] reads the pid
 //! again and says whether it is [`Verdict::Same`], gone, another process,
 //! or cannot be read. Only `Same` lets a caller treat the pid as its
-//! process; a record that holds no identity (an older icm wrote it)
-//! cannot be verified, which callers treat as not ours.
+//! process.
+//!
+//! What a record holds for a process is one of three things, and they are
+//! not the same:
+//!
+//! - an identity with a start time, which [`check`] compares;
+//! - an [`Identity::unavailable`]: icm started the process and could not
+//!   read it ([`capture`]: the process had already exited, or the OS would
+//!   not describe it), and the record says so, with the reason. It
+//!   verifies nothing: [`check`] never answers `Same` for it, and callers
+//!   treat the pid as not ours, never signal it and report that they
+//!   cannot tell it from another process;
+//! - none, in a record an older icm wrote before identities existed. It
+//!   verifies nothing either, and the few callers that still judge such a
+//!   record by the pid (a command line, an executable, when the file was
+//!   written) do so for this case only. A record that holds an
+//!   unavailable identity is never judged that way: icm wrote it knowing
+//!   about identities, and failing to read one is no reason to trust a
+//!   pid it knows nothing about.
 //!
 //! The start time is the identity; the program is not compared, because a
 //! launcher may exec another program after icm read it (the Android
 //! emulator's launcher execs qemu, `xcrun` execs `simctl`), and the start
-//! time survives an exec.
+//! time survives an exec. So `Same` says that the process is the one icm
+//! started, not that it still runs the program icm started or has the
+//! environment it started with.
 
 use serde::{Deserialize, Serialize};
 
-/// What tells a process from every other that has had its pid.
+/// What tells a process from every other that has had its pid, or why icm
+/// could not read it ([`Identity::unavailable`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
     /// When the process started, as an opaque token of the OS's own
     /// counter: equal for every read of one process, different for any
-    /// process that has the pid later.
+    /// process that has the pid later. Empty for an
+    /// [`Identity::unavailable`], which matches nothing.
+    #[serde(default)]
     pub start: String,
     /// The program it ran when icm read it (a path, or empty when the OS
     /// would not say). For messages; not compared.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub exe: String,
+    /// Why icm could not read the identity when it started the process,
+    /// when it could not: the record then holds this in place of a start
+    /// time, which is not the same as holding no identity at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
+impl Identity {
+    /// What a record holds for a process icm started and could not read
+    /// ([`capture`]), with the reason.
+    pub fn unavailable(reason: impl Into<String>) -> Identity {
+        Identity {
+            start: String::new(),
+            exe: String::new(),
+            unavailable: Some(reason.into()),
+        }
+    }
+
+    /// Whether this can tell the process from another: false for an
+    /// [`Identity::unavailable`], and for one that holds no start time.
+    pub fn is_verifiable(&self) -> bool {
+        self.unavailable.is_none() && !self.start.is_empty()
+    }
+
+    /// Why this verifies nothing, when it does not
+    /// ([`Identity::is_verifiable`]).
+    pub fn why_unverifiable(&self) -> Option<String> {
+        match (&self.unavailable, self.start.is_empty()) {
+            (Some(reason), _) => Some(format!(
+                "icm could not read the process's identity when it started it ({reason})"
+            )),
+            (None, true) => Some("the record holds no start time for the process".to_string()),
+            (None, false) => None,
+        }
+    }
 }
 
 /// What a pid is now, against a recorded [`Identity`].
@@ -49,8 +106,9 @@ pub enum Verdict {
     Gone,
     /// Another process has the pid now.
     Other(Identity),
-    /// The OS would not say (the process belongs to another user, or this
-    /// OS has no reader): neither the same nor another.
+    /// Neither the same nor another: the OS would not say (the process
+    /// belongs to another user, or this OS has no reader), or the record
+    /// has no identity that could tell (why).
     Unknown(String),
 }
 
@@ -66,8 +124,7 @@ enum Probe {
 }
 
 /// The identity of the process that has `pid` now, when it runs and the OS
-/// describes it. Taken right after icm starts a process, to record beside
-/// its pid.
+/// describes it.
 pub fn of(pid: i32) -> Option<Identity> {
     match probe(pid) {
         Probe::Found(identity) => Some(identity),
@@ -75,8 +132,44 @@ pub fn of(pid: i32) -> Option<Identity> {
     }
 }
 
-/// Whether `pid` is still the process `recorded` describes.
+/// What to record beside the pid of a process icm has just started: its
+/// identity or, when that cannot be read (the process has already exited,
+/// or the OS would not describe it), an [`Identity::unavailable`] with the
+/// reason, so the record says that icm tried.
+pub fn capture(pid: i32) -> Identity {
+    // `ICM_FAKE_IDENTITY_UNREADABLE=<why>`: icm's own tests make this read
+    // fail, as it does when the OS will not describe a process, to see
+    // what each command that starts a process records and says. Only here:
+    // [`check`] and [`of`] read as ever, so a later command from a shell
+    // without it sees the record as a real failure left it.
+    if let Some(why) = std::env::var("ICM_FAKE_IDENTITY_UNREADABLE")
+        .ok()
+        .filter(|why| !why.is_empty())
+    {
+        return Identity::unavailable(why);
+    }
+    match probe(pid) {
+        Probe::Found(identity) => identity,
+        Probe::Missing => Identity::unavailable(if pid <= 1 {
+            format!("{pid} is not the pid of a process icm starts")
+        } else {
+            "no process had the pid when icm read it; it had already exited".to_string()
+        }),
+        Probe::Unreadable(why) => Identity::unavailable(why),
+    }
+}
+
+/// Whether `pid` is still the process `recorded` describes. A `recorded`
+/// that is not verifiable ([`Identity::is_verifiable`]) is never `Same`:
+/// the pid is `Gone` when no process has it, and otherwise `Unknown`, with
+/// why nothing tells.
 pub fn check(pid: i32, recorded: &Identity) -> Verdict {
+    if let Some(why) = recorded.why_unverifiable() {
+        return match probe(pid) {
+            Probe::Missing => Verdict::Gone,
+            Probe::Found(_) | Probe::Unreadable(_) => Verdict::Unknown(why),
+        };
+    }
     match probe(pid) {
         Probe::Missing => Verdict::Gone,
         Probe::Found(now) if now.start == recorded.start => Verdict::Same,
@@ -86,7 +179,8 @@ pub fn check(pid: i32, recorded: &Identity) -> Verdict {
 }
 
 /// Whether `pid` is the process `recorded` describes: false for a record
-/// without an identity, since nothing then says which process it was.
+/// without an identity, and for one whose identity is unavailable, since
+/// nothing then says which process it was.
 pub fn same(pid: i32, recorded: Option<&Identity>) -> bool {
     recorded.is_some_and(|recorded| check(pid, recorded) == Verdict::Same)
 }
@@ -144,6 +238,7 @@ fn probe_os(pid: i32) -> Probe {
     Probe::Found(Identity {
         start: format!("{}.{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec),
         exe,
+        unavailable: None,
     })
 }
 
@@ -170,6 +265,7 @@ fn probe_os(pid: i32) -> Probe {
     Probe::Found(Identity {
         start: format!("{boot}:{ticks}"),
         exe,
+        unavailable: None,
     })
 }
 
@@ -269,16 +365,105 @@ mod tests {
         let identity = Identity {
             start: "1791334000.123456".to_string(),
             exe: "/sdk/emulator/emulator".to_string(),
+            unavailable: None,
         };
         let text = serde_json::to_string(&identity).unwrap();
         assert_eq!(serde_json::from_str::<Identity>(&text).unwrap(), identity);
         let bare = serde_json::to_string(&Identity {
             start: "7".to_string(),
-            exe: String::new(),
+            ..Identity::default()
         })
         .unwrap();
         assert_eq!(bare, r#"{"start":"7"}"#);
         assert_eq!(serde_json::from_str::<Identity>(&bare).unwrap().exe, "");
+    }
+
+    /// A process icm could not read is recorded as such, which is not the
+    /// absence of an identity: the record round-trips with the reason, and
+    /// it verifies nothing.
+    #[test]
+    fn an_identity_that_could_not_be_read_is_recorded_with_its_reason() {
+        let unavailable = Identity::unavailable("proc_pidinfo: Operation not permitted");
+        assert!(!unavailable.is_verifiable());
+        let text = serde_json::to_string(&unavailable).unwrap();
+        assert_eq!(
+            text,
+            r#"{"start":"","unavailable":"proc_pidinfo: Operation not permitted"}"#
+        );
+        let back: Identity = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, unavailable);
+        assert!(
+            back.why_unverifiable()
+                .unwrap()
+                .contains("Operation not permitted")
+        );
+        // Written without the empty start, as a person might.
+        let by_hand: Identity = serde_json::from_str(r#"{"unavailable":"x"}"#).unwrap();
+        assert!(!by_hand.is_verifiable());
+        // An identity with a start time is verifiable, an empty one is not.
+        assert!(
+            Identity {
+                start: "7".into(),
+                ..Identity::default()
+            }
+            .is_verifiable()
+        );
+        assert!(!Identity::default().is_verifiable());
+        assert!(Identity::default().why_unverifiable().is_some());
+    }
+
+    /// Whatever process has the pid, an identity that could not be read is
+    /// never the same one: a pid that nothing runs under is gone, and any
+    /// other cannot be told, with why. A caller that treats only `Same` as
+    /// its process never signals it, as it does not for a record with no
+    /// identity.
+    #[test]
+    fn an_unavailable_identity_is_never_the_same_process() {
+        let mut child = sleeper();
+        let pid = child.id() as i32;
+        let unavailable = Identity::unavailable("the OS would not say");
+        match check(pid, &unavailable) {
+            Verdict::Unknown(why) => assert!(why.contains("the OS would not say"), "{why}"),
+            other => panic!("a running process read as {other:?}"),
+        }
+        assert!(!same(pid, Some(&unavailable)));
+        // Nor is an identity that holds no start time.
+        assert!(!same(pid, Some(&Identity::default())));
+        assert!(same(pid, of(pid).as_ref()));
+
+        child.kill().unwrap();
+        let _ = child.wait().unwrap();
+        assert_eq!(check(pid, &unavailable), Verdict::Gone);
+        assert!(!same(pid, Some(&unavailable)));
+    }
+
+    /// `capture` is what a launcher records: the identity when the process
+    /// can be read, the reason when it cannot.
+    #[test]
+    fn capture_records_an_identity_or_why_there_is_none() {
+        let mut child = sleeper();
+        let pid = child.id() as i32;
+        let captured = capture(pid);
+        assert!(captured.is_verifiable(), "{captured:?}");
+        assert_eq!(Some(captured.clone()), of(pid));
+        assert_eq!(check(pid, &captured), Verdict::Same);
+
+        child.kill().unwrap();
+        let _ = child.wait().unwrap();
+        let gone = capture(pid);
+        assert!(!gone.is_verifiable());
+        assert!(
+            gone.unavailable
+                .as_deref()
+                .is_some_and(|why| why.contains("exited")),
+            "{gone:?}"
+        );
+        // Neither init nor a process group is a process icm starts.
+        for pid in [0, 1, -1] {
+            let identity = capture(pid);
+            assert!(!identity.is_verifiable(), "{pid}: {identity:?}");
+            assert!(identity.unavailable.is_some());
+        }
     }
 
     #[test]

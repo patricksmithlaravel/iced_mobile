@@ -478,16 +478,17 @@ fn is_live(project: &Project, path: &Path) -> bool {
     path.starts_with(project.sessions_dir().join(PLATFORM))
 }
 
-/// Once the app is gone, its live files are no longer its live output:
-/// the secret values this command knows are redacted in them, in place,
-/// so they keep no more than the run directory's copies. When this command
-/// knew the app's environment ([`unknown_inherited`]), the live
-/// `session.json` stops naming the inherited secrets; otherwise (an app
-/// that ended by itself, seen by a later command) it keeps them, and
-/// `logs` will not read these files.
+/// Once the app is gone (not while a process runs under the pid that icm
+/// cannot tell from the app: [`Standing::Unverified`]), its live files are
+/// no longer its live output: the secret values this command knows are
+/// redacted in them, in place, so they keep no more than the run
+/// directory's copies. When this command knew the app's environment
+/// ([`unknown_inherited`]), the live `session.json` stops naming the
+/// inherited secrets; otherwise (an app that ended by itself, seen by a
+/// later command) it keeps them, and `logs` will not read these files.
 fn finish_live(project: &Project, session: &Session) {
     let files = files_dir(project, &session.run);
-    if !files.is_dir() || running(session) {
+    if !files.is_dir() || standing(session) != Standing::Gone {
         return;
     }
     for name in ["app.stdout", "app.stderr"] {
@@ -568,28 +569,52 @@ fn reap(pid: i32) -> Option<Ended> {
     }
 }
 
-/// Whether the session's app still runs: its pid still has the identity
-/// icm recorded when it started the app. A pid can be reused, and a process
+/// What the session's pid is now.
+#[derive(Debug, PartialEq, Eq)]
+enum Standing {
+    /// The app icm started, still running.
+    Running,
+    /// The app has ended, or the pid is another process's.
+    Gone,
+    /// A process runs under the pid and nothing tells whether it is the
+    /// app: icm could not read the process's identity when it started it
+    /// (it is [`Identity::unavailable`]), or the OS will not describe the
+    /// process now (why). It is never signalled.
+    Unverified(String),
+}
+
+/// What the session's pid is now: its pid still has the identity icm
+/// recorded when it started the app. A pid can be reused, and a process
 /// that runs the same program (another instance of the app) is not this
 /// one. A session from before identities is judged by the executable its
-/// pid runs (`ps`), and is not running when `ps` cannot say.
-fn running(session: &Session) -> bool {
+/// pid runs (`ps`), and is gone when `ps` cannot say; one whose identity
+/// icm could not read is never judged that way.
+fn standing(session: &Session) -> Standing {
     if reap(session.pid).is_some() {
-        return false;
+        return Standing::Gone;
     }
     if let Some(identity) = &session.identity {
-        return procid::check(session.pid, identity) == Verdict::Same;
+        return match procid::check(session.pid, identity) {
+            Verdict::Same => Standing::Running,
+            Verdict::Gone | Verdict::Other(_) => Standing::Gone,
+            Verdict::Unknown(why) => Standing::Unverified(why),
+        };
     }
     let ps = Cmd::tool("ps")
         .args(["-ww", "-o", "command=", "-p"])
         .arg(session.pid.to_string())
         .timeout(Duration::from_secs(10));
     match process::run(&ps, None, None) {
-        Ok(outcome) if outcome.success() => outcome
-            .stdout_text()
-            .trim()
-            .starts_with(&session.exe.display().to_string()),
-        _ => false,
+        Ok(outcome)
+            if outcome.success()
+                && outcome
+                    .stdout_text()
+                    .trim()
+                    .starts_with(&session.exe.display().to_string()) =>
+        {
+            Standing::Running
+        }
+        _ => Standing::Gone,
     }
 }
 
@@ -621,17 +646,42 @@ fn terminate(pid: i32, pgid: i32) -> &'static str {
     "killed with SIGKILL"
 }
 
+/// What `stop` says of an app it did not signal, because a process runs
+/// under its pid and nothing tells whether it is the app.
+const LEFT_RUNNING: &str = "left running (cannot be verified)";
+
 /// Stops this project's desktop app, if one is recorded, and removes the
-/// session. Returns what was stopped (`{platform, pid, run, how}`), for
-/// `stop` and for `stop --all`.
+/// session (except for a process it cannot tell from the app, which it
+/// leaves, with the session, and says so). Returns what was stopped
+/// (`{platform, pid, run, how}`), for `stop` and for `stop --all`.
 pub fn stop_session(ctx: &Ctx, project: &Project) -> Result<Option<Value>> {
     let Some(session) = read_session(project) else {
         return Ok(None);
     };
-    let how = if running(&session) {
-        terminate(session.pid, session.pgid)
-    } else {
-        "already exited"
+    let how = match standing(&session) {
+        Standing::Running => terminate(session.pid, session.pgid),
+        Standing::Gone => "already exited",
+        Standing::Unverified(why) => {
+            // Something runs under the pid and nothing says it is the app:
+            // not signalled, and not "already exited". The record stays,
+            // for the next stop to find the pid free.
+            ctx.rep.check(crate::session::unverified_check(
+                "the desktop app",
+                session.pid,
+                &why,
+            ));
+            ctx.rep.progress(format!(
+                "desktop app pid {} (run {}): {LEFT_RUNNING}",
+                session.pid, session.run
+            ));
+            return Ok(Some(json!({
+                "platform": PLATFORM,
+                "pid": session.pid,
+                "run": session.run,
+                "how": LEFT_RUNNING,
+                "left_running": [session.pid],
+            })));
+        }
     };
     end_session(project, &session);
     ctx.rep.progress(format!(
@@ -1015,7 +1065,15 @@ fn launch(
     // the running app ([`learn_app_secrets`]). This command knows them: they
     // are its own. An `--env` pair replaces the variable of its name.
     let pid = pid as i32;
-    let identity = procid::of(pid);
+    // What the app's process is, for the session to check its pid against
+    // later; when the OS will not say, the session records that it could
+    // not, and the app is never signalled by its pid.
+    let identity = Some(procid::capture(pid));
+    if let Some(check) =
+        crate::session::unavailable_check("the desktop app", pid, identity.as_ref())
+    {
+        ctx.rep.check(check);
+    }
     know_environment(pid);
     let _ = process::keep_secrets(&files, &process::handed_secrets(&cmd));
     let inherited_secrets = process::environment_secret_variables()
@@ -1902,8 +1960,15 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     // The running app's session, else the last run's copy.
     let (mut session, live) = match read_session(&project) {
         Some(session) => {
-            let live = running(&session);
-            (with_copies(session), live)
+            let standing = standing(&session);
+            if let Standing::Unverified(why) = &standing {
+                ctx.rep.check(crate::session::unverified_check(
+                    "the desktop app",
+                    session.pid,
+                    why,
+                ));
+            }
+            (with_copies(session), standing == Standing::Running)
         }
         None => match last_session(&project) {
             Some(session) => (with_copies(session), false),
@@ -2369,12 +2434,22 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
     let Some(session) = read_session(&project) else {
         return Err(no_session("no desktop app is running for this project"));
     };
-    if !running(&session) {
-        end_session(&project, &session);
-        return Err(no_session(format!(
-            "the desktop app (pid {}) of run {} is no longer running",
-            session.pid, session.run
-        )));
+    match standing(&session) {
+        Standing::Running => {}
+        Standing::Gone => {
+            end_session(&project, &session);
+            return Err(no_session(format!(
+                "the desktop app (pid {}) of run {} is no longer running",
+                session.pid, session.run
+            )));
+        }
+        // The record stays: the process may still be the app.
+        Standing::Unverified(why) => {
+            return Err(no_session(format!(
+                "icm cannot tell whether the desktop app (pid {}) of run {} still runs: {why}",
+                session.pid, session.run
+            )));
+        }
     }
     ctx.rep
         .set("session", json!(paths::display(&session_path(&project))));
@@ -2443,6 +2518,11 @@ pub fn input(_ctx: &mut Ctx, _args: &InputArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether the session's app still runs ([`standing`]).
+    fn running(session: &Session) -> bool {
+        standing(session) == Standing::Running
+    }
 
     #[test]
     fn panic_lines_parse() {
@@ -2575,6 +2655,7 @@ mod tests {
         session.identity = Some(Identity {
             start: "1791334000.000001".to_string(),
             exe: "/bin/sleep".to_string(),
+            unavailable: None,
         });
         assert!(!running(&session));
         session.identity = procid::of(pid);
@@ -2586,9 +2667,39 @@ mod tests {
         let text = serde_json::to_string(&session).unwrap();
         assert_eq!(serde_json::from_str::<Session>(&text).unwrap(), session);
 
+        // An identity icm could not read when it started the app is not a
+        // session from before identities: the executable test, which the
+        // process passes (it is `/bin/sleep`), is not applied, and nothing
+        // tells it from another process under the pid, so it is neither
+        // running nor gone, and never signalled.
+        let live = session.identity.take();
+        session.identity = Some(Identity::unavailable(
+            "proc_pidinfo: Operation not permitted",
+        ));
+        match standing(&session) {
+            Standing::Unverified(why) => {
+                assert!(why.contains("Operation not permitted"), "{why}")
+            }
+            other => panic!("an unreadable identity read as {other:?}"),
+        }
+        assert!(!running(&session));
+        let text = serde_json::to_string(&session).unwrap();
+        assert!(text.contains(r#""unavailable":"proc_pidinfo"#), "{text}");
+        assert_eq!(serde_json::from_str::<Session>(&text).unwrap(), session);
+        // No identity at all (a session from before): the executable test.
+        session.identity = None;
+        assert!(running(&session));
+        session.identity = live;
+
         assert_eq!(terminate(pid, pid), "stopped with SIGTERM");
         assert!(!running(&session));
         assert_eq!(terminate(pid, pid), "already exited");
+        // Once nothing runs under the pid, it is gone, whatever was
+        // recorded for it.
+        session.identity = Some(Identity::unavailable(
+            "proc_pidinfo: Operation not permitted",
+        ));
+        assert_eq!(standing(&session), Standing::Gone);
     }
 
     /// The session files keep the `ready` event's protocol fields, of the

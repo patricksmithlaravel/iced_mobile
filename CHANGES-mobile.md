@@ -26,6 +26,18 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   `desktop.logs.secret_unknown` whatever the shell holds. Before, a shell where that variable held
   another value printed the old one. Read the logs while the app runs, or hand the secret with
   `--env`.
+- When icm cannot read the identity of a process it starts (the OS would not describe it, or it
+  had already exited), the record now says so, with the reason, where it held nothing and so looked
+  like a record an older icm wrote, which icm still judges by the pid: the desktop app by its
+  executable, ios-device's console by when the file was written, the iOS Simulator's collector by
+  its command line, the web host by a marker, so a process that passed that test was signalled. Such
+  a pid is now never taken for the process icm started and never signalled. `icm run` warns
+  `run.identity_unavailable` for the desktop app, the iOS Simulator's app and collector,
+  ios-device's console and the Android emulator; `icm stop` and `ps` say so when a
+  process runs under such a pid (so do the desktop's `logs` and `shot`), and `stop` leaves it
+  running where it would have said "already gone". The web session host does not start without its own identity. `AGENTS.md` and
+  `docs/icm/DESIGN.md` now say exactly what the identity rule guarantees: it is the start time, not
+  the program or the environment.
 - `icm logs desktop` of a running app whose environment could not be read back in full no longer
   prints the secrets it inherited. A read of the process that returned its arguments and no
   variables (macOS does for a platform binary), or another environment than the app's (the app

@@ -35,7 +35,7 @@ cargo test
 | `exit.rs` | the stable exit codes |
 | `process.rs` | the runner: stdin null, process groups, timeouts, file-backed output, redaction; a session's `secrets.json` (`keep_secrets`: the secret values handed to its app with `--env`, never one icm only inherited); a running app's environment read back (`environment_of`, `learn_environment_secrets`, which returns the secret names it found: a secret counts as known only when the read returned it) |
 | `signals.rs` | SIGINT/SIGTERM/SIGHUP: record, kill registered groups |
-| `procid.rs` | process identity: a process's start time, read when icm starts it and kept beside its pid in a record, and read again before icm trusts the pid or signals it (a pid alone says only that some process has the number); every record that names a process icm started uses it (the Android emulator, the iOS simulator's app and collector, the desktop app, the web session host, ios-device's console, a detached run's icm) |
+| `procid.rs` | process identity: a process's start time, read when icm starts it (`capture`) and kept beside its pid in a record, and read again before icm trusts the pid or signals it (a pid alone says only that some process has the number); every record that names a process icm started uses it (the Android emulator, the iOS simulator's app and collector, the desktop app, the web session host, ios-device's console, a detached run's icm). When the read fails the record holds an `unavailable` identity with the reason, which is not the absence of one (an older icm's record): it is never the same process, never signalled, and reported (`run.identity_unavailable`). `ICM_FAKE_IDENTITY_UNREADABLE=<why>` makes `capture` fail, for the tests |
 | `plan.rs` | `Plan`/`Step`; `--dry-run` prints, `execute` runs |
 | `config/` | icm.toml types, discovery, validation with `file:line` (`source.rs` keeps the spans) |
 | `host.rs` | `~/.config/icm/host.toml` |
@@ -127,6 +127,10 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   `an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread` checks
   the copies and the warning `logs` falls back to for an app that ended by
   itself, and
+  `an_app_whose_identity_could_not_be_read_is_left_running_and_reported`
+  (desktop; the same for ios-sim, ios-device and the web host in their
+  tests) runs with `ICM_FAKE_IDENTITY_UNREADABLE` set and checks what the
+  record says and that `stop` signals nothing and says so, and
   `an_app_that_replaced_its_process_leaves_its_inherited_secrets_unread` (and,
   on macOS, `an_app_that_became_a_platform_binary_leaves_its_inherited_secrets_unread`)
   the same for a running app that `exec`s into a process whose environment
