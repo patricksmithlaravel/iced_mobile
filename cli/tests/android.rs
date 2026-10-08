@@ -484,34 +484,72 @@ impl Emulator {
     }
 }
 
+/// The pid a fake `emulator` script wrote to `file`. icm starts the script
+/// detached and does not wait for it, so the script's own first lines run
+/// concurrently with whatever icm and the test do next: the file may not
+/// exist yet when icm returns. Polls until a pid is there, for at most
+/// `within`; `None` when the script wrote none by then. The script writes it
+/// atomically (a temporary file renamed over `file`), so a pid that is read
+/// is a whole one.
+fn written_pid(file: &Path, within: std::time::Duration) -> Option<u32> {
+    let until = std::time::Instant::now() + within;
+    loop {
+        let pid = std::fs::read_to_string(file)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .filter(|pid| *pid > 1);
+        if pid.is_some() || std::time::Instant::now() >= until {
+            return pid;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// The emulator a fake `emulator` script started, whose pid it wrote to the
-/// file: killed when dropped, whatever the test did.
+/// file: killed when dropped, whatever the test did. The script writes the
+/// file a moment after it starts, so the guard waits for it (a bounded wait,
+/// which only a test that never started the emulator pays) rather than
+/// finding it missing when the test failed early. The process is not judged
+/// by its program: that is the shell until the script execs `sleep` (and
+/// the shell's own name varies, `sh` is `bash` here), and while it execs
+/// it is neither. The script lives 120 s, far longer than a test, so the
+/// number is still the script's when the guard runs.
 struct Started(PathBuf);
 
 impl Drop for Started {
     fn drop(&mut self) {
-        if let Some(pid) = std::fs::read_to_string(&self.0)
-            .ok()
-            .and_then(|text| text.trim().parse::<i32>().ok())
-        {
+        if let Some(pid) = written_pid(&self.0, std::time::Duration::from_secs(5)) {
             // SAFETY: kill(2) on the process a script of this test started.
             unsafe {
-                let _ = libc::kill(pid, libc::SIGKILL);
+                let _ = libc::kill(pid as i32, libc::SIGKILL);
             }
         }
     }
 }
 
-/// An even console port in the range host.toml accepts whose adb port, the
-/// next one, is free too.
-fn free_console_port() -> u16 {
-    (5554..=5682)
-        .step_by(2)
-        .find(|port| {
+/// Even console ports in the range host.toml accepts whose adb port, the
+/// next one, is free too, `count` of them, from a start that differs from
+/// one process to the next. A fake emulator holds no port, so another run
+/// of this test (a second checkout's `cargo test`) can pick the same one,
+/// or be probing it in `bind` while icm looks: icm takes the first of
+/// several that is free when it looks, and the test reads the serial it
+/// took from the record.
+fn free_console_ports(count: usize) -> Vec<u16> {
+    let candidates: Vec<u16> = (5554..=5682).step_by(2).collect();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.subsec_nanos() as usize);
+    let start = (std::process::id() as usize ^ nanos) % candidates.len();
+    let free: Vec<u16> = (0..candidates.len())
+        .map(|offset| candidates[(start + offset) % candidates.len()])
+        .filter(|port| {
             std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok()
                 && std::net::TcpListener::bind(("127.0.0.1", *port + 1)).is_ok()
         })
-        .expect("every console port is busy")
+        .take(count)
+        .collect();
+    assert_eq!(free.len(), count, "too many console ports are busy");
+    free
 }
 
 impl Drop for Emulator {
@@ -1416,26 +1454,34 @@ fn a_boot_records_the_emulators_identity() {
     )
     .unwrap();
     // An emulator that is a long `sleep` (its launcher execs it, as the real
-    // one does qemu), on a console port nothing uses.
+    // one does qemu), on a console port nothing uses. icm starts it
+    // detached and goes on, so the script writes its pid on its own time:
+    // it takes a while to (the test reads the file by polling for it, and
+    // the delay makes sure it has to) and writes it atomically.
     let pidfile = sandbox.root.path().join("emulator-started");
     let emulator = sandbox.root.path().join("sdk/emulator/emulator");
     std::fs::create_dir_all(emulator.parent().unwrap()).unwrap();
     std::fs::write(
         &emulator,
         format!(
-            "#!/bin/sh\necho $$ > '{}'\nexec sleep 120\n",
-            pidfile.display()
+            "#!/bin/sh\nsleep 0.5\necho $$ > '{file}.tmp'\nmv '{file}.tmp' '{file}'\nexec sleep 120\n",
+            file = pidfile.display()
         ),
     )
     .unwrap();
     std::fs::set_permissions(&emulator, std::fs::Permissions::from_mode(0o755)).unwrap();
     let _guard = Started(pidfile.clone());
-    let port = free_console_port();
+    let ports = free_console_ports(4);
     std::fs::write(
         sandbox.root.path().join("host.toml"),
         format!(
-            "android_sdk = \"{}\"\n[android]\nemulator_ports = [{port}]\n",
-            sandbox.root.path().join("sdk").display()
+            "android_sdk = \"{}\"\n[android]\nemulator_ports = [{}]\n",
+            sandbox.root.path().join("sdk").display(),
+            ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     )
     .unwrap();
@@ -1449,18 +1495,22 @@ fn a_boot_records_the_emulators_identity() {
             .starts_with("env."),
         "{result}"
     );
-    let serial = format!("emulator-{port}");
-    let pid: u32 = std::fs::read_to_string(&pidfile)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = written_pid(&pidfile, std::time::Duration::from_secs(20))
+        .expect("the fake emulator never wrote its pid");
     let identity = serde_json::to_value(icm::procid::of(pid as i32).unwrap()).unwrap();
 
     let session: Value = serde_json::from_str(
         &std::fs::read_to_string(sandbox.sessions().join("android.json")).unwrap(),
     )
     .unwrap();
+    // The first of the ports that was free when icm looked.
+    let serial = session["serial"].as_str().unwrap().to_string();
+    assert!(
+        ports
+            .iter()
+            .any(|port| serial == format!("emulator-{port}")),
+        "{serial} is none of {ports:?}"
+    );
     let booted: Value = serde_json::from_str(
         &std::fs::read_to_string(
             sandbox
