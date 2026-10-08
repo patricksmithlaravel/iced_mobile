@@ -410,6 +410,9 @@ fn run_directories_keep_no_secret() {
         .join("sessions/ios-device")
         .join(run["run"].as_str().unwrap());
     assert!(secret::holds(&live.join("console.log")));
+    // Nor does the session record, though the app sent it in its `ready`
+    // event's fields of its own.
+    secret::assert_sessions_keep_none(&icm);
 
     let logs = device.json(&["logs", "ios-device"]);
     assert_eq!(logs["exit"], 0, "{logs}");
@@ -467,6 +470,7 @@ fn later_commands_without_the_secret_keep_none() {
         .join(run["run"].as_str().unwrap());
     assert!(secret::holds(&live.join("console.log")));
     assert!(live.join("secrets.json").is_file());
+    secret::assert_sessions_keep_none(&icm);
 
     for args in [
         &["logs", "ios-device"][..],

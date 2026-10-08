@@ -111,7 +111,9 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   `the_serve_check_keeps_no_secret`) puts a token in icm's environment
   that the app logs in every way an app can, then searches every file of
   the run directories for it raw, JSON-escaped and percent-encoded
-  (`tests/support/secret.rs`, included with `#[path]`). Each
+  (`tests/support/secret.rs`, included with `#[path]`); the app also sends
+  it in fields of its own in its `ready` event, and
+  `secret::assert_sessions_keep_none` searches every session record. Each
   `later_commands_without_the_secret_keep_none` hands the token to the app
   with `--env` in `run` and runs `logs`, `shot` and `stop` without it. It
   also gives every command a secret-named variable that nothing logs

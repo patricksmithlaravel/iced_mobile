@@ -81,9 +81,12 @@ fn main() {
             println!("hello from stdout");
             eprintln!("warning: a fixture warning");
             let token = log_token();
-            event(
-                r#"{"v":1,"kind":"ready","ms":1,"window":{"size":[400,300],"physical":[800,600],"scale":2},"backend":"tiny-skia","adapter":"none","api":"none"}"#,
-            );
+            // The protocol's fields, then what an app may add: the secret
+            // in a field of its own, in the window and in a free-form name.
+            let carried = escaped(token.as_deref().unwrap_or_default());
+            event(&format!(
+                r#"{{"v":1,"kind":"ready","ms":1,"window":{{"size":[400,300],"physical":[800,600],"scale":2,"title":"{carried}"}},"backend":"tiny-skia","adapter":"none{carried}","api":"none","account":{{"token":"{carried}"}}}}"#
+            ));
             if mode == "quit" {
                 // Ends by itself after the run, once the project has a
                 // `quit` file, logging the secret once more.

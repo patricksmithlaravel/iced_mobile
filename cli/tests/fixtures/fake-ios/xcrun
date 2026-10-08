@@ -5,8 +5,9 @@
 # (runs but sends no ICM_EVENT lines). `leak` draws and `leak-panic` panics
 # like them, logging the secret in $ICM_TEST_API_TOKEN everywhere an app's
 # output goes: stdout, stderr (plain, as JSON, in a URL with lowercase hex,
-# as JSON with a \u escape after a log prefix), an ICM_EVENT warning,
-# the unified log (`log stream` and `log show`, which write `/` as `\/`)
+# as JSON with a \u escape after a log prefix), an ICM_EVENT warning, the
+# ready event's fields of its own (`leak`), the unified log (`log stream`
+# and `log show`, which write `/` as `\/`)
 # and, for `leak-panic`, a crash report in ~/Library/Logs/DiagnosticReports.
 #
 # For the iOS release and ios-device tests it also fakes dsymutil (the
@@ -166,7 +167,7 @@ simctl)
         printf 'INFO fixture: payload {"t":"%s"}\n' "$tok_u"
         printf 'ICM_EVENT {"v":1,"kind":"warning","code":"fixture.token","message":"token %s"}\n' "$tok_json"
         if [ "$ICM_FAKE_SCENARIO" = leak ]; then
-          printf 'ICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n'
+          printf 'ICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3,"title":"%s"},"backend":"wgpu","account":{"token":"%s"}}\n' "$tok_json" "$tok_json"
         else
           printf "\nthread 'main' panicked at src/lib.rs:7:5:\nrejected token %s\n" "$ICM_TEST_API_TOKEN"
         fi
@@ -265,7 +266,7 @@ devicectl)
         printf 'GET https://api.example.com/v1?lower=%s\n' "$tok_pct"
         printf 'INFO fixture: payload {"t":"%s"}\n' "$tok_u"
         printf 'ICM_EVENT {"v":1,"kind":"warning","code":"fixture.token","message":"token %s"}\n' "$tok_json"
-        printf 'ICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n'
+        printf 'ICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3,"title":"%s"},"backend":"wgpu","account":{"token":"%s"}}\n' "$tok_json" "$tok_json"
         exec sleep 30
         ;;
       *)

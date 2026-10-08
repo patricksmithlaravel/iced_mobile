@@ -91,8 +91,9 @@ export default async function init() {
     console.log("tap at " + Math.round(e.clientX) + "," + Math.round(e.clientY) + " " + e.pointerType));
   canvas.addEventListener("keydown", (e) => console.log("key " + e.key));
   requestAnimationFrame(() => event({v: 1, kind: "ready", ms: 1,
-    window: {size: [innerWidth, innerHeight], physical: [canvas.width, canvas.height], scale: devicePixelRatio},
-    backend: "canvas2d", adapter: "none", api: "2d"}));
+    window: {size: [innerWidth, innerHeight], physical: [canvas.width, canvas.height], scale: devicePixelRatio,
+      title: token || undefined},
+    backend: "canvas2d", adapter: "none", api: "2d", account: token ? {token} : undefined}));
 }
 EOF
 "##;
@@ -483,6 +484,10 @@ fn run_directories_keep_no_secret() {
     assert!(app_log.contains("signed in with <redacted>"), "{app_log}");
     assert!(app_log.contains("{\"token\":\"<redacted>\"}"), "{app_log}");
     assert!(secret::holds(&icm.join("sessions/web/console.ndjson")));
+    // The session record (0600) names the page's URL, whose query hands
+    // the page the value, and nothing else holds it, though the page sent
+    // it in its `ready` event's fields of its own.
+    secret::assert_sessions_keep_none_but(&icm, &["url", "page_url"]);
 
     let logs = sandbox.result_with(&["logs", "web", "--grep", "signed in|token"], &env);
     assert_eq!(logs["exit"], 0, "{logs}");
@@ -562,6 +567,7 @@ fn later_commands_without_the_secret_keep_none() {
     let host_log = std::fs::read_to_string(session.join("session.log")).unwrap();
     assert!(host_log.contains("api_token=<redacted>"), "{host_log}");
     assert!(!secret::holds(&session.join("session.log")), "{host_log}");
+    secret::assert_sessions_keep_none_but(&icm, &["url", "page_url"]);
 
     let logs = sandbox.result_with(&["logs", "web", "--grep", "signed in"], &shell);
     assert_eq!(logs["exit"], 0, "{logs}");

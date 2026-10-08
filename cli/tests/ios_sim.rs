@@ -451,6 +451,9 @@ fn run_directories_keep_no_secret() {
     for file in ["app.stdout", "app.stderr", "oslog.ndjson"] {
         assert!(secret::holds(&live.join(file)), "{file}");
     }
+    // Nor do the session records, though the app sent it in its `ready`
+    // event's fields of its own.
+    secret::assert_sessions_keep_none(&icm);
 
     let logs = fake.result_with("leak", &["logs", "ios-sim", "--json", "-q"], &env);
     assert_eq!(logs["exit"], 0, "{logs}");
@@ -547,6 +550,10 @@ fn later_commands_without_the_secret_keep_none() {
     ] {
         let result = fake.result_with("leak", args, &shell);
         assert_eq!(result["exit"], 0, "{args:?}: {result}");
+        // `shot` records its screen in the session.
+        if args[0] != "stop" {
+            secret::assert_sessions_keep_none(&icm);
+        }
     }
     let system = icm.join("runs");
     secret::assert_kept_nowhere(&system);

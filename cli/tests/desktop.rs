@@ -364,10 +364,11 @@ fn panics_exits_and_hangs_fail_with_exit_ten() {
 /// a panic, is `<redacted>` in the copies of its stdout and stderr, in
 /// `app.log` and `logs.ndjson`, the step logs, events and results, raw or
 /// escaped. The live files in `target/icm/sessions` are the app's own
-/// output and keep it while the app runs; once it has ended (stopped, or
-/// failed its run) they are redacted too, and no file under `target/`
-/// holds it: icm writes no inherited value anywhere, `secrets.json`
-/// included.
+/// output and keep it while the app runs, but the session records never do,
+/// though the app puts it in fields of its own in its `ready` event; once
+/// it has ended (stopped, or failed its run) the live files are redacted
+/// too, and no file under `target/` holds it: icm writes no inherited value
+/// anywhere, `secrets.json` included.
 #[test]
 fn run_directories_keep_no_secret() {
     let sandbox = Sandbox::new();
@@ -389,6 +390,19 @@ fn run_directories_keep_no_secret() {
         .join(run["run"].as_str().unwrap());
     assert!(secret::holds(&live.join("app.stdout")));
     assert!(secret::holds(&live.join("app.stderr")));
+    // The app sent it in its `ready` event too, in fields of its own: the
+    // session records keep the event's protocol fields, redacted.
+    secret::assert_sessions_keep_none(&icm);
+    let session: Value =
+        serde_json::from_str(&std::fs::read_to_string(sandbox.session()).unwrap()).unwrap();
+    assert_eq!(session["ready"]["backend"], "tiny-skia", "{session}");
+    assert_eq!(session["ready"]["adapter"], "none<redacted>", "{session}");
+    assert_eq!(session["ready"]["window"]["physical"][0], 800, "{session}");
+    assert!(session["ready"].get("account").is_none(), "{session}");
+    assert!(
+        session["ready"]["window"].get("title").is_none(),
+        "{session}"
+    );
 
     let logs = sandbox.result_with(&["logs", "desktop"], &env);
     assert_eq!(logs["exit"], 0, "{logs}");
@@ -459,6 +473,7 @@ fn later_commands_without_the_secret_keep_none() {
         .join("sessions/desktop")
         .join(run["run"].as_str().unwrap());
     assert!(secret::holds(&live.join("app.stdout")));
+    secret::assert_sessions_keep_none(&icm);
     let kept = live.join("secrets.json");
     let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
@@ -537,6 +552,7 @@ fn later_commands_read_inherited_secrets_from_the_running_app() {
         .join(run["run"].as_str().unwrap());
     assert!(secret::holds(&live.join("app.stdout")));
     assert!(!live.join("secrets.json").exists());
+    secret::assert_sessions_keep_none(&target.join("icm"));
     let session: Value =
         serde_json::from_str(&std::fs::read_to_string(live.join("session.json")).unwrap()).unwrap();
     let names = session["inherited_secrets"].as_array().unwrap();

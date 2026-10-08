@@ -38,9 +38,12 @@
 //! and assembles `app.log` and `logs.ndjson` ([`logs`]).
 //!
 //! The session file `target/icm/sessions/desktop.json` (also copied into
-//! the run directory as `session.json`) records the pid, the log files, the
-//! launch time, the window and the names of the secret-named variables the
-//! app inherited; `shot`, `logs` and `stop` read it.
+//! the run directory and next to the live files as `session.json`) records
+//! the pid, the log files, the launch time, the window, the protocol fields
+//! of the `ready` event with the secret values icm knows redacted (the app
+//! writes the event, and may add any field: [`ready_record`]) and the names
+//! of the secret-named variables the app inherited; `shot`, `logs` and
+//! `stop` read it.
 
 pub mod headless;
 pub mod linux;
@@ -163,7 +166,8 @@ pub struct Session {
     /// The window, once ready.
     #[serde(default)]
     pub window: Option<WindowHint>,
-    /// The `ready` event, if the app sent one.
+    /// The `ready` event, if the app sent one; the files keep only its
+    /// protocol fields, redacted ([`ready_record`]).
     #[serde(default)]
     pub ready: Option<Value>,
     /// The secret-named variables the app inherited from icm's environment
@@ -273,9 +277,55 @@ fn last_session(project: &Project) -> Option<Session> {
         .find_map(|dir| read_session_file(&dir.join("session.json")))
 }
 
-/// A session file's text.
+/// What a session keeps of the app's `ready` event: the protocol's fields
+/// (`winit/src/icm.rs`), `ms`, the window's `size`, `physical` and `scale`,
+/// and `backend`, `adapter` and `api`, with the secret values icm knows
+/// redacted. The event is the app's to write, and the session files are
+/// never redacted later and outlive the run: any other field, or one of
+/// another type, is left out.
+fn ready_record(event: &Value) -> Value {
+    let number = |value: &Value| value.is_number().then(|| value.clone());
+    let pair = |value: &Value| {
+        value
+            .as_array()
+            .filter(|pair| pair.len() == 2 && pair.iter().all(Value::is_number))
+            .map(|pair| Value::Array(pair.clone()))
+    };
+    let mut kept = Map::new();
+    let _ = kept.insert("kind".into(), json!("ready"));
+    for key in ["v", "ms"] {
+        if let Some(value) = event.get(key).and_then(number) {
+            let _ = kept.insert(key.into(), value);
+        }
+    }
+    if let Some(window) = event.get("window") {
+        let mut hint = Map::new();
+        for (key, value) in [
+            ("size", window.get("size").and_then(pair)),
+            ("physical", window.get("physical").and_then(pair)),
+            ("scale", window.get("scale").and_then(number)),
+        ] {
+            if let Some(value) = value {
+                let _ = hint.insert(key.into(), value);
+            }
+        }
+        let _ = kept.insert("window".into(), Value::Object(hint));
+    }
+    for key in ["backend", "adapter", "api"] {
+        if let Some(text) = event.get(key).and_then(Value::as_str) {
+            let _ = kept.insert(key.into(), json!(text));
+        }
+    }
+    let mut kept = Value::Object(kept);
+    let _ = process::redact_json(&mut kept, &process::secret_values());
+    kept
+}
+
+/// A session file's text: the session with only its [`ready_record`].
 fn session_text(session: &Session) -> String {
-    let mut text = serde_json::to_string_pretty(session).unwrap_or_default();
+    let mut session = session.clone();
+    session.ready = session.ready.as_ref().map(ready_record);
+    let mut text = serde_json::to_string_pretty(&session).unwrap_or_default();
     text.push('\n');
     text
 }
@@ -2449,6 +2499,66 @@ mod tests {
         assert_eq!(terminate(pid, pid), "stopped with SIGTERM");
         assert!(!running(&session));
         assert_eq!(terminate(pid, pid), "already exited");
+    }
+
+    /// The session files keep the `ready` event's protocol fields, of the
+    /// protocol's types, redacted; whatever else the app put in it, they
+    /// leave out.
+    #[test]
+    fn sessions_keep_only_the_ready_events_protocol_fields() {
+        process::remember_secret("ICM_UNIT_READY_TOKEN", "ready-sekrit-4321");
+        let event = json!({
+            "v": 1,
+            "kind": "ready",
+            "ms": 12,
+            "window": {"size": [400, 300], "physical": [800, 600], "scale": 2, "title": "ready-sekrit-4321"},
+            "backend": "wgpu",
+            "adapter": "Apple M4 ready-sekrit-4321",
+            "api": "Metal",
+            "account": {"token": "ready-sekrit-4321"},
+            "note": "an app's own field",
+        });
+        assert_eq!(
+            ready_record(&event),
+            json!({
+                "v": 1,
+                "kind": "ready",
+                "ms": 12,
+                "window": {"size": [400, 300], "physical": [800, 600], "scale": 2},
+                "backend": "wgpu",
+                "adapter": "Apple M4 <redacted>",
+                "api": "Metal",
+            })
+        );
+        let odd = json!({
+            "kind": "other",
+            "ms": "12",
+            "window": {"size": ["ready-sekrit-4321", 1], "physical": [1, 2, 3], "scale": "2"},
+            "backend": {"name": "wgpu"},
+        });
+        assert_eq!(ready_record(&odd), json!({"kind": "ready", "window": {}}));
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session {
+            platform: PLATFORM.into(),
+            pid: 1,
+            pgid: 1,
+            run: "r".into(),
+            run_dir: dir.path().into(),
+            exe: PathBuf::from("/bin/sleep"),
+            cwd: dir.path().into(),
+            stdout: dir.path().join("app.stdout"),
+            stderr: dir.path().join("app.stderr"),
+            launched: "2026-10-06T00:00:00.000Z".into(),
+            profile: "debug".into(),
+            window: None,
+            ready: Some(event),
+            inherited_secrets: Vec::new(),
+        };
+        let text = session_text(&session);
+        assert!(!text.contains("sekrit"), "{text}");
+        let kept: Session = serde_json::from_str(&text).unwrap();
+        assert_eq!(kept.ready.unwrap()["window"]["scale"], 2);
     }
 
     /// Only an environment the command knows (the app it launched, or the

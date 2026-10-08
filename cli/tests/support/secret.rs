@@ -98,6 +98,71 @@ pub fn assert_kept_nowhere(dir: &Path) {
     assert_none("the secret", &leaks(dir));
 }
 
+/// The session records under a project's `target/icm` (`icm`): each
+/// platform's `sessions/<platform>.json` and every `session.json`, the
+/// copies in run directories and next to a session's live files included.
+pub fn session_records(icm: &Path) -> Vec<PathBuf> {
+    let sessions = icm.join("sessions");
+    let mut found = Vec::new();
+    let mut stack = vec![icm.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                stack.push(path);
+            } else if entry.file_name() == "session.json"
+                || (dir == sessions && path.extension().is_some_and(|ext| ext == "json"))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Panics, naming the files, when a session record under `icm` holds the
+/// secret in any form (or there is none): a record keeps what later
+/// commands need to find the app, never what the app logged or sent, and
+/// nothing redacts it later.
+pub fn assert_sessions_keep_none(icm: &Path) {
+    assert_sessions_keep_none_but(icm, &[]);
+}
+
+/// [`assert_sessions_keep_none`], leaving out the records' top-level
+/// fields `keys`: those that hold what the session hands its app on
+/// purpose (the web page's URL, whose query carries a secret-named
+/// `--env` value, in the 0600 `web.json`).
+pub fn assert_sessions_keep_none_but(icm: &Path, keys: &[&str]) {
+    let records = session_records(icm);
+    assert!(
+        !records.is_empty(),
+        "no session record in {}",
+        icm.display()
+    );
+    let forms = forms();
+    let leaks: Vec<(PathBuf, String)> = records
+        .into_iter()
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let mut record: serde_json::Value = serde_json::from_str(&text)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            if let Some(fields) = record.as_object_mut() {
+                for key in keys {
+                    let _ = fields.remove(*key);
+                }
+            }
+            let text = record.to_string();
+            let form = forms.iter().find(|form| text.contains(form.as_str()))?;
+            Some((path, form.clone()))
+        })
+        .collect();
+    assert_none("the secret", &leaks);
+}
+
 /// Panics, naming the files, when a file under `dir` (a project's whole
 /// `target/`) holds [`INHERITED`] in any form: what icm only inherited
 /// from its environment, no command may write.
