@@ -62,6 +62,7 @@ use crate::output::rundir;
 use crate::paths;
 use crate::plan::{Plan, Step};
 use crate::process::{self, Cmd};
+use crate::procid::{self, Identity, Verdict};
 use crate::screen::Screen;
 use crate::signals;
 use crate::time::format_duration;
@@ -145,6 +146,12 @@ pub struct Session {
     pub platform: String,
     /// The app's pid.
     pub pid: i32,
+    /// What the app's process was when icm started it
+    /// ([`crate::procid`]): the pid counts as the app, and is signalled,
+    /// only while it still has this. A session from before identities has
+    /// none, and is judged by the executable the pid runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Identity>,
     /// Its process group (the app leads its own session).
     pub pgid: i32,
     /// The run that launched it.
@@ -386,11 +393,16 @@ pub fn learn_app_secrets(sessions_dir: &Path) {
     let Some(session) = read_session_file(&sessions_dir.join(format!("{PLATFORM}.json"))) else {
         return;
     };
+    // A reused pid is another process, whose environment is not the app's.
+    match &session.identity {
+        Some(identity) if procid::check(session.pid, identity) != Verdict::Same => return,
+        _ => {}
+    }
     let Some((program, vars)) = process::environment_of(session.pid) else {
         return;
     };
-    // A reused pid runs something else.
-    if Path::new(&program) != session.exe {
+    // A session from before identities: a reused pid runs something else.
+    if session.identity.is_none() && Path::new(&program) != session.exe {
         return;
     }
     let _ = process::learn_environment_secrets(vars);
@@ -507,11 +519,17 @@ fn reap(pid: i32) -> Option<Ended> {
     }
 }
 
-/// Whether the session's app still runs: the pid exists and still runs the
-/// session's executable (a pid can be reused).
+/// Whether the session's app still runs: its pid still has the identity
+/// icm recorded when it started the app. A pid can be reused, and a process
+/// that runs the same program (another instance of the app) is not this
+/// one. A session from before identities is judged by the executable its
+/// pid runs (`ps`), and is not running when `ps` cannot say.
 fn running(session: &Session) -> bool {
     if reap(session.pid).is_some() {
         return false;
+    }
+    if let Some(identity) = &session.identity {
+        return procid::check(session.pid, identity) == Verdict::Same;
     }
     let ps = Cmd::tool("ps")
         .args(["-ww", "-o", "command=", "-p"])
@@ -522,9 +540,7 @@ fn running(session: &Session) -> bool {
             .stdout_text()
             .trim()
             .starts_with(&session.exe.display().to_string()),
-        Ok(_) => false,
-        // ps itself failed: trust the pid.
-        Err(_) => signals::alive(session.pid),
+        _ => false,
     }
 }
 
@@ -895,6 +911,8 @@ fn plan(ctx: &Ctx, project: &Project, profile: &str, run: Option<&RunArgs>) -> R
 
 struct Launched {
     pid: i32,
+    /// What the process was right after it started.
+    identity: Option<Identity>,
     started: Instant,
     launched: String,
     /// The live files the app writes.
@@ -948,6 +966,7 @@ fn launch(
     // the running app ([`learn_app_secrets`]). This command knows them: they
     // are its own. An `--env` pair replaces the variable of its name.
     let pid = pid as i32;
+    let identity = procid::of(pid);
     know_environment(pid);
     let _ = process::keep_secrets(&files, &process::handed_secrets(&cmd));
     let inherited_secrets = process::environment_secret_variables()
@@ -958,6 +977,7 @@ fn launch(
 
     Ok(Launched {
         pid,
+        identity,
         started,
         launched,
         stdout,
@@ -2006,6 +2026,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     let mut session = Session {
         platform: PLATFORM.to_string(),
         pid: launched.pid,
+        identity: launched.identity.clone(),
         pgid: launched.pid,
         run: ctx.rep.run_id(),
         run_dir: run_dir.clone(),
@@ -2471,6 +2492,7 @@ mod tests {
         let mut session = Session {
             platform: PLATFORM.into(),
             pid,
+            identity: None,
             pgid: pid,
             run: "r".into(),
             run_dir: dir.path().into(),
@@ -2491,11 +2513,30 @@ mod tests {
         let text = serde_json::to_string(&session).unwrap();
         assert_eq!(serde_json::from_str::<Session>(&text).unwrap(), session);
 
+        // A session from before identities: the executable decides.
         assert!(running(&session));
         // The same pid running something else is not the session's app.
         session.exe = PathBuf::from("/usr/bin/not-sleep");
         assert!(!running(&session));
         session.exe = PathBuf::from("/bin/sleep");
+
+        // With an identity, the start time decides: another instance of
+        // the same program that has the pid is not the app, and the app is,
+        // whatever its executable path says.
+        session.identity = Some(Identity {
+            start: "1791334000.000001".to_string(),
+            exe: "/bin/sleep".to_string(),
+        });
+        assert!(!running(&session));
+        session.identity = procid::of(pid);
+        assert!(session.identity.is_some());
+        assert!(running(&session));
+        session.exe = PathBuf::from("/usr/bin/not-sleep");
+        assert!(running(&session));
+        session.exe = PathBuf::from("/bin/sleep");
+        let text = serde_json::to_string(&session).unwrap();
+        assert_eq!(serde_json::from_str::<Session>(&text).unwrap(), session);
+
         assert_eq!(terminate(pid, pid), "stopped with SIGTERM");
         assert!(!running(&session));
         assert_eq!(terminate(pid, pid), "already exited");
@@ -2542,6 +2583,7 @@ mod tests {
         let session = Session {
             platform: PLATFORM.into(),
             pid: 1,
+            identity: None,
             pgid: 1,
             run: "r".into(),
             run_dir: dir.path().into(),
@@ -2569,6 +2611,7 @@ mod tests {
         let session = Session {
             platform: PLATFORM.into(),
             pid: i32::MAX - 17,
+            identity: None,
             pgid: i32::MAX - 17,
             run: "r".into(),
             run_dir: dir.path().into(),

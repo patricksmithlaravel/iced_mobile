@@ -263,6 +263,64 @@ fn run_logs_shot_and_stop() {
     wait_dead(rerun_pid);
 }
 
+/// A pid can be reused once the app has exited, and the process that has it
+/// can run the same program: a second instance of the app, started by hand.
+/// `stop` checked only that the pid runs the session's executable, so it
+/// signalled the other instance. The session records the identity (start
+/// time) of the app's process, and the pid counts as the app only while it
+/// has it.
+#[test]
+fn another_instance_of_the_program_is_not_the_app() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps(Vec::new());
+
+    let run = sandbox.result(&["run", "desktop", "--settle", "100ms", "--no-shot"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(pid);
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(sandbox.session()).unwrap()).unwrap();
+    let identity: icm::procid::Identity = serde_json::from_value(record["identity"].clone())
+        .expect("the session records the app's identity");
+    assert_eq!(icm::procid::of(pid).unwrap().start, identity.start);
+
+    // The app ends; a second instance of the same program takes over the
+    // number's place in the record.
+    // SAFETY: kill(2) on the app this test started.
+    unsafe {
+        let _ = libc::kill(-pid, libc::SIGKILL);
+    }
+    wait_dead(pid);
+    let bundle = sandbox.path(&run["artifacts"]["bundle"]);
+    let mut other = {
+        use std::os::unix::process::CommandExt;
+        Command::new(&bundle)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let other_pid = other.id() as i32;
+    apps.0.push(other_pid);
+    record["pid"] = other_pid.into();
+    record["pgid"] = other_pid.into();
+    std::fs::write(sandbox.session(), record.to_string()).unwrap();
+
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["stopped"][0]["how"], "already exited", "{stop}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        other.try_wait().unwrap().is_none(),
+        "the other instance was signalled"
+    );
+    assert!(!sandbox.session().exists());
+    let _ = other.kill();
+    let _ = other.wait();
+}
+
 #[test]
 fn panics_exits_and_hangs_fail_with_exit_ten() {
     let sandbox = Sandbox::new();

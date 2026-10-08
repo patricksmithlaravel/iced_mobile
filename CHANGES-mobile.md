@@ -39,6 +39,11 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - When `icm run android --wait-ready` runs out, the error says only what the readiness polls saw,
   where it used to say the app was alive. After Android relaunched the activity, it says so, where
   it used to say the wait ended before the resumed-activity probe starts.
+- `icm stop desktop` signals the pid in a desktop session only while it is the app `icm run`
+  started: its start time is recorded beside the pid, where only the executable the pid ran was
+  checked, so another instance of the same program that took the pid, started by hand say, was
+  stopped. The same test guards the read of the running app's environment. A session from before
+  keeps the executable test, and counts as not running when `ps` cannot say.
 - `icm stop web`, `icm ps` and the web commands take the pid in a web session's record for the
   session host only while that process is the one that wrote the record: the host records its start
   time, and the marker (`__session web` in the command line) that matched every session host remains
