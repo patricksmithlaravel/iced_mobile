@@ -421,18 +421,42 @@ pub fn prepare(adb: &Adb) {
 }
 
 /// How long [`shutdown`] waits for the emulator to go before it signals the
-/// process.
+/// process (less when `--timeout` leaves less).
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
 
-/// Shuts an emulator down (`adb emu kill`), waiting up to 30 s. The
-/// emulator's host process, when `process` names it (its pid and the
-/// identity icm recorded for it), gets SIGTERM if it lingers, and only
-/// while the pid still has that process ([`terminate`]): a pid with no
-/// recorded identity, or that another process has taken, is never
-/// signalled, and the wait then ends when `adb devices` stops listing the
-/// serial.
-pub fn shutdown(tools: &Toolset, serial: &str, process: Option<(u32, &Identity)>) -> Result<()> {
-    shutdown_within(tools, serial, process, SHUTDOWN_WAIT)
+/// How long the emulator's process gets, after SIGTERM, to exit.
+const TERM_GRACE: Duration = Duration::from_secs(5);
+
+/// How [`shutdown`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shutdown {
+    /// The emulator is gone: its recorded process has exited, or
+    /// `adb devices` no longer lists its serial.
+    Done,
+    /// It is still there after `adb emu kill`, the wait and, for a verified
+    /// process, SIGTERM: it ignored them, or icm has no process of its to
+    /// signal.
+    Lingers,
+}
+
+/// Shuts an emulator down (`adb emu kill`), waiting up to 30 s (or what
+/// `--timeout` leaves). The emulator's host process, when `process` names it
+/// (its pid and the identity icm recorded for it), gets SIGTERM if it
+/// lingers, and only while the pid still has that process ([`terminate`]):
+/// a pid with no recorded identity, or that another process has taken, is
+/// never signalled, and the wait then ends when `adb devices` stops listing
+/// the serial. An emulator that is still there at the end is
+/// [`Shutdown::Lingers`], which the caller reports instead of "stopped".
+pub fn shutdown(
+    ctx: &Ctx,
+    tools: &Toolset,
+    serial: &str,
+    process: Option<(u32, &Identity)>,
+) -> Result<Shutdown> {
+    let wait = ctx
+        .remaining()
+        .map_or(SHUTDOWN_WAIT, |left| left.min(SHUTDOWN_WAIT));
+    shutdown_within(tools, serial, process, wait, TERM_GRACE)
 }
 
 fn shutdown_within(
@@ -440,28 +464,37 @@ fn shutdown_within(
     serial: &str,
     process: Option<(u32, &Identity)>,
     wait: Duration,
-) -> Result<()> {
+    grace: Duration,
+) -> Result<Shutdown> {
     let adb = Adb::new(tools, serial)?;
     let _ = adb::quick(adb.cmd(["emu", "kill"]), Duration::from_secs(20));
+    let gone = || match process {
+        Some((pid, identity)) => !running(pid, identity),
+        None => adb::devices(tools)
+            .map(|devices| !devices.iter().any(|d| d.serial == serial))
+            .unwrap_or(true),
+    };
     let deadline = Instant::now() + wait;
-    loop {
-        let gone = match process {
-            Some((pid, identity)) => !running(pid, identity),
-            None => adb::devices(tools)
-                .map(|devices| !devices.iter().any(|d| d.serial == serial))
-                .unwrap_or(true),
-        };
-        if gone {
-            return Ok(());
+    while !gone() {
+        if Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
         }
-        if Instant::now() >= deadline {
-            if let Some((pid, identity)) = process {
-                let _ = terminate(pid, identity);
+        // It ignored `emu kill`. Its process, when icm knows it, is asked
+        // to end and given a moment; any other emulator is left as it is.
+        if process.is_some_and(|(pid, identity)| terminate(pid, identity)) {
+            let until = Instant::now() + grace;
+            while Instant::now() < until && !gone() {
+                std::thread::sleep(Duration::from_millis(100));
             }
-            return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(500));
+        return Ok(if gone() {
+            Shutdown::Done
+        } else {
+            Shutdown::Lingers
+        });
     }
+    Ok(Shutdown::Done)
 }
 
 /// Whether `pid` is still the emulator process icm recorded.
@@ -588,16 +621,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tools = lingering(dir.path());
         let wait = Duration::from_millis(600);
+        let grace = Duration::from_secs(5);
 
         let mut emulator = sleeper();
         let identity = crate::procid::of(emulator.id() as i32).unwrap();
-        shutdown_within(
+        let ended = shutdown_within(
             &tools,
             "emulator-5580",
             Some((emulator.id(), &identity)),
             wait,
+            grace,
         )
         .unwrap();
+        assert_eq!(ended, Shutdown::Done);
         assert_eq!(emulator.wait().unwrap().signal(), Some(libc::SIGTERM));
 
         let mut another = sleeper();
@@ -606,28 +642,71 @@ mod tests {
             exe: "/sdk/emulator/emulator".to_string(),
         };
         assert!(!terminate(another.id(), &recorded));
-        // Its pid is not the recorded process, so waiting is over at once,
-        // and nothing is sent.
+        // Its pid is not the recorded process, so the emulator is gone as
+        // far as icm can tell: the answer comes at once, not at the end of
+        // a wait this long, and nothing is sent.
+        let long = Duration::from_secs(60);
         let begun = Instant::now();
-        shutdown_within(
+        let ended = shutdown_within(
             &tools,
             "emulator-5580",
             Some((another.id(), &recorded)),
-            wait,
+            long,
+            grace,
         )
         .unwrap();
-        assert!(begun.elapsed() < wait);
+        assert_eq!(ended, Shutdown::Done);
+        assert!(begun.elapsed() < long / 2, "it waited for the deadline");
         assert!(another.try_wait().unwrap().is_none(), "it was signalled");
         let _ = another.kill();
         let _ = another.wait();
+    }
 
-        // Without a recorded process the wait is for adb to stop listing
-        // the serial, and ends at its deadline with nothing signalled.
-        let mut unrecorded = sleeper();
-        shutdown_within(&tools, "emulator-5580", None, wait).unwrap();
-        assert!(unrecorded.try_wait().unwrap().is_none());
-        let _ = unrecorded.kill();
-        let _ = unrecorded.wait();
+    /// An emulator that is still there at the end was not shut down: with no
+    /// process icm can verify the wait ends when `adb devices` still lists
+    /// the serial, and a verified process that ignores SIGTERM too is still
+    /// running after its grace. Neither is reported as done.
+    #[test]
+    fn an_emulator_that_ignores_everything_lingers() {
+        use std::os::unix::process::ExitStatusExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tools = lingering(dir.path());
+        let wait = Duration::from_millis(600);
+
+        // Nothing to signal: adb lists the serial to the end.
+        let begun = Instant::now();
+        let ended = shutdown_within(&tools, "emulator-5580", None, wait, wait).unwrap();
+        assert_eq!(ended, Shutdown::Lingers);
+        assert!(begun.elapsed() >= wait);
+
+        // A verified process that ignores SIGTERM (`sleep` keeps the
+        // ignored disposition across the exec; the marker says it was set).
+        let marker = dir.path().join("deaf");
+        let mut deaf = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; : > \"$0\"; exec sleep 60")
+            .arg(&marker)
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !marker.exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists());
+        let identity = crate::procid::of(deaf.id() as i32).unwrap();
+        let ended = shutdown_within(
+            &tools,
+            "emulator-5580",
+            Some((deaf.id(), &identity)),
+            wait,
+            wait,
+        )
+        .unwrap();
+        assert_eq!(ended, Shutdown::Lingers);
+        assert!(deaf.try_wait().unwrap().is_none(), "SIGTERM ended it");
+        deaf.kill().unwrap();
+        assert_eq!(deaf.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 
     /// A context whose output goes nowhere.

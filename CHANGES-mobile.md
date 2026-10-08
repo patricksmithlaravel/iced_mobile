@@ -73,6 +73,17 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   one. Before, a stale record whose pid another live process had taken made `stop --shutdown` send
   `am force-stop` and `emu kill` to another project's emulator without reading its owner, and then
   SIGTERM that process.
+- `icm stop --shutdown` no longer reports an emulator that ignored `adb emu kill` as stopped when
+  icm has no verified process of it to signal (a session from before start times, no record). It
+  keeps the emulator's record, warns `android.emulator.shutdown_failed` with the command that tries
+  again, says in the summary that it did not shut down, and lists it as `still_running` in the
+  result of `icm stop android` and `icm stop`. Before, it waited 30 s, reported the emulator under
+  `stopped`, deleted its record and said nothing, with the emulator still listed by `adb devices`.
+  The wait is shorter when `--timeout` leaves less.
+- Plain `icm stop android` (and `icm stop --all`) says why it left the app running when the device
+  names another project as the emulator's owner (`android.emulator.shared`), with the `adb` command
+  that stops the app by hand, where it said nothing.
+- `icm stop android --dry-run` states the rules the stop follows for the app and the emulator.
 
 ## Changes in v0.14.1-mobile.2
 

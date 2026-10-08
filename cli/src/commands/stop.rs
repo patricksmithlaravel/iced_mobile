@@ -65,8 +65,17 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
 
     let mut stopped: Vec<Value> = Vec::new();
     let mut shut_down: Vec<String> = Vec::new();
+    // Emulators `--shutdown` could not shut down (they ignored it).
+    let mut still_running: Vec<String> = Vec::new();
     for platform in &platforms {
-        match stop_platform(ctx, &project, &host, *platform, args.shutdown) {
+        match stop_platform(
+            ctx,
+            &project,
+            &host,
+            *platform,
+            args.shutdown,
+            &mut still_running,
+        ) {
             Ok(entries) => {
                 for entry in entries {
                     // Android reports the emulators it shut down alongside
@@ -125,14 +134,25 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         .count();
     ctx.rep.set("stopped", Value::Array(stopped));
     ctx.rep.set("shutdown", json!(shut_down));
+    ctx.rep.set("still_running", json!(still_running));
     let what = match args.platform {
         Some(platform) => platform.as_str().to_string(),
         None => "every platform".to_string(),
     };
-    ctx.rep.summary(match (count, shut_down.len()) {
+    let summary = match (count, shut_down.len()) {
         (0, 0) => format!("nothing was running for {what}"),
         (n, 0) => format!("stopped {n} session(s)"),
         (n, d) => format!("stopped {n} session(s) and shut down {d} managed device(s)"),
+    };
+    ctx.rep.summary(if still_running.is_empty() {
+        summary
+    } else if count == 0 && shut_down.is_empty() {
+        crate::android::pipeline::still_running_note(&still_running)
+    } else {
+        format!(
+            "{summary}; {}",
+            crate::android::pipeline::still_running_note(&still_running)
+        )
     });
     Ok(())
 }
@@ -192,13 +212,15 @@ fn plan(ctx: &Ctx, dir: &Path, platforms: &[Platform], shutdown: bool) {
 }
 
 /// Stops one dev platform's session through its own module; a platform
-/// without a session costs nothing (no tool is looked up).
+/// without a session costs nothing (no tool is looked up). The emulators
+/// `--shutdown` could not shut down go to `still_running`.
 fn stop_platform(
     ctx: &mut Ctx,
     project: &Project,
     host: &crate::host::HostConfig,
     platform: Platform,
     shutdown: bool,
+    still_running: &mut Vec<String>,
 ) -> Result<Vec<Value>> {
     let dir = project.sessions_dir();
     Ok(match platform {
@@ -219,7 +241,9 @@ fn stop_platform(
                 return Ok(Vec::new());
             }
             let tools = crate::android::Toolset::discover(host, &ctx.env)?;
-            crate::android::stop_session(ctx, project, host, &tools, shutdown)?
+            let stopped = crate::android::stop_session(ctx, project, host, &tools, shutdown)?;
+            still_running.extend(stopped.still_running);
+            stopped.stopped
         }
         Platform::Web => crate::web::stop(project).into_iter().collect(),
         Platform::IosDevice => Vec::new(),

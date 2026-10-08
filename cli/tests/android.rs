@@ -19,7 +19,8 @@ const BIN: &str = env!("CARGO_BIN_EXE_icm");
 /// `debug.icm.booted_by` prints the file `booted-by` there (else nothing),
 /// and fails with the file `getprop-fails` there. `emu kill` also kills the
 /// host process whose pid the file `emulator-pid` there holds, as a real
-/// emulator exits when it is told to.
+/// emulator exits when it is told to; with the file `ignores-emu-kill` there
+/// it does nothing, as an emulator that hangs does, and stays listed.
 const FAKE_ADB: &str = r#"#!/bin/sh
 echo "$*" >> "$FAKE_ADB_LOG"
 state_dir=$(dirname "$FAKE_ADB_LOG")
@@ -32,6 +33,7 @@ fi
 case "$1" in
   emu)
     if [ "$2" = "kill" ]; then
+      [ -f "$state_dir/ignores-emu-kill" ] && { echo OK; exit 0; }
       touch "$state_dir/killed"
       [ -f "$state_dir/emulator-pid" ] && kill "$(cat "$state_dir/emulator-pid")" 2>/dev/null
       echo OK; exit 0
@@ -871,6 +873,193 @@ fn an_older_session_on_an_unmarked_emulator_needs_a_managed_avd() {
         "{events:?}"
     );
     assert!(process.running());
+}
+
+/// What `--dry-run` says `stop` does is what it does: the app is force-stopped
+/// on an emulator icm booted only after its owner property is read, and not
+/// when its process has exited or the property names another project or
+/// cannot be read; `--shutdown` also says what happens to an emulator that
+/// ignores `emu kill`.
+#[test]
+fn the_stop_plan_states_the_rules_stop_follows() {
+    let sandbox = Sandbox::new();
+    let plan = |args: &[&str]| -> Vec<String> {
+        let result = sandbox.result(args);
+        assert_eq!(result["exit"], 0, "{result}");
+        result["plan"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["display"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let steps = plan(&["stop", "android", "--shutdown", "--dry-run"]);
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    for phrase in [
+        "am force-stop com.acme.fixture",
+        "on a device icm did not boot, always",
+        "after reading its debug.icm.booted_by",
+        "has exited",
+        "names another project or cannot be read",
+        "names this project",
+        "verified to still run",
+        "an icm-* AVD",
+    ] {
+        assert!(steps[0].contains(phrase), "{phrase}: {}", steps[0]);
+    }
+    for phrase in [
+        "adb emu kill",
+        "same rules as for the app",
+        "SIGTERM",
+        "only while that is the process icm started",
+        "android.emulator.shutdown_failed",
+        "not reported as stopped",
+    ] {
+        assert!(steps[1].contains(phrase), "{phrase}: {}", steps[1]);
+    }
+    // Nothing touched a device.
+    assert_eq!(sandbox.adb_calls(), "");
+}
+
+/// `emu kill` can be ignored. With no process icm can verify (no record at
+/// all, or one an older icm wrote) the emulator is still listed when the wait
+/// ends and there is nothing to signal: it is not reported as stopped, its
+/// record stays, and a WARN names it, with the command that tries again. The
+/// pid an older record names is never signalled.
+#[test]
+fn an_emulator_that_ignores_emu_kill_is_not_reported_stopped() {
+    for case in ["no record", "a record an older icm wrote"] {
+        let sandbox = Sandbox::new();
+        std::fs::write(sandbox.root.path().join("ignores-emu-kill"), "").unwrap();
+        let process = Emulator::start();
+        if case != "no record" {
+            sandbox.write_booted(serde_json::json!({"emulator_pid": process.0}));
+        }
+
+        // `--timeout` bounds the wait for the emulator to go.
+        let events = sandbox.events(&["stop", "android", "--shutdown", "--timeout", "2s"], &[]);
+        let result = events.last().unwrap();
+        assert_eq!(result["exit"], 0, "{case}: {result}");
+        assert!(
+            sandbox.adb_calls().contains("-s emulator-5580 emu kill"),
+            "{case}"
+        );
+        assert_eq!(result["stopped"], serde_json::json!([]), "{case}: {result}");
+        assert_eq!(
+            result["still_running"],
+            serde_json::json!(["emulator-5580"]),
+            "{case}: {result}"
+        );
+        assert_eq!(
+            result["summary"], "emulator-5580 did not shut down (still running)",
+            "{case}: {result}"
+        );
+        let failed = checks(&events, "android.emulator.shutdown_failed");
+        assert_eq!(failed.len(), 1, "{case}: {events:?}");
+        assert_eq!(failed[0]["status"], "warn", "{case}");
+        let detail = failed[0]["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with("emulator-5580 is still running: it ignored `adb emu kill`")
+                && detail.contains("no verified process"),
+            "{case}: {detail}"
+        );
+        assert_eq!(
+            failed[0]["fix"]["commands"],
+            serde_json::json!(["adb -s emulator-5580 emu kill"]),
+            "{case}"
+        );
+        assert_eq!(
+            sandbox
+                .sessions()
+                .join("android-booted/emulator-5580.json")
+                .exists(),
+            case != "no record",
+            "{case}: the record of an emulator that is still up was deleted"
+        );
+        assert!(process.running(), "{case}: an unverified pid was signalled");
+    }
+}
+
+/// A verified emulator process that ignores `emu kill` gets SIGTERM when the
+/// wait ends, and is reported stopped once that ended it.
+#[test]
+fn a_lingering_verified_emulator_is_ended_by_sigterm() {
+    let sandbox = Sandbox::new();
+    std::fs::write(sandbox.root.path().join("ignores-emu-kill"), "").unwrap();
+    let process = Emulator::start();
+    sandbox.write_booted(serde_json::json!({
+        "emulator_pid": process.0, "emulator_identity": process.identity()
+    }));
+
+    let events = sandbox.events(&["stop", "android", "--shutdown", "--timeout", "2s"], &[]);
+    let result = events.last().unwrap();
+    assert_eq!(result["exit"], 0, "{result}");
+    assert_eq!(
+        result["stopped"],
+        serde_json::json!([{"platform": "android", "emulator": "emulator-5580"}]),
+        "{result}"
+    );
+    assert_eq!(result["still_running"], serde_json::json!([]), "{result}");
+    assert!(checks(&events, "android.emulator.shutdown_failed").is_empty());
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while process.running() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!process.running(), "SIGTERM did not reach the process");
+    assert!(
+        !sandbox
+            .sessions()
+            .join("android-booted/emulator-5580.json")
+            .exists()
+    );
+}
+
+/// Plain `stop` says why it left the app running on another project's
+/// emulator, as `--shutdown` says why it left the emulator: it read the
+/// device's owner, force-stopped nothing, and the INFO names the owner and
+/// the command that stops the app by hand, once, whichever of `stop` and
+/// `stop --all` ran it.
+#[test]
+fn plain_stop_says_why_it_leaves_another_projects_emulator() {
+    for args in [&["stop", "android"][..], &["stop", "--all"][..]] {
+        let sandbox = Sandbox::new();
+        sandbox.owned_by("fedcba9876543210");
+        let process = Emulator::start();
+        sandbox.write_session(serde_json::json!({
+            "emulator_pid": process.0, "emulator_identity": process.identity()
+        }));
+
+        let events = sandbox.events(args, &[]);
+        let result = events.last().unwrap();
+        assert_eq!(result["exit"], 0, "{args:?}: {result}");
+        let calls = sandbox.adb_calls();
+        assert!(
+            calls.contains("-s emulator-5580 shell getprop debug.icm.booted_by"),
+            "{args:?}: {calls}"
+        );
+        assert!(!calls.contains("force-stop"), "{args:?}: {calls}");
+        assert!(!calls.contains("emu kill"), "{args:?}: {calls}");
+        assert_eq!(
+            result["stopped"],
+            serde_json::json!([]),
+            "{args:?}: {result}"
+        );
+        let shared = checks(&events, "android.emulator.shared");
+        assert_eq!(shared.len(), 1, "{args:?}: {events:?}");
+        assert_eq!(shared[0]["status"], "info", "{args:?}");
+        let detail = shared[0]["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with("emulator-5580 kept running with com.acme.fixture on it")
+                && detail.contains("fedcba9876543210"),
+            "{args:?}: {detail}"
+        );
+        assert_eq!(
+            shared[0]["fix"]["commands"],
+            serde_json::json!(["adb -s emulator-5580 shell am force-stop com.acme.fixture"]),
+            "{args:?}"
+        );
+        assert!(process.running());
+    }
 }
 
 /// `run` on an emulator that is already up carries an earlier booted record

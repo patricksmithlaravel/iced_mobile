@@ -2445,14 +2445,39 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     }
     let (project, host, tools) = setup(ctx)?;
     let ctx: &Ctx = ctx;
-    let stopped = stop_session(ctx, &project, &host, &tools, args.shutdown)?;
-    ctx.rep.summary(if stopped.is_empty() {
-        "nothing to stop on Android".to_string()
-    } else {
-        format!("stopped {} on Android", stopped.len())
-    });
+    let Stopped {
+        stopped,
+        still_running,
+    } = stop_session(ctx, &project, &host, &tools, args.shutdown)?;
+    ctx.rep
+        .summary(match (stopped.len(), still_running.is_empty()) {
+            (0, true) => "nothing to stop on Android".to_string(),
+            (n, true) => format!("stopped {n} on Android"),
+            (0, false) => still_running_note(&still_running),
+            (n, false) => format!(
+                "stopped {n} on Android; {}",
+                still_running_note(&still_running)
+            ),
+        });
     ctx.rep.set("stopped", Value::Array(stopped));
+    ctx.rep.set("still_running", json!(still_running));
     Ok(())
+}
+
+/// What a stop did.
+#[derive(Debug, Default)]
+pub struct Stopped {
+    /// What it stopped: the app (`platform`, `app`, `serial`) and each
+    /// emulator it shut down (`platform`, `emulator`).
+    pub stopped: Vec<Value>,
+    /// The emulators `--shutdown` tried to shut down that are still
+    /// running ([`avd::Shutdown::Lingers`]).
+    pub still_running: Vec<String>,
+}
+
+/// The summary's words for the emulators a stop could not shut down.
+pub fn still_running_note(serials: &[String]) -> String {
+    format!("{} did not shut down (still running)", serials.join(", "))
 }
 
 /// Why `stop` does not act on the emulator on a serial.
@@ -2525,6 +2550,26 @@ fn owner_unknown(ctx: &Ctx, serial: &str, why: &str, what: &str) {
     );
 }
 
+/// The INFO for an emulator `stop` leaves running because another project
+/// booted it (`what` says what was left). With `app`, the app that was not
+/// force-stopped there, the fix stops that app by hand.
+fn emulator_shared(ctx: &Ctx, serial: &str, owner: &str, what: &str, app: Option<&str>) {
+    let check = Check::info(
+        CheckId::AndroidEmulatorShared,
+        format!(
+            "{serial} {what}: icm booted it for another project ({} {owner}), which may still use it; `icm stop --shutdown` there shuts it down",
+            session::OWNER_PROP
+        ),
+    );
+    ctx.rep.check(match app {
+        Some(app) => check.fix(
+            "To stop the app without touching the emulator:",
+            &[&format!("adb -s {serial} shell am force-stop {app}")],
+        ),
+        None => check,
+    });
+}
+
 /// One emulator `--shutdown` may shut down.
 struct Target {
     serial: String,
@@ -2535,8 +2580,8 @@ struct Target {
 
 /// Stops this project's app on its device (`am force-stop`) and, with
 /// `shutdown`, the icm-managed emulators it or the project's default AVD
-/// runs on; removes the session. Returns what it stopped (for `icm stop
-/// --all` too).
+/// runs on; removes the session. Returns what it stopped, and the emulators
+/// that ignored the shutdown and still run (for `icm stop --all` too).
 ///
 /// A recorded pid is no proof of anything: once an emulator has exited,
 /// another process can have its pid and another emulator its serial. A
@@ -2552,7 +2597,7 @@ pub fn stop_session(
     host: &HostConfig,
     tools: &Toolset,
     shutdown: bool,
-) -> Result<Vec<Value>> {
+) -> Result<Stopped> {
     let app_id = project.config.config.app.id.clone();
     let session = session::read(project);
     let listed = adb::devices(tools)?;
@@ -2579,6 +2624,7 @@ pub fn stop_session(
     let managed_on =
         |serial: &str| avd_on(serial).is_some_and(|avd| crate::managed::is_managed(&avd));
     let mut stopped: Vec<Value> = Vec::new();
+    let mut still_running: Vec<String> = Vec::new();
     // The serials already reported as left running for their owner.
     let mut told: BTreeSet<String> = BTreeSet::new();
 
@@ -2596,6 +2642,9 @@ pub fn stop_session(
             true
         } else {
             match session.emulator_process() {
+                // The emulator the app ran on has exited, and the app with
+                // it: nothing of this project's is left to stop on the
+                // serial, whatever emulator holds it now.
                 session::Process::Gone => false,
                 process => {
                     let proven = matches!(process, session::Process::Verified { .. })
@@ -2622,8 +2671,20 @@ pub fn stop_session(
                             ));
                             false
                         }
-                        // Another project's: `--shutdown` says so below.
-                        Err(Leave::Shared(_)) => false,
+                        // Another project's: said once, here or by
+                        // `--shutdown` below, whichever meets it first.
+                        Err(Leave::Shared(owner)) => {
+                            if told.insert(session.serial.clone()) {
+                                emulator_shared(
+                                    ctx,
+                                    &session.serial,
+                                    &owner,
+                                    &format!("kept running with {app_id} on it"),
+                                    Some(&app_id),
+                                );
+                            }
+                            false
+                        }
                     }
                 }
             }
@@ -2723,12 +2784,10 @@ pub fn stop_session(
             match may_act(&owners.of(&serial), &own, proven) {
                 Ok(()) => {}
                 Err(Leave::Shared(owner)) => {
-                    ctx.rep.check(Check::info(
-                        CheckId::AndroidEmulatorShared,
-                        format!(
-                            "{serial} left running: icm booted it for another project (debug.icm.booted_by {owner}), which may still use it; `icm stop --shutdown` there shuts it down"
-                        ),
-                    ));
+                    // Reported already when the app was left running.
+                    if told.insert(serial.clone()) {
+                        emulator_shared(ctx, &serial, &owner, "left running", None);
+                    }
                     continue;
                 }
                 Err(Leave::Unknown(why)) => {
@@ -2750,18 +2809,49 @@ pub fn stop_session(
                 }
             }
             ctx.rep.progress(format!("shutting down {serial}"));
-            avd::shutdown(
+            let ended = avd::shutdown(
+                ctx,
                 tools,
                 &serial,
                 process.as_ref().map(|(pid, identity)| (*pid, identity)),
             )?;
-            session::remove_booted(project, &serial);
-            stopped.push(json!({"platform": "android", "emulator": serial}));
+            match ended {
+                avd::Shutdown::Done => {
+                    session::remove_booted(project, &serial);
+                    stopped.push(json!({"platform": "android", "emulator": serial}));
+                }
+                // It ignored `emu kill` (and SIGTERM, when icm may send
+                // one): it is not stopped, and its record stays, so that
+                // the next `--shutdown` can still verify its process.
+                avd::Shutdown::Lingers => {
+                    let why = match &process {
+                        Some((pid, _)) => {
+                            format!("`adb emu kill` and SIGTERM to its process (pid {pid})")
+                        }
+                        None => "`adb emu kill`, and icm has no verified process of it to signal"
+                            .to_string(),
+                    };
+                    ctx.rep.check(
+                        Check::warn(
+                            CheckId::AndroidEmulatorShutdownFailed,
+                            format!("{serial} is still running: it ignored {why}"),
+                        )
+                        .fix(
+                            "Run it again, or quit the emulator yourself (its window, or the process that listens on its console port); `icm stop android --shutdown` tries again:",
+                            &[&format!("adb -s {serial} emu kill")],
+                        ),
+                    );
+                    still_running.push(serial);
+                }
+            }
         }
     }
 
     session::remove(project);
-    Ok(stopped)
+    Ok(Stopped {
+        stopped,
+        still_running,
+    })
 }
 
 /// Whether this project's app runs on its session's device, for `icm ps`
