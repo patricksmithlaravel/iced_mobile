@@ -721,6 +721,54 @@ fn detach_and_wait() {
     assert_eq!(missing["errors"][0]["id"], "run.not_found");
 }
 
+/// A detached run whose icm died without a result is lost, not "still
+/// running" because another process took its pid: `icm wait` told the two
+/// apart by whether the pid existed, and waited out its whole timeout.
+#[test]
+fn wait_reports_a_detached_run_whose_pid_another_process_took() {
+    let sandbox = Sandbox::new();
+    let mut other = Command::new("sleep")
+        .arg("120")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let run = "20261008T000000Z-test-0001";
+    let dir = sandbox.runs().join(run);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("detached.json"),
+        serde_json::json!({
+            "pid": other.id(),
+            "identity": {"start": "1791334000.000001", "exe": "/usr/local/bin/icm"},
+            "started": "2026-10-08T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    let lost = result(&sandbox.run(&["wait", run, "--timeout", "30s", "--json", "-q"]));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "wait waited for another process"
+    );
+    assert_eq!(lost["errors"][0]["id"], "run.detached_lost", "{lost}");
+
+    // The same record without an identity (an older icm's) is judged by the
+    // pid, which exists: the run is still running.
+    std::fs::write(
+        dir.join("detached.json"),
+        serde_json::json!({"pid": other.id()}).to_string(),
+    )
+    .unwrap();
+    let still = result(&sandbox.run(&["wait", run, "--timeout", "300ms", "--json", "-q"]));
+    assert_eq!(still["errors"][0]["id"], "run.still_running", "{still}");
+    let _ = other.kill();
+    let _ = other.wait();
+}
+
 #[test]
 fn a_detached_failure_keeps_its_exit_code() {
     let sandbox = Sandbox::new();

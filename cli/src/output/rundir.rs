@@ -117,16 +117,21 @@ pub fn link_latest(root: &Path, platform: &str, run_dir: &Path) -> io::Result<()
     std::fs::rename(&tmp, &link)
 }
 
-/// The file naming the icm that writes a run directory (`{"pid": N}`).
+/// The file naming the icm that writes a run directory (`{"pid": N,
+/// "identity": …}`).
 pub const OWNER: &str = "owner.json";
 
 /// Records this icm as the run directory's writer, so `prune` in another
-/// icm leaves the directory alone while this one still runs.
+/// icm leaves the directory alone while this one still runs. The record
+/// holds the process's identity ([`crate::procid`]), which tells it from
+/// any process that has its pid after it exits.
 pub fn write_owner(dir: &Path) -> io::Result<()> {
-    write_atomic(
-        &dir.join(OWNER),
-        format!("{{\"pid\":{}}}\n", std::process::id()).as_bytes(),
-    )
+    let pid = std::process::id();
+    let record = serde_json::json!({
+        "pid": pid,
+        "identity": crate::procid::of(pid as i32),
+    });
+    write_atomic(&dir.join(OWNER), format!("{record}\n").as_bytes())
 }
 
 /// Removes run directories beyond the newest `keep`. Never removes the
@@ -185,12 +190,7 @@ fn in_progress(dir: &Path) -> bool {
     if dir.join("result.json").exists() {
         return false;
     }
-    let owner = std::fs::read_to_string(dir.join(OWNER))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|value| value.get("pid")?.as_i64())
-        .map(|pid| pid as i32);
-    detached_alive(dir) || owner.is_some_and(crate::signals::alive)
+    detached_alive(dir) || process_runs(&dir.join(OWNER))
 }
 
 /// Whether a run directory belongs to a detached icm that is still running.
@@ -198,14 +198,42 @@ pub fn detached_alive(dir: &Path) -> bool {
     if dir.join("result.json").exists() {
         return false;
     }
-    detached_pid(dir).is_some_and(crate::signals::alive)
+    process_runs(&dir.join("detached.json"))
 }
 
 /// The pid of a run's detached icm, from `detached.json`.
 pub fn detached_pid(dir: &Path) -> Option<i32> {
-    let text = std::fs::read_to_string(dir.join("detached.json")).ok()?;
+    pid_of(&dir.join("detached.json")).map(|(pid, _)| pid)
+}
+
+/// The pid in a record (`detached.json`, `owner.json`) and the identity of
+/// its process, when the record has one.
+fn pid_of(path: &Path) -> Option<(i32, Option<crate::procid::Identity>)> {
+    let text = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    value.get("pid")?.as_i64().map(|pid| pid as i32)
+    let pid = value.get("pid")?.as_i64()? as i32;
+    let identity = value
+        .get("identity")
+        .and_then(|identity| serde_json::from_value(identity.clone()).ok());
+    Some((pid, identity))
+}
+
+/// Whether the icm a record names still runs. A pid is reused once its
+/// process exits, so with an identity the pid must still have it: a run
+/// whose icm died is not "still running" because another process took its
+/// number. This only decides whether a run is waited for and kept, never a
+/// signal, so a pid the OS will not describe, and a record from before
+/// identities, count as running when the pid exists.
+fn process_runs(path: &Path) -> bool {
+    use crate::procid::{Verdict, check};
+    let Some((pid, identity)) = pid_of(path) else {
+        return false;
+    };
+    match identity.map(|identity| check(pid, &identity)) {
+        Some(Verdict::Same) => true,
+        Some(Verdict::Gone | Verdict::Other(_)) => false,
+        Some(Verdict::Unknown(_)) | None => crate::signals::alive(pid),
+    }
 }
 
 /// Finds a run directory by id (in any of `roots`) or by path.
@@ -237,6 +265,53 @@ mod tests {
         assert!(is_run_id(&new_run_id("explain", None)));
         assert!(!is_run_id("../../etc"));
         assert!(!is_run_id("20261006T210311Z"));
+    }
+
+    /// A run counts as running while its icm's pid has the identity the
+    /// run recorded; a pid that another process took does not keep a run
+    /// directory or make `wait` expect a result, and a record from before
+    /// identities is judged by the pid alone.
+    #[test]
+    fn a_run_whose_icm_exited_is_not_running_when_its_pid_was_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = std::process::id() as i32;
+        let mine = crate::procid::of(me).unwrap();
+        let other = serde_json::json!({"start": "1791334000.000001", "exe": "/x/icm"});
+        let detached = dir.path().join("detached.json");
+        let write =
+            |value: serde_json::Value| std::fs::write(&detached, value.to_string()).unwrap();
+
+        write(serde_json::json!({"pid": me, "identity": mine}));
+        assert!(detached_alive(dir.path()));
+        assert_eq!(detached_pid(dir.path()), Some(me));
+        write(serde_json::json!({"pid": me, "identity": other}));
+        assert!(!detached_alive(dir.path()));
+        // From before identities: the pid is all there is.
+        write(serde_json::json!({"pid": me}));
+        assert!(detached_alive(dir.path()));
+        write(serde_json::json!({"pid": 0}));
+        assert!(!detached_alive(dir.path()));
+        // A finished run is not running.
+        write(serde_json::json!({"pid": me, "identity": mine}));
+        std::fs::write(dir.path().join("result.json"), "{}").unwrap();
+        assert!(!detached_alive(dir.path()));
+        std::fs::remove_file(dir.path().join("result.json")).unwrap();
+
+        // The owner `write_owner` records is this process, and a foreground
+        // run whose owner's pid another process took is not in progress.
+        write_owner(dir.path()).unwrap();
+        assert!(in_progress(dir.path()));
+        let text = std::fs::read_to_string(dir.path().join(OWNER)).unwrap();
+        let owner: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(owner["pid"], me);
+        assert_eq!(owner["identity"]["start"], mine.start);
+        std::fs::remove_file(&detached).unwrap();
+        std::fs::write(
+            dir.path().join(OWNER),
+            serde_json::json!({"pid": me, "identity": other}).to_string(),
+        )
+        .unwrap();
+        assert!(!in_progress(dir.path()));
     }
 
     #[test]

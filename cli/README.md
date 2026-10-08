@@ -35,7 +35,7 @@ cargo test
 | `exit.rs` | the stable exit codes |
 | `process.rs` | the runner: stdin null, process groups, timeouts, file-backed output, redaction; a session's `secrets.json` (`keep_secrets`: the secret values handed to its app with `--env`, never one icm only inherited); a running app's environment read back (`environment_of`, `learn_environment_secrets`) |
 | `signals.rs` | SIGINT/SIGTERM/SIGHUP: record, kill registered groups |
-| `procid.rs` | process identity: a process's start time, read when icm starts it and kept beside its pid in a record, and read again before icm trusts the pid or signals it (a pid alone says only that some process has the number); the Android emulator's, the iOS simulator's, the desktop app's, the web session host's and ios-device's console records use it |
+| `procid.rs` | process identity: a process's start time, read when icm starts it and kept beside its pid in a record, and read again before icm trusts the pid or signals it (a pid alone says only that some process has the number); every record that names a process icm started uses it (the Android emulator, the iOS simulator's app and collector, the desktop app, the web session host, ios-device's console, a detached run's icm) |
 | `plan.rs` | `Plan`/`Step`; `--dry-run` prints, `execute` runs |
 | `config/` | icm.toml types, discovery, validation with `file:line` (`source.rs` keeps the spans) |
 | `host.rs` | `~/.config/icm/host.toml` |

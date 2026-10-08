@@ -39,6 +39,10 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - When `icm run android --wait-ready` runs out, the error says only what the readiness polls saw,
   where it used to say the app was alive. After Android relaunched the activity, it says so, where
   it used to say the wait ended before the resumed-activity probe starts.
+- `icm wait` reports a detached run whose icm died without a result as `run.detached_lost`, where it
+  waited out its whole timeout when another process had taken the pid. `icm run` and `icm --detach`
+  record the icm's start time beside its pid, and `prune` keeps a run directory only while that
+  process runs; a run an older icm started is still judged by its pid.
 - `icm stop desktop` signals the pid in a desktop session only while it is the app `icm run`
   started: its start time is recorded beside the pid, where only the executable the pid ran was
   checked, so another instance of the same program that took the pid, started by hand say, was

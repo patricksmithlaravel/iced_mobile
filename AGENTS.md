@@ -193,6 +193,13 @@ stop only the platforms they drive and leave the other platforms' devices alone
     common one.
   - A limitation that is fixed or found updates `docs/agents/limitations.md` and the Known
     limitations in `src/mobile.rs`.
+- **A recorded pid is not a process.** Pids are reused, so a record that names a process icm started
+  (a session, an emulator, a log collector) also holds `procid::of(pid)`, read right after the start,
+  and anything that signals the pid, or decides about a device because the process still runs,
+  checks it again with `procid::check` (or a helper over it: `sessions::alive`, `Session::is_ours`,
+  `android::session::process`). A record without an identity proves nothing: never signal its pid,
+  and never take a live process under it for the one icm started. `kill(pid, 0)` is for a child
+  the same command spawned.
 - **Commit messages:** `area: imperative summary`, with comma-separated areas when a commit spans
   several (`icm`, `iced`, `winit`, `examples/app`, `docs`, `workspace`, `graphics`, ...). The body
   says why the change is needed and what it changes, and ends with what was verified (the commands

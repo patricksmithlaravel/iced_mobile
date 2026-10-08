@@ -74,6 +74,9 @@ pub fn run(ctx: &mut Ctx) -> Result<()> {
 
     let record = json!({
         "pid": pid,
+        // What the process is now: `icm wait` and `prune` tell it from any
+        // process that has the pid after it exits.
+        "identity": crate::procid::of(pid as i32),
         "argv": process::redact_argv(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()),
         "cwd": std::env::current_dir().ok(),
         "started": crate::time::Utc::now().rfc3339(),
