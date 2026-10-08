@@ -532,20 +532,63 @@ fn written_pid(file: &Path, within: std::time::Duration) -> Option<u32> {
 /// file: killed when dropped, whatever the test did. The script writes the
 /// file a moment after it starts, so the guard waits for it (a bounded wait,
 /// which only a test that never started the emulator pays) rather than
-/// finding it missing when the test failed early. The process is not judged
-/// by its program: that is the shell until the script execs `sleep` (and
-/// the shell's own name varies, `sh` is `bash` here), and while it execs
-/// it is neither. The script lives 120 s, far longer than a test, so the
-/// number is still the script's when the guard runs.
-struct Started(PathBuf);
+/// finding it missing when the test failed early.
+///
+/// The number in the file is signalled only while its process still is the
+/// one the script started, which its command line says: the script ends in
+/// `exec sleep <marker>`, a duration no other process has, and one shell
+/// command reads the command line and signals on a match, so a number whose
+/// process has ended (the script lives 120 s, which only a test that hung
+/// outlasts) and gone to another one is left alone. Until the script has
+/// exec'd, the process is the shell (its name varies, `sh` is `bash` here),
+/// so the guard asks again for a moment.
+struct Started {
+    file: PathBuf,
+    marker: String,
+}
+
+impl Started {
+    /// A guard for the pid file `file`, with a duration for the script's
+    /// `sleep` that no other process runs.
+    fn new(file: PathBuf) -> Started {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos() as u64);
+        let unique = (u64::from(std::process::id()) * 1_000_003 + nanos) % 1_000_000_000;
+        Started {
+            file,
+            marker: format!("120.{unique:09}"),
+        }
+    }
+
+    /// The `exec` line of the fake `emulator` script.
+    fn exec_line(&self) -> String {
+        format!("exec sleep {}", self.marker)
+    }
+}
 
 impl Drop for Started {
     fn drop(&mut self) {
-        if let Some(pid) = written_pid(&self.0, std::time::Duration::from_secs(5)) {
-            // SAFETY: kill(2) on the process a script of this test started.
-            unsafe {
-                let _ = libc::kill(pid as i32, libc::SIGKILL);
+        let Some(pid) = written_pid(&self.file, std::time::Duration::from_secs(5)) else {
+            return;
+        };
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let killed = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    r#"[ "$(/bin/ps -p "$1" -o command= 2>/dev/null)" = "sleep $2" ] && kill -9 "$1""#,
+                    "sh",
+                    &pid.to_string(),
+                    &self.marker,
+                ])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            if killed || std::time::Instant::now() >= until {
+                return;
             }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 }
@@ -1661,18 +1704,19 @@ fn a_boot_records_the_emulators_identity() {
     // it takes a while to (the test reads the file by polling for it, and
     // the delay makes sure it has to) and writes it atomically.
     let pidfile = sandbox.root.path().join("emulator-started");
+    let guard = Started::new(pidfile.clone());
     let emulator = sandbox.root.path().join("sdk/emulator/emulator");
     std::fs::create_dir_all(emulator.parent().unwrap()).unwrap();
     std::fs::write(
         &emulator,
         format!(
-            "#!/bin/sh\nsleep 0.5\necho $$ > '{file}.tmp'\nmv '{file}.tmp' '{file}'\nexec sleep 120\n",
-            file = pidfile.display()
+            "#!/bin/sh\nsleep 0.5\necho $$ > '{file}.tmp'\nmv '{file}.tmp' '{file}'\n{exec}\n",
+            file = pidfile.display(),
+            exec = guard.exec_line()
         ),
     )
     .unwrap();
     std::fs::set_permissions(&emulator, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let _guard = Started(pidfile.clone());
     let ports = free_console_ports(4);
     std::fs::write(
         sandbox.root.path().join("host.toml"),
