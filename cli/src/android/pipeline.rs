@@ -324,6 +324,7 @@ pub(crate) fn launch_app(ctx: &mut Ctx, args: &RunArgs) -> Result<Launched> {
                     serial: booting.serial.clone(),
                     avd: booting.avd.clone(),
                     emulator_pid: Some(booting.pid),
+                    emulator_identity: booting.identity.clone(),
                     emulator_log: Some(booting.log.clone()),
                 },
             );
@@ -331,18 +332,24 @@ pub(crate) fn launch_app(ctx: &mut Ctx, args: &RunArgs) -> Result<Launched> {
         }
         None => {
             // The record, else (files from before it) the last session's.
+            // Only an emulator whose recorded process is verified to
+            // still run is the one an earlier run booted: a pid that
+            // another process has taken, or that has no identity to
+            // check, is no proof that the emulator on this serial is
+            // this project's, and a rerun must not claim another's.
             let previous = session::read(&project)
                 .filter(|previous| previous.booted_by_icm)
                 .map(|previous| session::Booted {
                     serial: previous.serial,
                     avd: previous.avd.unwrap_or_default(),
                     emulator_pid: previous.emulator_pid,
+                    emulator_identity: previous.emulator_identity,
                     emulator_log: previous.emulator_log,
-                })
-                .filter(session::Booted::alive);
+                });
             session::booted(&project)
                 .into_iter()
                 .chain(previous)
+                .filter(session::Booted::verified)
                 .find(|booted| {
                     booted.serial == chosen.serial
                         && chosen.avd.as_deref().is_none_or(|avd| avd == booted.avd)
@@ -363,6 +370,15 @@ pub(crate) fn launch_app(ctx: &mut Ctx, args: &RunArgs) -> Result<Launched> {
             .as_ref()
             .map(|b| b.pid)
             .or_else(|| booted_earlier.as_ref().and_then(|p| p.emulator_pid)),
+        emulator_identity: chosen
+            .booting
+            .as_ref()
+            .map(|b| b.identity.clone())
+            .unwrap_or_else(|| {
+                booted_earlier
+                    .as_ref()
+                    .and_then(|p| p.emulator_identity.clone())
+            }),
         emulator_log: chosen
             .booting
             .as_ref()
@@ -2472,10 +2488,97 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     Ok(())
 }
 
+/// Why `stop` does not act on the emulator on a serial.
+#[derive(Debug, PartialEq, Eq)]
+enum Leave {
+    /// Its owner property names another project.
+    Shared(String),
+    /// Adb could not read its owner property (why).
+    Unknown(String),
+    /// Its owner property is unset, and nothing proves it is this project's.
+    Unproven,
+}
+
+/// Whether `stop` may act on an emulator (force-stop the app, shut it
+/// down), from its owner property as the device reads it and from what
+/// proves it is this project's. A project's records live in its own
+/// directory, so an emulator is another project's, or somebody's, whatever
+/// they say: the owner is read from the device before every destructive
+/// step, never skipped because a record looks live, and a failed read is
+/// not an unset one. `proven` is that the emulator process icm started is
+/// verified to run on the serial ([`session::Process::Verified`]), or that
+/// it runs one of icm's managed AVDs, which are shut down unless another
+/// project claimed them. Without it, only a device that names this
+/// project (`own`) is acted on.
+fn may_act(owner: &Owner, own: &str, proven: bool) -> std::result::Result<(), Leave> {
+    match owner {
+        Owner::Project(tag) if tag == own => Ok(()),
+        Owner::Project(tag) => Err(Leave::Shared(tag.clone())),
+        Owner::Unknown(why) => Err(Leave::Unknown(why.clone())),
+        Owner::Nobody if proven => Ok(()),
+        Owner::Nobody => Err(Leave::Unproven),
+    }
+}
+
+/// What `stop` has read from the devices: each serial's owner, once.
+struct Owners<'a> {
+    tools: &'a Toolset,
+    read: std::cell::RefCell<std::collections::BTreeMap<String, Owner>>,
+}
+
+impl Owners<'_> {
+    /// The project an icm booted the emulator for, as the device says.
+    fn of(&self, serial: &str) -> Owner {
+        self.read
+            .borrow_mut()
+            .entry(serial.to_string())
+            .or_insert_with(|| match Adb::new(self.tools, serial) {
+                Ok(adb) => emulator_owner(&adb),
+                Err(error) => Owner::Unknown(error.detail),
+            })
+            .clone()
+    }
+}
+
+/// The WARN for an emulator `stop` leaves running because adb could not
+/// read which project booted it (`what` says what was left).
+fn owner_unknown(ctx: &Ctx, serial: &str, why: &str, what: &str) {
+    ctx.rep.check(
+        Check::warn(
+            CheckId::AndroidEmulatorOwnerUnknown,
+            format!(
+                "{serial} {what}: icm could not read which project booted it ({}, `adb shell getprop` {why}), and another may still use it",
+                session::OWNER_PROP
+            ),
+        )
+        .fix(
+            "Rerun `icm stop android --shutdown` once the emulator answers; to shut down this emulator anyway, and stop any app on it:",
+            &[&format!("adb -s {serial} emu kill")],
+        ),
+    );
+}
+
+/// One emulator `--shutdown` may shut down.
+struct Target {
+    serial: String,
+    /// The emulator process icm started, when it is verified to run: its
+    /// pid and the identity that was recorded for it.
+    process: Option<(u32, crate::procid::Identity)>,
+}
+
 /// Stops this project's app on its device (`am force-stop`) and, with
 /// `shutdown`, the icm-managed emulators it or the project's default AVD
 /// runs on; removes the session. Returns what it stopped (for `icm stop
 /// --all` too).
+///
+/// A recorded pid is no proof of anything: once an emulator has exited,
+/// another process can have its pid and another emulator its serial. A
+/// record counts as the emulator on its serial only while its process is
+/// verified against the identity icm recorded when it started it
+/// ([`session::Process`]); an older record without one proves nothing. And
+/// whatever the records say, the emulator's owner property is read before
+/// the app is force-stopped or the emulator shut down ([`may_act`]), and the
+/// emulator's process is signalled only while it is that verified one.
 pub fn stop_session(
     ctx: &Ctx,
     project: &Project,
@@ -2491,37 +2594,85 @@ pub fn stop_session(
             .iter()
             .any(|device| device.serial == serial && device.online())
     };
+    let own = session::owner_tag(project);
+    let owners = Owners {
+        tools,
+        read: Default::default(),
+    };
+    // The AVD each emulator runs now, which a session's record may no
+    // longer name: asked of the emulators once, when a decision needs it.
+    let running_now = std::cell::OnceCell::new();
+    let avd_on = |serial: &str| {
+        running_now
+            .get_or_init(|| device::running_emulators(tools, &listed))
+            .iter()
+            .find(|(s, _)| s == serial)
+            .and_then(|(_, name)| name.clone())
+    };
+    let managed_on =
+        |serial: &str| avd_on(serial).is_some_and(|avd| crate::managed::is_managed(&avd));
     let mut stopped: Vec<Value> = Vec::new();
-    // The emulator icm booted for the session is the one on its serial
-    // only while the emulator process icm recorded still runs, the test
-    // the booted records pass too (session::Booted::alive). Once it has
-    // exited, the app went with it, and the serial may hold another
-    // emulator since: another project's, or one booted by hand.
-    let booted_alive = |session: &Session| {
-        session::Booted {
-            emulator_pid: session.emulator_pid,
-            ..session::Booted::default()
-        }
-        .alive()
-    };
-    let exited = |session: &Session| {
-        session.booted_by_icm && session.emulator_pid.is_some() && !booted_alive(session)
-    };
+    // The serials already reported as left running for their owner.
+    let mut told: BTreeSet<String> = BTreeSet::new();
 
+    // The app is force-stopped on a device icm did not boot (the one the
+    // run was told to use) as before. On an emulator icm booted, only while
+    // that emulator is this project's: the emulator process the session
+    // recorded is verified to run, or it exited and the serial holds
+    // another emulator now (another project's, or one booted by hand), so
+    // the app is not force-stopped there; and either way the device must
+    // not name another project as its owner.
     if let Some(session) = &session
         && online(&session.serial)
-        && !exited(session)
     {
-        let adb = Adb::new(tools, &session.serial)?;
-        let outcome = ctx.step(
-            "adb.force_stop",
-            &adb.shell(&format!("am force-stop {}", adb::quote(&app_id)))
-                .timeout(Duration::from_secs(30)),
-        )?;
-        if !outcome.success() {
-            return Err(ctx.step_failure("adb.force_stop", CheckId::ToolFailed, &outcome));
+        let proceed = if !session.booted_by_icm {
+            true
+        } else {
+            match session.emulator_process() {
+                session::Process::Gone => false,
+                process => {
+                    let proven = matches!(process, session::Process::Verified { .. })
+                        || managed_on(&session.serial);
+                    match may_act(&owners.of(&session.serial), &own, proven) {
+                        Ok(()) => true,
+                        Err(Leave::Unknown(why)) => {
+                            owner_unknown(
+                                ctx,
+                                &session.serial,
+                                &why,
+                                &format!("kept running with {app_id} on it"),
+                            );
+                            let _ = told.insert(session.serial.clone());
+                            false
+                        }
+                        Err(Leave::Unproven) => {
+                            ctx.rep.check(Check::info(
+                                CheckId::RunNoSession,
+                                format!(
+                                    "{app_id} was not force-stopped on {}: the emulator process the session recorded cannot be checked (the session has no process identity, or the OS would not describe it), and the emulator runs no AVD icm manages and carries no mark of this project",
+                                    session.serial
+                                ),
+                            ));
+                            false
+                        }
+                        // Another project's: `--shutdown` says so below.
+                        Err(Leave::Shared(_)) => false,
+                    }
+                }
+            }
+        };
+        if proceed {
+            let adb = Adb::new(tools, &session.serial)?;
+            let outcome = ctx.step(
+                "adb.force_stop",
+                &adb.shell(&format!("am force-stop {}", adb::quote(&app_id)))
+                    .timeout(Duration::from_secs(30)),
+            )?;
+            if !outcome.success() {
+                return Err(ctx.step_failure("adb.force_stop", CheckId::ToolFailed, &outcome));
+            }
+            stopped.push(json!({"platform": "android", "app": app_id, "serial": session.serial}));
         }
-        stopped.push(json!({"platform": "android", "app": app_id, "serial": session.serial}));
     }
 
     // `--shutdown` stops the emulators icm booted for this project, and
@@ -2529,56 +2680,63 @@ pub fn stop_session(
     // made and owns (crate::managed::is_managed), never anyone else's, and
     // never one icm booted for another project (session::OWNER_PROP).
     if shutdown {
-        // The AVD each emulator runs now, which a session's record may no
-        // longer name.
-        let running = device::running_emulators(tools, &listed);
-        let avd_on = |serial: &str| {
-            running
-                .iter()
-                .find(|(s, _)| s == serial)
-                .and_then(|(_, name)| name.clone())
+        let running = running_now.get_or_init(|| device::running_emulators(tools, &listed));
+        let mut targets: Vec<Target> = Vec::new();
+        let mut add = |serial: &str, process: Option<(u32, crate::procid::Identity)>| match targets
+            .iter_mut()
+            .find(|target| target.serial == serial)
+        {
+            Some(target) => target.process = target.process.take().or(process),
+            None => targets.push(Target {
+                serial: serial.to_string(),
+                process,
+            }),
         };
-        // (serial, emulator pid, whether this project's records say icm
-        // booted it for this project)
-        let mut targets: Vec<(String, Option<u32>, bool)> = Vec::new();
+        let verified = |process: session::Process| match process {
+            session::Process::Verified { pid, identity } => Some((pid, identity)),
+            _ => None,
+        };
         if let Some(session) = &session
             && online(&session.serial)
         {
-            if session.booted_by_icm && booted_alive(session) {
-                targets.push((session.serial.clone(), session.emulator_pid, true));
-            } else if avd_on(&session.serial).is_some_and(|avd| crate::managed::is_managed(&avd)) {
-                // Whose it is, the owner check below reads from the device.
-                targets.push((session.serial.clone(), None, false));
+            match session.emulator_process() {
+                _ if !session.booted_by_icm => {
+                    // Whose it is, the owner check below reads from the device.
+                    if managed_on(&session.serial) {
+                        add(&session.serial, None);
+                    }
+                }
+                process @ session::Process::Verified { .. } => {
+                    add(&session.serial, verified(process));
+                }
+                // Recorded, but not provable: the device must say it is ours.
+                session::Process::Unverified => add(&session.serial, None),
+                session::Process::Gone => {
+                    if managed_on(&session.serial) {
+                        add(&session.serial, None);
+                    }
+                }
             }
         }
         let default = device::default_avd(host, project.config.config.android.target_sdk);
         if crate::managed::is_managed(&default) {
-            for (serial, name) in &running {
-                if name.as_deref() == Some(default.as_str())
-                    && !targets.iter().any(|(s, ..)| s == serial)
-                {
-                    targets.push((serial.clone(), None, false));
+            for (serial, name) in running {
+                if name.as_deref() == Some(default.as_str()) {
+                    add(serial, None);
                 }
             }
         }
         // Every emulator icm booted for this project, even after a plain
         // `icm stop android` removed the session that named it.
         for booted in session::booted(project) {
-            if !online(&booted.serial) {
-                continue;
-            }
-            match targets.iter_mut().find(|(s, ..)| *s == booted.serial) {
-                Some(target) => {
-                    target.1 = target.1.or(booted.emulator_pid);
-                    target.2 = true;
-                }
-                None => targets.push((booted.serial.clone(), booted.emulator_pid, true)),
+            if online(&booted.serial) {
+                add(&booted.serial, verified(booted.process()));
             }
         }
         if let Some(session) = &session
             && online(&session.serial)
             && session.kind == "emulator"
-            && !targets.iter().any(|(serial, ..)| *serial == session.serial)
+            && !targets.iter().any(|target| target.serial == session.serial)
         {
             let avd = avd_on(&session.serial);
             ctx.rep.check(Check::info(
@@ -2590,48 +2748,46 @@ pub fn stop_session(
                 ),
             ));
         }
-        let own = session::owner_tag(project);
-        for (serial, pid, ours) in targets {
-            if !ours {
-                // Only an emulator known to be nobody's or this project's
-                // is shut down: one whose owner cannot be read may be
-                // another project's.
-                let owner = match Adb::new(tools, &serial) {
-                    Ok(adb) => emulator_owner(&adb),
-                    Err(error) => Owner::Unknown(error.detail),
-                };
-                match owner {
-                    Owner::Nobody => {}
-                    Owner::Project(owner) if owner == own => {}
-                    Owner::Project(owner) => {
-                        ctx.rep.check(Check::info(
-                            CheckId::AndroidEmulatorShared,
-                            format!(
-                                "{serial} left running: icm booted it for another project (debug.icm.booted_by {owner}), which may still use it; `icm stop --shutdown` there shuts it down"
-                            ),
-                        ));
-                        continue;
+        for Target { serial, process } in targets {
+            // The owner is read for every emulator, the ones a record says
+            // icm booted too: a record can outlive its emulator, and
+            // whoever runs on the serial now may be another project.
+            let proven = process.is_some() || managed_on(&serial);
+            match may_act(&owners.of(&serial), &own, proven) {
+                Ok(()) => {}
+                Err(Leave::Shared(owner)) => {
+                    ctx.rep.check(Check::info(
+                        CheckId::AndroidEmulatorShared,
+                        format!(
+                            "{serial} left running: icm booted it for another project (debug.icm.booted_by {owner}), which may still use it; `icm stop --shutdown` there shuts it down"
+                        ),
+                    ));
+                    continue;
+                }
+                Err(Leave::Unknown(why)) => {
+                    // Reported already when the app was left running.
+                    if told.insert(serial.clone()) {
+                        owner_unknown(ctx, &serial, &why, "left running");
                     }
-                    Owner::Unknown(why) => {
-                        ctx.rep.check(
-                            Check::warn(
-                                CheckId::AndroidEmulatorOwnerUnknown,
-                                format!(
-                                    "{serial} left running: icm could not read which project booted it ({}, `adb shell getprop` {why}), and another may still use it",
-                                    session::OWNER_PROP
-                                ),
-                            )
-                            .fix(
-                                "Rerun `icm stop android --shutdown` once the emulator answers; to shut down this emulator anyway, and stop any app on it:",
-                                &[&format!("adb -s {serial} emu kill")],
-                            ),
-                        );
-                        continue;
-                    }
+                    continue;
+                }
+                Err(Leave::Unproven) => {
+                    ctx.rep.check(Check::info(
+                        CheckId::RunNoSession,
+                        format!(
+                            "{serial} ({}) left running: nothing shows icm booted it for this project (its record cannot be checked against the process now running, and debug.icm.booted_by is unset)",
+                            avd_on(&serial).as_deref().unwrap_or("unknown AVD")
+                        ),
+                    ));
+                    continue;
                 }
             }
             ctx.rep.progress(format!("shutting down {serial}"));
-            avd::shutdown(tools, &serial, pid)?;
+            avd::shutdown(
+                tools,
+                &serial,
+                process.as_ref().map(|(pid, identity)| (*pid, identity)),
+            )?;
             session::remove_booted(project, &serial);
             stopped.push(json!({"platform": "android", "emulator": serial}));
         }
@@ -2857,6 +3013,35 @@ mod tests {
             dir,
             &format!("case \"$2\" in\npidof*) echo '{pids}' ;;\nesac\nexit 0\n"),
         )
+    }
+
+    /// The owner is read before anything is done to an emulator, whatever
+    /// its record says, and decides with what proves the emulator is this
+    /// project's: another project's and an unreadable owner are left,
+    /// whether or not the record looks live; an unclaimed emulator is acted
+    /// on only with proof (its verified process, or a managed AVD); one
+    /// the device marks as this project's, with or without.
+    #[test]
+    fn the_owner_decides_with_what_proves_the_emulator_is_ours() {
+        let own = "0123456789abcdef";
+        let other = Owner::Project("fedcba9876543210".to_string());
+        let unknown = Owner::Unknown("exit 1: error: device offline".to_string());
+        for proven in [false, true] {
+            assert_eq!(
+                may_act(&Owner::Project(own.to_string()), own, proven),
+                Ok(())
+            );
+            assert_eq!(
+                may_act(&other, own, proven),
+                Err(Leave::Shared("fedcba9876543210".to_string()))
+            );
+            assert_eq!(
+                may_act(&unknown, own, proven),
+                Err(Leave::Unknown("exit 1: error: device offline".to_string()))
+            );
+        }
+        assert_eq!(may_act(&Owner::Nobody, own, true), Ok(()));
+        assert_eq!(may_act(&Owner::Nobody, own, false), Err(Leave::Unproven));
     }
 
     /// The owner property reads as nobody, a project or unknown, and a

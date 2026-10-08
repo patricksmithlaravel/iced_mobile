@@ -4,6 +4,7 @@
 //! the pid, the launch mark and the last screenshot's geometry.
 
 use crate::context::Project;
+use crate::procid::{self, Identity, Verdict};
 use crate::screen::Screen;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -60,6 +61,11 @@ pub struct Session {
     pub booted_by_icm: bool,
     /// The emulator's pid, when icm booted it.
     pub emulator_pid: Option<u32>,
+    /// What tells that process from any other that has its pid later
+    /// ([`crate::procid`]), read when icm started it. A session written
+    /// before this has none, and its pid verifies nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emulator_identity: Option<Identity>,
     /// The emulator's log, when icm booted it.
     pub emulator_log: Option<PathBuf>,
     /// The device's ABI.
@@ -128,6 +134,62 @@ fn tag_for(sessions_dir: &std::path::Path) -> String {
     crate::hash::sha256_hex(sessions_dir.to_string_lossy().as_bytes())[..16].to_string()
 }
 
+/// What a recorded emulator process is now. A pid says only that some
+/// process has the number: once the emulator has exited, any other can have
+/// it, and the serial can hold another emulator, so a record counts as the
+/// emulator on its serial only while its process is [`Process::Verified`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Process {
+    /// The process icm started, still running: its pid and the identity
+    /// that was recorded for it, which a signal re-checks.
+    Verified {
+        /// The emulator's pid on the host.
+        pid: u32,
+        /// What the pid was checked against.
+        identity: Identity,
+    },
+    /// The process has exited, or another process has its pid: the serial
+    /// may hold any emulator now.
+    Gone,
+    /// The record cannot say: it holds no pid, or no identity to compare
+    /// the pid's process with (an older icm wrote it), or the OS would not
+    /// describe that process. The pid is never signalled, and the record
+    /// is no proof that the emulator on the serial is this project's.
+    Unverified,
+}
+
+/// What the process a record names is now: [`Process::Verified`] only when
+/// the record holds an identity and the pid still has that process.
+pub fn process(pid: Option<u32>, identity: Option<&Identity>) -> Process {
+    let Some(pid) = pid else {
+        return Process::Unverified;
+    };
+    let Ok(signed) = i32::try_from(pid) else {
+        return Process::Unverified;
+    };
+    match identity {
+        Some(identity) => match procid::check(signed, identity) {
+            Verdict::Same => Process::Verified {
+                pid,
+                identity: identity.clone(),
+            },
+            Verdict::Gone | Verdict::Other(_) => Process::Gone,
+            Verdict::Unknown(_) => Process::Unverified,
+        },
+        // Nothing to compare: a pid with no process is the emulator gone,
+        // any other might be anything.
+        None if crate::signals::alive(signed) => Process::Unverified,
+        None => Process::Gone,
+    }
+}
+
+impl Session {
+    /// What the emulator process this session recorded is now.
+    pub fn emulator_process(&self) -> Process {
+        process(self.emulator_pid, self.emulator_identity.as_ref())
+    }
+}
+
 /// An emulator icm booted for this project:
 /// `target/icm/sessions/android-booted/<serial>.json`. It outlives the
 /// session (`icm stop android` without `--shutdown` removes the session,
@@ -141,16 +203,24 @@ pub struct Booted {
     pub avd: String,
     /// The emulator's pid on the host.
     pub emulator_pid: Option<u32>,
+    /// What tells that process from any other that has its pid later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emulator_identity: Option<Identity>,
     /// Its log.
     pub emulator_log: Option<PathBuf>,
 }
 
 impl Booted {
-    /// Whether this emulator still runs: its recorded process is alive,
-    /// so a port another emulator reuses is not taken for it.
-    pub fn alive(&self) -> bool {
-        self.emulator_pid
-            .is_some_and(|pid| i32::try_from(pid).is_ok_and(crate::signals::alive))
+    /// What the emulator process this record names is now.
+    pub fn process(&self) -> Process {
+        process(self.emulator_pid, self.emulator_identity.as_ref())
+    }
+
+    /// Whether this emulator still runs, as the process icm started: a
+    /// pid that another process has taken, or one icm cannot compare with
+    /// what it recorded, is not that emulator.
+    pub fn verified(&self) -> bool {
+        matches!(self.process(), Process::Verified { .. })
     }
 }
 
@@ -167,7 +237,10 @@ pub fn write_booted(project: &Project, booted: &Booted) {
     }
 }
 
-/// The emulators icm booted for this project that still run.
+/// The emulators icm booted for this project whose records may still hold:
+/// every record except those whose process has exited or whose pid another
+/// process has taken. [`Booted::verified`] tells the ones that are known to
+/// run from the ones an older icm wrote.
 pub fn booted(project: &Project) -> Vec<Booted> {
     let Ok(read) = std::fs::read_dir(booted_dir(project)) else {
         return Vec::new();
@@ -175,7 +248,7 @@ pub fn booted(project: &Project) -> Vec<Booted> {
     read.flatten()
         .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
         .filter_map(|text| serde_json::from_str::<Booted>(&text).ok())
-        .filter(Booted::alive)
+        .filter(|booted| booted.process() != Process::Gone)
         .collect()
 }
 
@@ -199,6 +272,62 @@ mod tests {
             a,
             tag_for(std::path::Path::new("/work/a/target/icm/sessions"))
         );
+    }
+
+    /// A record's emulator process counts only while its pid still has the
+    /// process icm recorded: another process's pid, an exited one and a pid
+    /// with no identity to compare are never the emulator.
+    #[test]
+    fn a_recorded_process_is_the_emulator_only_while_it_is_verified() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let identity = procid::of(pid as i32).unwrap();
+        assert_eq!(
+            process(Some(pid), Some(&identity)),
+            Process::Verified {
+                pid,
+                identity: identity.clone()
+            }
+        );
+        // The pid of a live process the record has no identity for.
+        assert_eq!(process(Some(pid), None), Process::Unverified);
+        assert_eq!(process(None, Some(&identity)), Process::Unverified);
+        assert_eq!(process(None, None), Process::Unverified);
+        // Another process's start time.
+        let other = Identity {
+            start: "1791334000.000001".to_string(),
+            exe: String::new(),
+        };
+        assert_eq!(process(Some(pid), Some(&other)), Process::Gone);
+
+        child.kill().unwrap();
+        let _ = child.wait().unwrap();
+        assert_eq!(process(Some(pid), Some(&identity)), Process::Gone);
+        assert_eq!(process(Some(pid), None), Process::Gone);
+
+        let booted = Booted {
+            serial: "emulator-5580".to_string(),
+            avd: "icm-api36".to_string(),
+            emulator_pid: Some(std::process::id()),
+            emulator_identity: procid::of(std::process::id() as i32),
+            emulator_log: None,
+        };
+        assert!(booted.verified());
+        // A record an older icm wrote, whose pid is alive, is not.
+        let older: Booted = serde_json::from_str(
+            &serde_json::to_string(&Booted {
+                emulator_identity: None,
+                ..booted.clone()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!older.verified());
+        assert_eq!(older.process(), Process::Unverified);
     }
 
     #[test]

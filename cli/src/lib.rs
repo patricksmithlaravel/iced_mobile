@@ -42,6 +42,7 @@ pub mod platform;
 pub mod policy;
 pub mod preview;
 pub mod process;
+pub mod procid;
 pub mod raster;
 pub mod release;
 pub mod screen;

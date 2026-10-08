@@ -36,10 +36,16 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - When `icm run android --wait-ready` runs out, the error says only what the readiness polls saw,
   where it used to say the app was alive. After Android relaunched the activity, it says so, where
   it used to say the wait ended before the resumed-activity probe starts.
-- `icm stop android --shutdown` takes the emulator on a session's serial for the one its run booted
-  only while that emulator's process lives. After it has exited, icm reads the AVD and the owner of
-  whatever runs on that serial now, so another project's emulator on the same port stays up, and
-  the app is not force-stopped there.
+- `icm stop android` takes the emulator on a session's serial for the one its run booted only while
+  that emulator's process is verified. `icm run` records the process's start time beside its pid,
+  and a pid that has exited, that another process has taken, or that an older session recorded
+  without a start time proves nothing. Then icm reads the AVD and the owner of whatever runs on that
+  serial now, so another project's emulator on the same port stays up, and the app is not
+  force-stopped there. It also reads the owner before it force-stops or shuts down an emulator it
+  has a live record of, and signals the emulator's process only while that process is the recorded
+  one. Before, a stale record whose pid another live process had taken made `stop --shutdown` send
+  `am force-stop` and `emu kill` to another project's emulator without reading its owner, and then
+  SIGTERM that process.
 
 ## Changes in v0.14.1-mobile.2
 

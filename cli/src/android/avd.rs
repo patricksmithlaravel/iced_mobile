@@ -19,6 +19,7 @@ use crate::config::Abi;
 use crate::context::Ctx;
 use crate::error::{Evidence, IcmError, Result};
 use crate::process;
+use crate::procid::{Identity, Verdict};
 use crate::tools::{AndroidSdk, Env};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -222,6 +223,10 @@ pub struct Booting {
     pub port: u16,
     /// The emulator's pid.
     pub pid: u32,
+    /// What tells that process from any other that has its pid later,
+    /// read right after it started ([`crate::procid`]); `None` when the
+    /// process was already gone, which a failed boot reports.
+    pub identity: Option<Identity>,
     /// Its output.
     pub log: PathBuf,
 }
@@ -313,6 +318,7 @@ pub fn start(
         serial: format!("emulator-{port}"),
         port,
         pid,
+        identity: crate::procid::of(pid as i32),
         log: log.to_path_buf(),
     })
 }
@@ -414,15 +420,33 @@ pub fn prepare(adb: &Adb) {
     let _ = adb::quick(adb.shell(&line), Duration::from_secs(30));
 }
 
-/// Shuts an emulator down (`adb emu kill`), waiting up to 30 s; the pid,
-/// when known, gets SIGTERM if it lingers.
-pub fn shutdown(tools: &Toolset, serial: &str, pid: Option<u32>) -> Result<()> {
+/// How long [`shutdown`] waits for the emulator to go before it signals the
+/// process.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
+
+/// Shuts an emulator down (`adb emu kill`), waiting up to 30 s. The
+/// emulator's host process, when `process` names it (its pid and the
+/// identity icm recorded for it), gets SIGTERM if it lingers, and only
+/// while the pid still has that process ([`terminate`]): a pid with no
+/// recorded identity, or that another process has taken, is never
+/// signalled, and the wait then ends when `adb devices` stops listing the
+/// serial.
+pub fn shutdown(tools: &Toolset, serial: &str, process: Option<(u32, &Identity)>) -> Result<()> {
+    shutdown_within(tools, serial, process, SHUTDOWN_WAIT)
+}
+
+fn shutdown_within(
+    tools: &Toolset,
+    serial: &str,
+    process: Option<(u32, &Identity)>,
+    wait: Duration,
+) -> Result<()> {
     let adb = Adb::new(tools, serial)?;
     let _ = adb::quick(adb.cmd(["emu", "kill"]), Duration::from_secs(20));
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + wait;
     loop {
-        let gone = match pid {
-            Some(pid) => !crate::signals::alive(pid as i32),
+        let gone = match process {
+            Some((pid, identity)) => !running(pid, identity),
             None => adb::devices(tools)
                 .map(|devices| !devices.iter().any(|d| d.serial == serial))
                 .unwrap_or(true),
@@ -431,14 +455,33 @@ pub fn shutdown(tools: &Toolset, serial: &str, pid: Option<u32>) -> Result<()> {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            if let Some(pid) = pid {
-                // SAFETY: kill(2) with a pid icm recorded for this emulator.
-                let _ = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+            if let Some((pid, identity)) = process {
+                let _ = terminate(pid, identity);
             }
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Whether `pid` is still the emulator process icm recorded.
+fn running(pid: u32, identity: &Identity) -> bool {
+    i32::try_from(pid).is_ok_and(|pid| crate::procid::check(pid, identity) == Verdict::Same)
+}
+
+/// SIGTERM to the emulator process icm recorded, after reading the pid
+/// again: it is sent only while the pid still has the process whose
+/// identity was recorded. Returns whether it was sent.
+pub fn terminate(pid: u32, identity: &Identity) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if crate::procid::check(pid, identity) != Verdict::Same {
+        return false;
+    }
+    // SAFETY: kill(2) with a pid that was just read to be the emulator
+    // icm started; it has no memory-safety preconditions.
+    unsafe { libc::kill(pid, libc::SIGTERM) == 0 }
 }
 
 #[cfg(test)]
@@ -506,6 +549,85 @@ mod tests {
             "system-images;android-36;google_apis;arm64-v8a"
         );
         assert!(find_image(&sdk, 36, Abi::X86_64).is_none());
+    }
+
+    /// A toolset whose adb lists `emulator-5580` and ignores `emu kill`:
+    /// an emulator that lingers.
+    fn lingering(dir: &Path) -> Toolset {
+        use std::os::unix::fs::PermissionsExt;
+        let adb = dir.join("platform-tools/adb");
+        std::fs::create_dir_all(adb.parent().unwrap()).unwrap();
+        std::fs::write(
+            &adb,
+            "#!/bin/sh\n[ \"$1\" = devices ] && printf 'List of devices attached\\nemulator-5580\\tdevice product:p model:m device:d transport_id:1\\n'\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&adb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = crate::host::HostConfig {
+            android_sdk: Some(dir.display().to_string()),
+            ..Default::default()
+        };
+        Toolset::discover(&host, &Env::from_pairs(&[], Some(dir))).unwrap()
+    }
+
+    fn sleeper() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("60")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    /// A process the emulator's pid names gets SIGTERM only while it is
+    /// the process icm recorded: a lingering verified emulator is
+    /// signalled, and the pid of another process (the emulator exited, and
+    /// a new process took its pid) is left alone, whatever adb says.
+    #[test]
+    fn a_lingering_emulator_is_signalled_only_while_it_is_the_recorded_process() {
+        use std::os::unix::process::ExitStatusExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tools = lingering(dir.path());
+        let wait = Duration::from_millis(600);
+
+        let mut emulator = sleeper();
+        let identity = crate::procid::of(emulator.id() as i32).unwrap();
+        shutdown_within(
+            &tools,
+            "emulator-5580",
+            Some((emulator.id(), &identity)),
+            wait,
+        )
+        .unwrap();
+        assert_eq!(emulator.wait().unwrap().signal(), Some(libc::SIGTERM));
+
+        let mut another = sleeper();
+        let recorded = Identity {
+            start: "1791334000.000001".to_string(),
+            exe: "/sdk/emulator/emulator".to_string(),
+        };
+        assert!(!terminate(another.id(), &recorded));
+        // Its pid is not the recorded process, so waiting is over at once,
+        // and nothing is sent.
+        let begun = Instant::now();
+        shutdown_within(
+            &tools,
+            "emulator-5580",
+            Some((another.id(), &recorded)),
+            wait,
+        )
+        .unwrap();
+        assert!(begun.elapsed() < wait);
+        assert!(another.try_wait().unwrap().is_none(), "it was signalled");
+        let _ = another.kill();
+        let _ = another.wait();
+
+        // Without a recorded process the wait is for adb to stop listing
+        // the serial, and ends at its deadline with nothing signalled.
+        let mut unrecorded = sleeper();
+        shutdown_within(&tools, "emulator-5580", None, wait).unwrap();
+        assert!(unrecorded.try_wait().unwrap().is_none());
+        let _ = unrecorded.kill();
+        let _ = unrecorded.wait();
     }
 
     #[test]

@@ -236,7 +236,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     plan.push(Step::internal(
         "android.stop",
         &format!(
-            "am force-stop {} on the session's device ({})",
+            "am force-stop {} on the session's device ({}); where icm booted the emulator, only while the emulator process icm started still runs or the device's debug.icm.booted_by names this project",
             project.config.config.app.id,
             crate::paths::display(&project.sessions_dir().join("android.json"))
         ),
@@ -244,7 +244,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     if args.shutdown {
         plan.push(Step::internal(
             "android.shutdown",
-            "adb emu kill for the emulator icm booted for this project, and for a running icm-* AVD no other project claims",
+            "adb emu kill for the emulator icm booted for this project, and for a running icm-* AVD no other project claims, after reading debug.icm.booted_by; SIGTERM to the emulator's process only while it is the process icm started",
         ));
     }
     finish(ctx, plan, "stop android");
