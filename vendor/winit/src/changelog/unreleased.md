@@ -43,6 +43,8 @@ changelog entry.
 ### Changed
 
 - On Android, report content rect and window insets changes as `WindowEvent::Resized`.
+- On iOS, report text input of only a line break or only a tab, as the Return and Tab keys
+  insert it, as `NamedKey::Enter` or `NamedKey::Tab` instead of a `Key::Character`.
 
 ### Fixed
 

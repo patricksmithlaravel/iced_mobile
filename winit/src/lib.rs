@@ -1633,11 +1633,6 @@ async fn run_instance<P>(
                             continue;
                         }
 
-                        // iOS: Return and Tab, once each insertion's
-                        // characters are all in.
-                        #[cfg(target_os = "ios")]
-                        conversion::ios_inserted_keys(&mut events);
-
                         let mut uis_stale = false;
 
                         for (id, window) in window_manager.iter_mut() {

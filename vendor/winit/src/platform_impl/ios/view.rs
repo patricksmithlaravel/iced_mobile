@@ -11,6 +11,7 @@ use objc2_ui_kit::{
     UIPinchGestureRecognizer, UIResponder, UIRotationGestureRecognizer, UITapGestureRecognizer,
     UITextInputTraits, UITouch, UITouchPhase, UITouchType, UITraitEnvironment, UIView,
 };
+use smol_str::SmolStr;
 
 use super::app_state::{self, EventWrapper};
 use super::window::WinitUIWindow;
@@ -544,35 +545,16 @@ impl WinitView {
         let window = self.window().unwrap();
         let window_id = RootWindowId(window.id());
         let mtm = MainThreadMarker::new().unwrap();
-        // send individual events for each character
         app_state::handle_nonuser_events(
             mtm,
-            text.to_string().chars().flat_map(|c| {
-                let text = smol_str::SmolStr::from_iter([c]);
-                // Emit both press and release events
-                [ElementState::Pressed, ElementState::Released].map(|state| {
-                    EventWrapper::StaticEvent(Event::WindowEvent {
-                        window_id,
-                        event: WindowEvent::KeyboardInput {
-                            event: KeyEvent {
-                                text: if state == ElementState::Pressed {
-                                    Some(text.clone())
-                                } else {
-                                    None
-                                },
-                                state,
-                                location: KeyLocation::Standard,
-                                repeat: false,
-                                logical_key: Key::Character(text.clone()),
-                                physical_key: PhysicalKey::Unidentified(
-                                    NativeKeyCode::Unidentified,
-                                ),
-                                platform_specific: KeyEventExtra {},
-                            },
-                            is_synthetic: false,
-                            device_id: DEVICE_ID,
-                        },
-                    })
+            inserted_key_events(&text.to_string()).into_iter().map(|event| {
+                EventWrapper::StaticEvent(Event::WindowEvent {
+                    window_id,
+                    event: WindowEvent::KeyboardInput {
+                        event,
+                        is_synthetic: false,
+                        device_id: DEVICE_ID,
+                    },
                 })
             }),
         );
@@ -603,5 +585,150 @@ impl WinitView {
                 })
             }),
         );
+    }
+}
+
+/// The key events of one `insertText:` call.
+///
+/// UIKit hands over typed text one insertion at a time: a character for each key of the
+/// software keyboard or of a hardware keyboard, and the Return and Tab keys insert `"\n"` and
+/// `"\t"` alone. An insertion that is only a line break (`"\n"`, `"\r"` or `"\r\n"`) is therefore
+/// a press and a release of [`NamedKey::Enter`], and one that is only `"\t"` of
+/// [`NamedKey::Tab`], as on the other platforms, with the inserted text as the press's text.
+///
+/// Any other insertion is text, as dictation, a keyboard suggestion or a third-party keyboard
+/// inserts it: a press and a release of [`Key::Character`] for each character, line breaks and
+/// tabs included.
+///
+/// The insertion decides, not the characters around it: a Return typed right after other keys
+/// stays a Return, however close together UIKit delivers the insertions.
+fn inserted_key_events(text: &str) -> Vec<KeyEvent> {
+    let press_and_release = |logical_key: Key, physical_key: PhysicalKey, text: SmolStr| {
+        [ElementState::Pressed, ElementState::Released].map(|state| KeyEvent {
+            text: if state == ElementState::Pressed { Some(text.clone()) } else { None },
+            state,
+            location: KeyLocation::Standard,
+            repeat: false,
+            logical_key: logical_key.clone(),
+            physical_key,
+            platform_specific: KeyEventExtra {},
+        })
+    };
+
+    let named = match text {
+        "\n" | "\r" | "\r\n" => Some((NamedKey::Enter, KeyCode::Enter)),
+        "\t" => Some((NamedKey::Tab, KeyCode::Tab)),
+        _ => None,
+    };
+
+    if let Some((named, code)) = named {
+        return press_and_release(Key::Named(named), PhysicalKey::Code(code), SmolStr::new(text))
+            .to_vec();
+    }
+
+    text.chars()
+        .flat_map(|c| {
+            let text = SmolStr::from_iter([c]);
+
+            press_and_release(
+                Key::Character(text.clone()),
+                PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
+                text,
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The state, logical key and text of each event.
+    fn keys(text: &str) -> Vec<(ElementState, Key, Option<SmolStr>)> {
+        inserted_key_events(text)
+            .into_iter()
+            .map(|event| (event.state, event.logical_key, event.text))
+            .collect()
+    }
+
+    #[test]
+    fn a_lone_line_break_is_return() {
+        for line_break in ["\n", "\r", "\r\n"] {
+            let events = inserted_key_events(line_break);
+
+            assert_eq!(events.len(), 2, "{line_break:?}");
+
+            for (event, state) in events.iter().zip([ElementState::Pressed, ElementState::Released])
+            {
+                assert_eq!(event.state, state, "{line_break:?}");
+                assert_eq!(event.logical_key, Key::Named(NamedKey::Enter), "{line_break:?}");
+                assert_eq!(event.physical_key, PhysicalKey::Code(KeyCode::Enter));
+                assert_eq!(event.location, KeyLocation::Standard);
+                assert!(!event.repeat);
+            }
+
+            assert_eq!(events[0].text.as_deref(), Some(line_break));
+            assert_eq!(events[1].text, None);
+        }
+    }
+
+    #[test]
+    fn a_lone_tab_is_tab() {
+        let tab = Key::Named(NamedKey::Tab);
+
+        assert_eq!(keys("\t"), [
+            (ElementState::Pressed, tab.clone(), Some(SmolStr::new("\t"))),
+            (ElementState::Released, tab, None),
+        ]);
+        assert_eq!(inserted_key_events("\t")[0].physical_key, PhysicalKey::Code(KeyCode::Tab));
+    }
+
+    /// The keyboard's Return right after a letter: two insertions, however close together.
+    #[test]
+    fn a_return_after_a_letter_stays_a_return() {
+        let x = Key::Character(SmolStr::new("x"));
+        let enter = Key::Named(NamedKey::Enter);
+        let events: Vec<_> = ["x", "\n"].into_iter().flat_map(keys).collect();
+
+        assert_eq!(events, [
+            (ElementState::Pressed, x.clone(), Some(SmolStr::new("x"))),
+            (ElementState::Released, x, None),
+            (ElementState::Pressed, enter.clone(), Some(SmolStr::new("\n"))),
+            (ElementState::Released, enter, None),
+        ]);
+    }
+
+    /// Dictation, a keyboard suggestion or a third-party keyboard inserts longer text at once.
+    #[test]
+    fn longer_insertions_are_text() {
+        for text in [
+            "x",
+            "one\ntwo",
+            "one\r\ntwo",
+            "x\n",
+            "\nx",
+            "\n\n",
+            "\r\n\r\n",
+            "\n\r",
+            "a\tb",
+            "\t\t",
+        ] {
+            let events = inserted_key_events(text);
+
+            assert_eq!(events.len(), 2 * text.chars().count(), "{text:?}");
+
+            for (event, c) in events.chunks(2).zip(text.chars()) {
+                let c = SmolStr::from_iter([c]);
+
+                assert_eq!(event[0].logical_key, Key::Character(c.clone()), "{text:?}");
+                assert_eq!(event[0].text, Some(c), "{text:?}");
+                assert_eq!(event[0].state, ElementState::Pressed);
+                assert_eq!(event[1].state, ElementState::Released);
+                assert_eq!(
+                    event[0].physical_key,
+                    PhysicalKey::Unidentified(NativeKeyCode::Unidentified)
+                );
+            }
+        }
     }
 }

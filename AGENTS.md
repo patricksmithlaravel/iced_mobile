@@ -247,7 +247,8 @@ stop only the platforms they drive and leave the other platforms' devices alone
 - **What an app sees:** `src/mobile.rs` and `docs/agents/limitations.md`.
 - **The shell:** `winit/src/lib.rs` handles Android suspend and resume, surfaces, Activity
   destruction, iOS exit and window rules, and the lifecycle hook. `winit/src/conversion.rs` maps
-  keys, including Return and Tab on Android and iOS. `winit/src/icm.rs` has the event protocol.
+  keys, including Return and Tab on Android; on iOS the vendored winit's view reports them
+  (`vendor/winit/src/platform_impl/ios/view.rs`). `winit/src/icm.rs` has the event protocol.
   `winit/src/scene.rs` puts iOS windows into the scene. `winit/src/safe_area.rs` reads the safe area
   (`safe_area/android.rs` through JNI, `safe_area/ios.rs` from winit's frames and UIKit's keyboard
   notification) and publishes it through `runtime/src/safe_area.rs`, where the headless harness

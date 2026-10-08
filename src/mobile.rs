@@ -649,6 +649,8 @@
 //! Android fixes until they ship in a winit release (winit PR #4739): the
 //! event loop ends when the Activity is destroyed, a new one can be built in
 //! the same process, and content rect changes are reported (as `Resized`).
+//! It also carries an iOS fix still to be proposed upstream: text inserted
+//! as only a line break or a tab is reported as the Enter or Tab key.
 //!
 //! An application must not depend on winit from crates.io: the build would
 //! hold two copies of winit, and iced would use its own copy alone. The two
@@ -695,13 +697,11 @@
 //! - **Line breaks in inserted text on iOS.** UIKit hands over text one
 //!   insertion at a time. An insertion that is only a line break (`"\n"`,
 //!   `"\r"`, or `"\r\n"` counted once) is one Return, as from the
-//!   keyboard's Return key, and one that is only `"\t"` is Tab. A line
-//!   break or tab inside longer inserted text (dictation, a keyboard
-//!   suggestion, a third-party keyboard) is dropped: it neither submits a
-//!   `text_input` nor breaks the line in a `text_editor`. Insertions that
-//!   reach the app in the same turn of the run loop count as one, so a
-//!   Return typed right after other keys while the app is busy can be
-//!   lost.
+//!   keyboard's Return key, and one that is only `"\t"` is Tab, however
+//!   soon after other keys it comes. A line break or tab inside longer
+//!   inserted text (dictation, a keyboard suggestion, a third-party
+//!   keyboard) is dropped: it neither submits a `text_input` nor breaks the
+//!   line in a `text_editor`.
 //! - **Android activity destruction** ends the application, which starts
 //!   over in the next Activity ([Activity
 //!   destruction](#android-activity-destruction)). The manifest settings
