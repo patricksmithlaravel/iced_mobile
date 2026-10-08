@@ -244,7 +244,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     if args.shutdown {
         plan.push(Step::internal(
             "android.shutdown",
-            "adb emu kill for the emulator a record says icm booted for this project, and for a running icm-* AVD no other project claims, after reading debug.icm.booted_by (the same rules as for the app, whether or not the record's process still verifies); an emulator that ignores it for 30 s (or what --timeout leaves) gets SIGTERM to its process, but only while that is the process icm started, and one that is still running then is reported (WARN android.emulator.shutdown_failed) and its record kept, not reported as stopped",
+            "adb emu kill for the emulator a record says icm booted for this project, and for a running icm-* AVD no other project claims, after reading debug.icm.booted_by (the same rules as for the app, whether or not the record's process still verifies); an emulator that ignores it for 30 s (or what --timeout leaves) gets SIGTERM to its process, but only while that is the process icm started, and one that is still running then is reported (WARN android.emulator.shutdown_failed) and its record kept, not reported as stopped; so is one that adb cannot say about (adb emu kill and adb devices both fail), which is listed as unverified, not as gone",
         ));
     }
     finish(ctx, plan, "stop android");

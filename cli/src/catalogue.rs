@@ -520,8 +520,8 @@ catalogue! {
         "icm could not read or write which project booted the emulator",
         "An emulator whose `debug.icm.booted_by` adb cannot read is left running by `icm stop --shutdown`, in case another project uses it: rerun the stop once the emulator answers, or run `adb -s <serial> emu kill` for that emulator alone. A run that could not mark the emulator it booted leaves it to any project's `--shutdown`: the fix sets the property by hand.";
     AndroidEmulatorShutdownFailed = "android.emulator.shutdown_failed", Device, Warn, Agent,
-        "The emulator ignored `adb emu kill` and is still running",
-        "Run `adb -s <serial> emu kill` again, or quit the emulator yourself (its window, or the process that listens on its console port); `icm stop android --shutdown` tries again, since icm keeps the emulator's record.";
+        "The emulator is still running after `adb emu kill`, or adb could not confirm that it shut down",
+        "Run `adb -s <serial> emu kill` again, or quit the emulator yourself (its window, or the process that listens on its console port); `icm stop android --shutdown` tries again, since icm keeps the emulator's record. When the WARN says adb could not say whether the emulator still runs (`adb devices` failed), make adb answer first: icm does not take a failed question for an emulator that is gone.";
     AndroidEmulatorFailed = "android.emulator.failed", Device, Fail, Agent,
         "The emulator exited while booting",
         "Read the emulator log in the evidence (disk space, memory, a broken AVD), then rerun; `icm devices android` lists the AVDs.";

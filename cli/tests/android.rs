@@ -20,11 +20,20 @@ const BIN: &str = env!("CARGO_BIN_EXE_icm");
 /// and fails with the file `getprop-fails` there. `emu kill` also kills the
 /// host process whose pid the file `emulator-pid` there holds, as a real
 /// emulator exits when it is told to; with the file `ignores-emu-kill` there
-/// it does nothing, as an emulator that hangs does, and stays listed.
+/// it does nothing, as an emulator that hangs does, and stays listed. With
+/// the file `emu-kill-fails` there `emu kill` fails (exit 1, an error on
+/// stderr) and does nothing, as it does when adb cannot reach the emulator;
+/// every `emu kill` leaves the file `kill-tried` there, and with the file
+/// `devices-fail-after-kill` there `devices` fails once one has been tried,
+/// as it does when the adb server went away.
 const FAKE_ADB: &str = r#"#!/bin/sh
 echo "$*" >> "$FAKE_ADB_LOG"
 state_dir=$(dirname "$FAKE_ADB_LOG")
 if [ "$1" = "devices" ]; then
+  if [ -f "$state_dir/devices-fail-after-kill" ] && [ -f "$state_dir/kill-tried" ]; then
+    echo "error: cannot connect to daemon" >&2
+    exit 1
+  fi
   echo "List of devices attached"
   [ -f "$state_dir/killed" ] || echo "emulator-5580          device product:sdk_gphone64_arm64 model:fake device:emu64a transport_id:1"
   exit 0
@@ -33,6 +42,8 @@ fi
 case "$1" in
   emu)
     if [ "$2" = "kill" ]; then
+      touch "$state_dir/kill-tried"
+      [ -f "$state_dir/emu-kill-fails" ] && { echo "error: device offline" >&2; exit 1; }
       [ -f "$state_dir/ignores-emu-kill" ] && { echo OK; exit 0; }
       touch "$state_dir/killed"
       [ -f "$state_dir/emulator-pid" ] && kill "$(cat "$state_dir/emulator-pid")" 2>/dev/null
@@ -443,7 +454,11 @@ fn checks<'a>(events: &'a [Value], id: &str) -> Vec<&'a Value> {
 /// exited, as the emulator an earlier `icm run` booted is, so that it is
 /// reaped as soon as it ends (`adb emu kill` ends it, as it does the real
 /// one). Killed when dropped.
-struct Emulator(u32);
+///
+/// It is signalled only while its pid still has the identity read right
+/// after the start: `adb emu kill` ends it, and its number may belong to
+/// another process by the time this test ends it again.
+struct Emulator(u32, icm::procid::Identity);
 
 impl Emulator {
     fn start() -> Emulator {
@@ -452,12 +467,23 @@ impl Emulator {
             .stdin(Stdio::null())
             .output()
             .unwrap();
-        Emulator(
-            String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .parse()
-                .unwrap(),
-        )
+        let pid: u32 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        let identity = icm::procid::of(pid as i32).expect("the stand-in is not running");
+        Emulator(pid, identity)
+    }
+
+    /// SIGKILL, while the pid is still the stand-in.
+    fn kill(&self) {
+        if icm::procid::check(self.0 as i32, &self.1) == icm::procid::Verdict::Same {
+            // SAFETY: kill(2) on the process this test started, just read to
+            // still be it.
+            unsafe {
+                let _ = libc::kill(self.0 as i32, libc::SIGKILL);
+            }
+        }
     }
 
     /// Whether the process still runs.
@@ -472,10 +498,7 @@ impl Emulator {
 
     /// Ends the process and waits until it is gone.
     fn end(&self) {
-        // SAFETY: kill(2) on a process this test started.
-        unsafe {
-            let _ = libc::kill(self.0 as i32, libc::SIGKILL);
-        }
+        self.kill();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while self.running() && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -554,10 +577,7 @@ fn free_console_ports(count: usize) -> Vec<u16> {
 
 impl Drop for Emulator {
     fn drop(&mut self) {
-        // SAFETY: kill(2) on a process this test started.
-        unsafe {
-            let _ = libc::kill(self.0 as i32, libc::SIGKILL);
-        }
+        self.kill();
     }
 }
 
@@ -1315,6 +1335,188 @@ fn a_lingering_verified_emulator_is_ended_by_sigterm() {
             .join("android-booted/emulator-5580.json")
             .exists()
     );
+}
+
+/// `emu kill` can fail, and then `adb devices` can fail too (the adb server
+/// went away). Nothing then shows the emulator is gone, and icm used to
+/// conclude that it was: it reported the emulator stopped and deleted its
+/// record. With no process icm can verify to read instead, the emulator is
+/// `unverified` (not stopped, not known to run), its record stays, the WARN
+/// says what failed and what to run, and the pid a record names is never
+/// signalled. Once adb answers again, the next `stop --shutdown` shuts the
+/// emulator down and says so.
+#[test]
+fn a_failed_emu_kill_and_a_failed_adb_devices_are_not_a_stopped_emulator() {
+    for case in [
+        "no record",
+        "a record an older icm wrote",
+        "a record with another process's identity",
+    ] {
+        let sandbox = Sandbox::new();
+        let state = sandbox.root.path();
+        std::fs::write(state.join("emu-kill-fails"), "").unwrap();
+        std::fs::write(state.join("devices-fail-after-kill"), "").unwrap();
+        let process = Emulator::start();
+        match case {
+            "no record" => {}
+            "a record an older icm wrote" => {
+                sandbox.write_booted(serde_json::json!({"emulator_pid": process.0}));
+            }
+            _ => sandbox.write_booted(serde_json::json!({
+                "emulator_pid": process.0, "emulator_identity": another_identity()
+            })),
+        }
+        let record = sandbox.sessions().join("android-booted/emulator-5580.json");
+
+        let events = sandbox.events(&["stop", "android", "--shutdown", "--timeout", "2s"], &[]);
+        let result = events.last().unwrap();
+        assert_eq!(result["exit"], 0, "{case}: {result}");
+        let calls = sandbox.adb_calls();
+        assert!(calls.contains("-s emulator-5580 emu kill"), "{case}");
+        assert_eq!(result["stopped"], serde_json::json!([]), "{case}: {result}");
+        assert_eq!(
+            result["still_running"],
+            serde_json::json!([]),
+            "{case}: {result}"
+        );
+        assert_eq!(
+            result["unverified"],
+            serde_json::json!(["emulator-5580"]),
+            "{case}: {result}"
+        );
+        assert_eq!(
+            result["summary"], "emulator-5580 may not have shut down (adb could not confirm it)",
+            "{case}: {result}"
+        );
+        let warned = checks(&events, "android.emulator.shutdown_failed");
+        assert_eq!(warned.len(), 1, "{case}: {events:?}");
+        assert_eq!(warned[0]["status"], "warn", "{case}");
+        let detail = warned[0]["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with(
+                "emulator-5580 may still be running: icm could not confirm that it shut down: `adb emu kill` failed (exit 1: error: device offline) and `adb devices` could not say"
+            ) && detail.contains("adb devices failed"),
+            "{case}: {detail}"
+        );
+        assert_eq!(
+            warned[0]["fix"]["commands"],
+            serde_json::json!(["adb devices", "adb -s emulator-5580 emu kill"]),
+            "{case}"
+        );
+        assert_eq!(
+            record.exists(),
+            case != "no record",
+            "{case}: the record of an emulator nothing showed gone was deleted"
+        );
+        assert!(process.running(), "{case}: an unverified pid was signalled");
+
+        // adb is back: the retry shuts the emulator down.
+        for flag in ["emu-kill-fails", "devices-fail-after-kill", "kill-tried"] {
+            std::fs::remove_file(state.join(flag)).unwrap();
+        }
+        let events = sandbox.events(&["stop", "android", "--shutdown", "--timeout", "2s"], &[]);
+        let result = events.last().unwrap();
+        assert_eq!(result["exit"], 0, "{case}: {result}");
+        assert_eq!(
+            result["stopped"],
+            serde_json::json!([{"platform": "android", "emulator": "emulator-5580"}]),
+            "{case}: {result}"
+        );
+        assert_eq!(result["still_running"], serde_json::json!([]), "{case}");
+        assert_eq!(result["unverified"], serde_json::json!([]), "{case}");
+        assert!(
+            checks(&events, "android.emulator.shutdown_failed").is_empty(),
+            "{case}: {events:?}"
+        );
+        assert!(!record.exists(), "{case}: the record outlived the shutdown");
+        assert!(process.running(), "{case}: an unverified pid was signalled");
+    }
+}
+
+/// A failed `emu kill` with adb still answering is an emulator that is
+/// still listed: it lingers, and the WARN says the kill failed (not that it
+/// was ignored) and how. Its record stays.
+#[test]
+fn a_failed_emu_kill_with_the_emulator_still_listed_lingers() {
+    let sandbox = Sandbox::new();
+    std::fs::write(sandbox.root.path().join("emu-kill-fails"), "").unwrap();
+    let process = Emulator::start();
+    sandbox.write_booted(serde_json::json!({"emulator_pid": process.0}));
+
+    let events = sandbox.events(&["stop", "android", "--shutdown", "--timeout", "2s"], &[]);
+    let result = events.last().unwrap();
+    assert_eq!(result["exit"], 0, "{result}");
+    assert_eq!(result["stopped"], serde_json::json!([]), "{result}");
+    assert_eq!(
+        result["still_running"],
+        serde_json::json!(["emulator-5580"]),
+        "{result}"
+    );
+    assert_eq!(result["unverified"], serde_json::json!([]), "{result}");
+    assert_eq!(
+        result["summary"], "emulator-5580 did not shut down (still running)",
+        "{result}"
+    );
+    let warned = checks(&events, "android.emulator.shutdown_failed");
+    assert_eq!(warned.len(), 1, "{events:?}");
+    assert_eq!(
+        warned[0]["detail"],
+        "emulator-5580 is still running: `adb emu kill` failed (exit 1: error: device offline), and icm has no verified process of it to signal"
+    );
+    assert!(
+        sandbox
+            .sessions()
+            .join("android-booted/emulator-5580.json")
+            .exists()
+    );
+    assert!(process.running());
+}
+
+/// `icm stop --all --shutdown` carries what adb could not confirm into its
+/// own result and summary, with the same WARN, and leaves the record. A
+/// fake `xcrun` that fails keeps the iOS half off any real simulator.
+#[test]
+fn stop_all_reports_an_emulator_it_could_not_confirm_shut_down() {
+    let sandbox = Sandbox::new();
+    let state = sandbox.root.path();
+    std::fs::write(state.join("emu-kill-fails"), "").unwrap();
+    std::fs::write(state.join("devices-fail-after-kill"), "").unwrap();
+    let process = Emulator::start();
+    sandbox.write_booted(serde_json::json!({"emulator_pid": process.0}));
+
+    let events = sandbox.events(
+        &["stop", "--all", "--shutdown", "--timeout", "2s"],
+        &[
+            ("ICM_TOOL_XCRUN", "/usr/bin/false"),
+            ("DEVELOPER_DIR", "/nonexistent"),
+        ],
+    );
+    let result = events.last().unwrap();
+    assert_eq!(result["exit"], 0, "{result}");
+    assert_eq!(result["stopped"], serde_json::json!([]), "{result}");
+    assert_eq!(result["shutdown"], serde_json::json!([]), "{result}");
+    assert_eq!(result["still_running"], serde_json::json!([]), "{result}");
+    assert_eq!(
+        result["unverified"],
+        serde_json::json!(["emulator-5580"]),
+        "{result}"
+    );
+    assert_eq!(
+        result["summary"], "emulator-5580 may not have shut down (adb could not confirm it)",
+        "{result}"
+    );
+    assert_eq!(
+        checks(&events, "android.emulator.shutdown_failed").len(),
+        1,
+        "{events:?}"
+    );
+    assert!(
+        sandbox
+            .sessions()
+            .join("android-booted/emulator-5580.json")
+            .exists()
+    );
+    assert!(process.running());
 }
 
 /// Plain `stop` says why it left the app running on another project's

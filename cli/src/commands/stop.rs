@@ -65,8 +65,10 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
 
     let mut stopped: Vec<Value> = Vec::new();
     let mut shut_down: Vec<String> = Vec::new();
-    // Emulators `--shutdown` could not shut down (they ignored it).
+    // Emulators `--shutdown` could not shut down (they ignored it), and
+    // ones it could not confirm it shut down (adb would not say).
     let mut still_running: Vec<String> = Vec::new();
+    let mut unverified: Vec<String> = Vec::new();
     for platform in &platforms {
         match stop_platform(
             ctx,
@@ -75,6 +77,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
             *platform,
             args.shutdown,
             &mut still_running,
+            &mut unverified,
         ) {
             Ok(entries) => {
                 for entry in entries {
@@ -149,6 +152,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     ctx.rep.set("stopped", Value::Array(stopped));
     ctx.rep.set("shutdown", json!(shut_down));
     ctx.rep.set("still_running", json!(still_running));
+    ctx.rep.set("unverified", json!(unverified));
     let what = match args.platform {
         Some(platform) => platform.as_str().to_string(),
         None => "every platform".to_string(),
@@ -158,16 +162,13 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         (n, 0) => format!("stopped {n} session(s)"),
         (n, d) => format!("stopped {n} session(s) and shut down {d} managed device(s)"),
     };
-    ctx.rep.summary(if still_running.is_empty() {
-        summary
-    } else if count == 0 && shut_down.is_empty() {
-        crate::android::pipeline::still_running_note(&still_running)
-    } else {
-        format!(
-            "{summary}; {}",
-            crate::android::pipeline::still_running_note(&still_running)
-        )
-    });
+    ctx.rep.summary(
+        match crate::android::pipeline::not_shut_down_note(&still_running, &unverified) {
+            None => summary,
+            Some(note) if count == 0 && shut_down.is_empty() => note,
+            Some(note) => format!("{summary}; {note}"),
+        },
+    );
     Ok(())
 }
 
@@ -227,7 +228,8 @@ fn plan(ctx: &Ctx, dir: &Path, platforms: &[Platform], shutdown: bool) {
 
 /// Stops one dev platform's session through its own module; a platform
 /// without a session costs nothing (no tool is looked up). The emulators
-/// `--shutdown` could not shut down go to `still_running`.
+/// `--shutdown` could not shut down go to `still_running`, and those it
+/// could not confirm it shut down to `unverified`.
 fn stop_platform(
     ctx: &mut Ctx,
     project: &Project,
@@ -235,6 +237,7 @@ fn stop_platform(
     platform: Platform,
     shutdown: bool,
     still_running: &mut Vec<String>,
+    unverified: &mut Vec<String>,
 ) -> Result<Vec<Value>> {
     let dir = project.sessions_dir();
     Ok(match platform {
@@ -257,6 +260,7 @@ fn stop_platform(
             let tools = crate::android::Toolset::discover(host, &ctx.env)?;
             let stopped = crate::android::stop_session(ctx, project, host, &tools, shutdown)?;
             still_running.extend(stopped.still_running);
+            unverified.extend(stopped.unverified);
             stopped.stopped
         }
         Platform::Web => crate::web::stop(project).into_iter().collect(),

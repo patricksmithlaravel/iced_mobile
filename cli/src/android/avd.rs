@@ -439,15 +439,59 @@ const SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
 const TERM_GRACE: Duration = Duration::from_secs(5);
 
 /// How [`shutdown`] ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shutdown {
-    /// The emulator is gone: its recorded process has exited, or
-    /// `adb devices` no longer lists its serial.
+    /// The emulator is confirmed gone: its recorded process has exited or
+    /// is another process now, or `adb devices` answered and no longer
+    /// lists its serial.
     Done,
-    /// It is still there after `adb emu kill`, the wait and, for a verified
-    /// process, SIGTERM: it ignored them, or icm has no process of its to
-    /// signal.
-    Lingers,
+    /// It is confirmed still there after `adb emu kill`, the wait and, for a
+    /// verified process, SIGTERM: it ignored them (or `emu kill` itself
+    /// failed), or icm has no process of its to signal.
+    Lingers {
+        /// How `adb emu kill` failed (its exit and error), when it did; a
+        /// call that exited 0 and changed nothing is an emulator that
+        /// ignored it.
+        kill_failed: Option<String>,
+    },
+    /// Neither: icm could not tell. `adb devices` could not be asked at the
+    /// end (and, with no verified process of the emulator to read instead,
+    /// that is all there is), so the emulator may still run. Absence is
+    /// never concluded from a failed question.
+    Unknown {
+        /// Why `adb devices` could not say.
+        why: String,
+        /// How `adb emu kill` failed, when it did.
+        kill_failed: Option<String>,
+    },
+}
+
+/// Whether the emulator is still there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Presence {
+    /// Confirmed absent: the verified process has ended or is another one,
+    /// or `adb devices` answered without the serial.
+    Gone,
+    /// Confirmed present.
+    Present,
+    /// The question could not be answered (why).
+    Unknown(String),
+}
+
+/// How a call to adb failed, when it did (`None`: it succeeded).
+fn failure(outcome: &Option<process::Outcome>) -> Option<String> {
+    match outcome {
+        Some(outcome) if outcome.success() => None,
+        Some(outcome) => {
+            let said = outcome.stderr_tail(2);
+            Some(if said.is_empty() {
+                outcome.describe()
+            } else {
+                format!("{}: {said}", outcome.describe())
+            })
+        }
+        None => Some("adb could not be started".to_string()),
+    }
 }
 
 /// Shuts an emulator down (`adb emu kill`), waiting up to 30 s (or what
@@ -457,7 +501,11 @@ pub enum Shutdown {
 /// a pid with no recorded identity, or that another process has taken, is
 /// never signalled, and the wait then ends when `adb devices` stops listing
 /// the serial. An emulator that is still there at the end is
-/// [`Shutdown::Lingers`], which the caller reports instead of "stopped".
+/// [`Shutdown::Lingers`], which the caller reports instead of "stopped",
+/// and one that icm could not ask about ([`Shutdown::Unknown`]: `adb
+/// devices` fails and no verified process can be read instead) is not
+/// reported as stopped either: a failed question is not an absent
+/// emulator.
 pub fn shutdown(
     ctx: &Ctx,
     tools: &Toolset,
@@ -478,39 +526,62 @@ fn shutdown_within(
     grace: Duration,
 ) -> Result<Shutdown> {
     let adb = Adb::new(tools, serial)?;
-    let _ = adb::quick(adb.cmd(["emu", "kill"]), Duration::from_secs(20));
-    let gone = || match process {
-        Some((pid, identity)) => !running(pid, identity),
-        None => adb::devices(tools)
-            .map(|devices| !devices.iter().any(|d| d.serial == serial))
-            .unwrap_or(true),
+    // A failed `emu kill` is no proof either way: the emulator may be on
+    // its way down already, or not reachable. What decides is whether it is
+    // still there, which is asked below.
+    let kill_failed = failure(&adb::quick(
+        adb.cmd(["emu", "kill"]),
+        Duration::from_secs(20),
+    ));
+    let presence = || {
+        presence_from(process_verdict(process), || match adb::devices(tools) {
+            Ok(devices) if devices.iter().any(|d| d.serial == serial) => Presence::Present,
+            Ok(_) => Presence::Gone,
+            Err(error) => Presence::Unknown(error.detail),
+        })
     };
     let deadline = Instant::now() + wait;
-    while !gone() {
-        if Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(500));
-            continue;
-        }
-        // It ignored `emu kill`. Its process, when icm knows it, is asked
-        // to end and given a moment; any other emulator is left as it is.
-        if process.is_some_and(|(pid, identity)| terminate(pid, identity)) {
-            let until = Instant::now() + grace;
-            while Instant::now() < until && !gone() {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-        return Ok(if gone() {
-            Shutdown::Done
-        } else {
-            Shutdown::Lingers
-        });
+    let mut now = presence();
+    while now != Presence::Gone && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        now = presence();
     }
-    Ok(Shutdown::Done)
+    // It ignored `emu kill`. Its process, when icm knows it, is asked to end
+    // and given a moment; any other emulator is left as it is.
+    if now == Presence::Present && process.is_some_and(|(pid, identity)| terminate(pid, identity)) {
+        let until = Instant::now() + grace;
+        while now != Presence::Gone && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(100));
+            now = presence();
+        }
+    }
+    Ok(match now {
+        Presence::Gone => Shutdown::Done,
+        Presence::Present => Shutdown::Lingers { kill_failed },
+        Presence::Unknown(why) => Shutdown::Unknown { why, kill_failed },
+    })
 }
 
-/// Whether `pid` is still the emulator process icm recorded.
-fn running(pid: u32, identity: &Identity) -> bool {
-    i32::try_from(pid).is_ok_and(|pid| crate::procid::check(pid, identity) == Verdict::Same)
+/// What the recorded emulator process is now, or `None` when icm has none
+/// to read.
+fn process_verdict(process: Option<(u32, &Identity)>) -> Option<Verdict> {
+    let (pid, identity) = process?;
+    Some(crate::procid::check(i32::try_from(pid).ok()?, identity))
+}
+
+/// Whether the emulator is still there, from what the recorded process is
+/// now and, when that does not say, from `listed` (what `adb devices` says).
+/// A process that is the recorded one is the emulator; one that has ended or
+/// is another process now is not, whatever `adb` lists. A process the OS
+/// would not describe is neither: it settles nothing, so adb is asked, as it
+/// is when icm has no process to read. An unreadable process is not an
+/// absent emulator.
+fn presence_from(verdict: Option<Verdict>, listed: impl FnOnce() -> Presence) -> Presence {
+    match verdict {
+        Some(Verdict::Same) => Presence::Present,
+        Some(Verdict::Gone | Verdict::Other(_)) => Presence::Gone,
+        Some(Verdict::Unknown(_)) | None => listed(),
+    }
 }
 
 /// SIGTERM to the emulator process icm recorded, after reading the pid
@@ -688,7 +759,7 @@ mod tests {
         // Nothing to signal: adb lists the serial to the end.
         let begun = Instant::now();
         let ended = shutdown_within(&tools, "emulator-5580", None, wait, wait).unwrap();
-        assert_eq!(ended, Shutdown::Lingers);
+        assert_eq!(ended, Shutdown::Lingers { kill_failed: None });
         assert!(begun.elapsed() >= wait);
 
         // A verified process that ignores SIGTERM (`sleep` keeps the
@@ -715,10 +786,125 @@ mod tests {
             wait,
         )
         .unwrap();
-        assert_eq!(ended, Shutdown::Lingers);
+        assert_eq!(ended, Shutdown::Lingers { kill_failed: None });
         assert!(deaf.try_wait().unwrap().is_none(), "SIGTERM ended it");
         deaf.kill().unwrap();
         assert_eq!(deaf.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    /// A toolset whose adb lists `emulator-5580` until `gone` exists in its
+    /// directory, fails `devices` while `devices-fail` does, and fails
+    /// `emu kill` while `kill-fails` does (it creates `gone` otherwise). The
+    /// script uses shell builtins only: the tools run without a `PATH`.
+    fn controlled(dir: &Path) -> (Toolset, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let adb = dir.join("platform-tools/adb");
+        std::fs::create_dir_all(adb.parent().unwrap()).unwrap();
+        std::fs::write(
+            &adb,
+            r#"#!/bin/sh
+d=${0%/*}
+if [ "$1" = devices ]; then
+  [ -f "$d/devices-fail" ] && { echo 'error: cannot connect to daemon' >&2; exit 1; }
+  printf 'List of devices attached\n'
+  [ -f "$d/gone" ] || printf 'emulator-5580\tdevice product:p model:m device:d transport_id:1\n'
+  exit 0
+fi
+case "$*" in
+  *"emu kill"*)
+    [ -f "$d/kill-fails" ] && { echo 'error: device offline' >&2; exit 1; }
+    : > "$d/gone"
+    exit 0 ;;
+esac
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&adb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = crate::host::HostConfig {
+            android_sdk: Some(dir.display().to_string()),
+            ..Default::default()
+        };
+        let tools = Toolset::discover(&host, &Env::from_pairs(&[], Some(dir))).unwrap();
+        (tools, dir.join("platform-tools"))
+    }
+
+    /// A failed `emu kill` and a failed `adb devices` are not an emulator
+    /// that is gone: with no verified process to read instead, the answer
+    /// is unknown (it used to be "gone"), a failed kill with a listing that
+    /// still has the serial is an emulator that lingers, the kill's failure
+    /// said in both, and an emulator that is no longer listed is done
+    /// whatever `emu kill` exited with. Once adb answers again, the next
+    /// shutdown ends it.
+    #[test]
+    fn a_failed_question_is_not_an_emulator_that_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tools, state) = controlled(dir.path());
+        let wait = Duration::from_millis(600);
+        let touch = |name: &str| std::fs::write(state.join(name), "").unwrap();
+        let remove = |name: &str| {
+            let _ = std::fs::remove_file(state.join(name));
+        };
+
+        touch("kill-fails");
+        touch("devices-fail");
+        let ended = shutdown_within(&tools, "emulator-5580", None, wait, wait).unwrap();
+        let Shutdown::Unknown { why, kill_failed } = ended else {
+            panic!("a failed `adb devices` was taken for an absent emulator: {ended:?}");
+        };
+        assert!(why.contains("adb devices failed"), "{why}");
+        let kill_failed = kill_failed.expect("the failed `emu kill` was not kept");
+        assert!(kill_failed.contains("device offline"), "{kill_failed}");
+
+        // adb answers again, and still lists the emulator.
+        remove("devices-fail");
+        let ended = shutdown_within(&tools, "emulator-5580", None, wait, wait).unwrap();
+        assert!(
+            matches!(&ended, Shutdown::Lingers { kill_failed: Some(why) } if why.contains("device offline")),
+            "{ended:?}"
+        );
+
+        // The emulator went on its own while `emu kill` failed.
+        touch("gone");
+        let ended = shutdown_within(&tools, "emulator-5580", None, wait, wait).unwrap();
+        assert_eq!(ended, Shutdown::Done);
+
+        // After adb recovers, the retry ends it.
+        remove("gone");
+        remove("kill-fails");
+        let ended = shutdown_within(&tools, "emulator-5580", None, wait, wait).unwrap();
+        assert_eq!(ended, Shutdown::Done);
+        assert!(state.join("gone").exists());
+    }
+
+    /// What the recorded process says outranks adb's list only when it
+    /// settles the question: the recorded process is the emulator whatever
+    /// adb lists, a process that ended or is another one is not (adb is not
+    /// asked), and a process the OS would not describe settles nothing, so
+    /// adb decides, as with no process, and a failed answer stays unknown.
+    #[test]
+    fn an_unreadable_process_is_not_an_absent_emulator() {
+        let never = || -> Presence { panic!("adb was asked about a process that settles it") };
+        assert_eq!(presence_from(Some(Verdict::Same), never), Presence::Present);
+        assert_eq!(presence_from(Some(Verdict::Gone), never), Presence::Gone);
+        assert_eq!(
+            presence_from(Some(Verdict::Other(Identity::default())), never),
+            Presence::Gone
+        );
+        let unreadable = || Some(Verdict::Unknown("proc_pidinfo: EPERM".into()));
+        assert_eq!(
+            presence_from(unreadable(), || Presence::Present),
+            Presence::Present
+        );
+        assert_eq!(
+            presence_from(unreadable(), || Presence::Gone),
+            Presence::Gone
+        );
+        assert_eq!(
+            presence_from(unreadable(), || Presence::Unknown("no adb".into())),
+            Presence::Unknown("no adb".into())
+        );
+        assert_eq!(presence_from(None, || Presence::Present), Presence::Present);
     }
 
     /// A context whose output goes nowhere.

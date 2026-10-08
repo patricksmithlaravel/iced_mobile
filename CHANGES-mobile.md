@@ -112,6 +112,16 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   result of `icm stop android` and `icm stop`. Before, it waited 30 s, reported the emulator under
   `stopped`, deleted its record and said nothing, with the emulator still listed by `adb devices`.
   The wait is shorter when `--timeout` leaves less.
+- `icm stop --shutdown` no longer takes a failed question for an emulator that is gone. When `adb
+  emu kill` failed and `adb devices` failed too (the adb server went away), and icm had no verified
+  process of the emulator to read instead, it reported the emulator as stopped, deleted its record
+  and said nothing. Now the emulator is listed as `unverified` in the result of `icm stop android`
+  and `icm stop` (not under `stopped`), its record stays, `android.emulator.shutdown_failed` warns
+  that it may still be running, names what failed and says what to run, and the next `stop
+  --shutdown` shuts it down once adb answers. An emulator that is still listed after a failed `emu
+  kill` is reported as still running with the failure, not as having ignored the kill. A recorded
+  emulator process that the OS would not describe settles nothing either: adb is asked, as it is
+  when there is no process.
 - Plain `icm stop android` (and `icm stop --all`) says why it left the app running when the device
   names another project as the emulator's owner (`android.emulator.shared`), with the `adb` command
   that stops the app by hand, where it said nothing.

@@ -2448,19 +2448,22 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     let Stopped {
         stopped,
         still_running,
+        unverified,
     } = stop_session(ctx, &project, &host, &tools, args.shutdown)?;
-    ctx.rep
-        .summary(match (stopped.len(), still_running.is_empty()) {
-            (0, true) => "nothing to stop on Android".to_string(),
-            (n, true) => format!("stopped {n} on Android"),
-            (0, false) => still_running_note(&still_running),
-            (n, false) => format!(
-                "stopped {n} on Android; {}",
-                still_running_note(&still_running)
-            ),
-        });
+    ctx.rep.summary(
+        match (
+            stopped.len(),
+            not_shut_down_note(&still_running, &unverified),
+        ) {
+            (0, None) => "nothing to stop on Android".to_string(),
+            (n, None) => format!("stopped {n} on Android"),
+            (0, Some(note)) => note,
+            (n, Some(note)) => format!("stopped {n} on Android; {note}"),
+        },
+    );
     ctx.rep.set("stopped", Value::Array(stopped));
     ctx.rep.set("still_running", json!(still_running));
+    ctx.rep.set("unverified", json!(unverified));
     Ok(())
 }
 
@@ -2473,11 +2476,29 @@ pub struct Stopped {
     /// The emulators `--shutdown` tried to shut down that are still
     /// running ([`avd::Shutdown::Lingers`]).
     pub still_running: Vec<String>,
+    /// The emulators `--shutdown` tried to shut down and could not confirm
+    /// either way, because adb would not say whether they still run
+    /// ([`avd::Shutdown::Unknown`]): not reported as stopped.
+    pub unverified: Vec<String>,
 }
 
-/// The summary's words for the emulators a stop could not shut down.
-pub fn still_running_note(serials: &[String]) -> String {
-    format!("{} did not shut down (still running)", serials.join(", "))
+/// The summary's words for the emulators a stop could not shut down, or
+/// could not confirm it shut down; `None` when there are none.
+pub fn not_shut_down_note(still_running: &[String], unverified: &[String]) -> Option<String> {
+    let mut notes = Vec::new();
+    if !still_running.is_empty() {
+        notes.push(format!(
+            "{} did not shut down (still running)",
+            still_running.join(", ")
+        ));
+    }
+    if !unverified.is_empty() {
+        notes.push(format!(
+            "{} may not have shut down (adb could not confirm it)",
+            unverified.join(", ")
+        ));
+    }
+    (!notes.is_empty()).then(|| notes.join("; "))
 }
 
 /// Why `stop` does not act on the emulator on a serial.
@@ -2645,6 +2666,7 @@ pub fn stop_session(
         |serial: &str| avd_on(serial).is_some_and(|avd| crate::managed::is_managed(&avd));
     let mut stopped: Vec<Value> = Vec::new();
     let mut still_running: Vec<String> = Vec::new();
+    let mut unverified: Vec<String> = Vec::new();
     // The serials already reported as left running for their owner.
     let mut told: BTreeSet<String> = BTreeSet::new();
 
@@ -2847,21 +2869,28 @@ pub fn stop_session(
                     session::remove_booted(project, &serial);
                     stopped.push(json!({"platform": "android", "emulator": serial}));
                 }
-                // It ignored `emu kill` (and SIGTERM, when icm may send
-                // one): it is not stopped, and its record stays, so that
-                // the next `--shutdown` can still verify its process.
-                avd::Shutdown::Lingers => {
-                    let why = match &process {
-                        Some((pid, _)) => {
-                            format!("`adb emu kill` and SIGTERM to its process (pid {pid})")
-                        }
-                        None => "`adb emu kill`, and icm has no verified process of it to signal"
+                // It ignored `emu kill` (or `emu kill` failed) and SIGTERM,
+                // when icm may send one: it is not stopped, and its record
+                // stays, so that the next `--shutdown` can still verify its
+                // process.
+                avd::Shutdown::Lingers { kill_failed } => {
+                    let why = match (&kill_failed, &process) {
+                        (None, Some((pid, _))) => format!(
+                            "it ignored `adb emu kill` and SIGTERM to its process (pid {pid})"
+                        ),
+                        (None, None) => "it ignored `adb emu kill`, and icm has no verified process of it to signal"
                             .to_string(),
+                        (Some(failed), Some((pid, _))) => format!(
+                            "`adb emu kill` failed ({failed}) and SIGTERM to its process (pid {pid}) did not end it"
+                        ),
+                        (Some(failed), None) => format!(
+                            "`adb emu kill` failed ({failed}), and icm has no verified process of it to signal"
+                        ),
                     };
                     ctx.rep.check(
                         Check::warn(
                             CheckId::AndroidEmulatorShutdownFailed,
-                            format!("{serial} is still running: it ignored {why}"),
+                            format!("{serial} is still running: {why}"),
                         )
                         .fix(
                             "Run it again, or quit the emulator yourself (its window, or the process that listens on its console port); `icm stop android --shutdown` tries again:",
@@ -2869,6 +2898,30 @@ pub fn stop_session(
                         ),
                     );
                     still_running.push(serial);
+                }
+                // adb would not say whether it still runs, and there is no
+                // verified process of it to read instead: that is not an
+                // absent emulator. It is not reported as stopped, and its
+                // record stays for the next `--shutdown`, as a lingering
+                // one's does.
+                avd::Shutdown::Unknown { why, kill_failed } => {
+                    let tried = match &kill_failed {
+                        Some(failed) => format!("`adb emu kill` failed ({failed}) and "),
+                        None => String::new(),
+                    };
+                    ctx.rep.check(
+                        Check::warn(
+                            CheckId::AndroidEmulatorShutdownFailed,
+                            format!(
+                                "{serial} may still be running: icm could not confirm that it shut down: {tried}`adb devices` could not say whether it is still listed ({why})"
+                            ),
+                        )
+                        .fix(
+                            "Make adb answer (`adb devices`), then run the stop again: icm kept the emulator's record for that. To shut it down yourself:",
+                            &["adb devices", &format!("adb -s {serial} emu kill")],
+                        ),
+                    );
+                    unverified.push(serial);
                 }
             }
         }
@@ -2878,6 +2931,7 @@ pub fn stop_session(
     Ok(Stopped {
         stopped,
         still_running,
+        unverified,
     })
 }
 
