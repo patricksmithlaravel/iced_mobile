@@ -12,6 +12,9 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - **iOS:** the vendored winit reports an insertion of only a line break as Return and one of only
   `\t` as Tab, deciding per insertion, so a Return typed right after another key in the same turn
   of the event loop is no longer lost.
+- The known limitations in an app's `AGENTS.md` say that iOS hardware keyboards deliver Return and
+  Tab as keys, beside typed characters and Backspace, where they said typed characters and
+  Backspace only.
 - **Android:** the safe area is published again when the app changes its own scale factor.
 - **Android:** the on-screen keyboard shows on Android 16 (API 36). iced_winit requires
   android-activity 0.6.1, and the fork's `Cargo.lock` holds it: 0.6.0 asked Android to show the

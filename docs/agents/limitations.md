@@ -45,8 +45,8 @@ this file in the commit that fixes or finds a limitation.
     once.
   - Password fields (`.secure(true)`) are not marked secure to the system
     keyboard, which may suggest or learn what is typed.
-  - iOS hardware keyboards deliver typed characters and Backspace only: no
-    arrows, Escape or Cmd shortcuts.
+  - iOS hardware keyboards deliver typed characters, Return, Tab and
+    Backspace only: no arrows, Escape or Cmd shortcuts.
   - On iOS, Return and Tab count only when UIKit inserts them alone, as
     the Return and Tab keys do (`"\r\n"` is one Return). A line break or
     tab inside longer inserted text (dictation, a keyboard suggestion, a
