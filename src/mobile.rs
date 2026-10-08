@@ -264,7 +264,10 @@
 //!   notch is not reported.
 //!
 //! The first value arrives when the window opens, then one per change:
-//! rotation, a new display cutout, the keyboard showing or hiding. On
+//! rotation, a new display cutout, the keyboard showing or hiding, and a
+//! new scale factor of the application's own
+//! ([`Application::scale_factor`](crate::Application::scale_factor)), which
+//! changes the logical pixels the same insets measure. On
 //! Android a change can take a few tenths of a second to settle: the shell
 //! reads again while the system bars settle, and every quarter of a second
 //! while a text input has the focus, since the keyboard sends no event of

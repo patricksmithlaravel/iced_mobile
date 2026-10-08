@@ -13,6 +13,10 @@
 //! - iOS: winit's safe-area frame against the window's bounds, and the
 //!   keyboard's frame from UIKit's notification (`safe_area/ios.rs`).
 //! - Elsewhere: [`SafeArea::ZERO`], once.
+//!
+//! The safe area is published in the application's logical pixels, so the
+//! shell keeps each window's last reading in physical pixels and projects
+//! it again when the application changes its own scale factor.
 use crate::Control;
 use crate::core::theme;
 use crate::futures::futures::channel::mpsc;
@@ -23,7 +27,6 @@ use crate::window::{Window, WindowManager};
 
 pub use crate::runtime::safe_area::{SafeArea, safe_area};
 
-#[cfg(any(target_os = "android", target_os = "ios", test))]
 use crate::core::Padding;
 #[cfg(any(target_os = "android", test))]
 use crate::core::time::{Duration, Instant};
@@ -52,10 +55,8 @@ pub(crate) fn reset() {
 /// The shell's side: reads the safe area when something may have changed
 /// it, and publishes it when it did.
 pub(crate) struct Shell {
-    /// What each window reported last.
-    windows: Vec<(winit::window::WindowId, SafeArea)>,
-    /// What was published last.
-    published: Option<SafeArea>,
+    /// What each window reported last, and what was published last.
+    areas: Areas<winit::window::WindowId>,
     /// Android: when to read again.
     #[cfg(target_os = "android")]
     polls: Polls,
@@ -75,8 +76,7 @@ impl Shell {
         ios::observe_keyboard();
 
         Self {
-            windows: Vec::new(),
-            published: None,
+            areas: Areas::default(),
             #[cfg(target_os = "android")]
             polls: Polls::default(),
         }
@@ -127,6 +127,9 @@ impl Shell {
     /// Reads again what may have changed since the event loop last turned,
     /// and asks it to turn again when the next read is due.
     ///
+    /// - Every platform: a window whose scale factor the application changed
+    ///   gets its last reading in the new logical pixels
+    ///   ([`rescale`](Self::rescale)).
     /// - iOS: every window, at every turn. These are a few property reads,
     ///   and UIKit may change the safe area without resizing the window (as
     ///   it moves it into its scene), or announce the keyboard's frame in a
@@ -137,7 +140,7 @@ impl Shell {
     ///   the system draws edge to edge. And after a redraw, when the
     ///   display's rotation differs from the last one read
     ///   ([`redrawn`](Self::redrawn)).
-    /// - Elsewhere: nothing.
+    /// - Elsewhere: nothing more.
     ///
     /// Called before the event loop's idle check, so that a poll is
     /// scheduled even when nothing else happened.
@@ -150,10 +153,14 @@ impl Shell {
         C: Compositor<Renderer = P::Renderer>,
         P::Theme: theme::Base,
     {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        self.forget_closed(windows);
+
+        self.rescale(windows);
+
         #[cfg(target_os = "ios")]
         {
             let _ = control;
-            self.forget_closed(windows);
 
             for (_id, window) in windows.iter_mut() {
                 self.read(window);
@@ -163,8 +170,6 @@ impl Shell {
         #[cfg(target_os = "android")]
         {
             use winit::event_loop::ControlFlow;
-
-            self.forget_closed(windows);
 
             let now = Instant::now();
             let mut drawable = false;
@@ -214,7 +219,27 @@ impl Shell {
         }
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        let _ = (windows, control);
+        let _ = control;
+    }
+
+    /// Projects the last reading of each window again when the application
+    /// changed the window's scale factor since (`Program::scale_factor`),
+    /// and publishes it if that changed it.
+    ///
+    /// The platform announces no change then: on Android nothing would read
+    /// the window again until something else changed its safe area.
+    fn rescale<P, C>(&mut self, windows: &mut WindowManager<P, C>)
+    where
+        P: Program,
+        C: Compositor<Renderer = P::Renderer>,
+        P::Theme: theme::Base,
+    {
+        for (_id, window) in windows.iter_mut() {
+            publish(
+                self.areas
+                    .rescale(window.raw.id(), window.state.scale_factor()),
+            );
+        }
     }
 
     /// Forgets the windows that were closed.
@@ -230,7 +255,7 @@ impl Shell {
             .map(|(_id, window)| window.raw.id())
             .collect();
 
-        self.windows.retain(|(id, _area)| open.contains(id));
+        self.areas.retain(|id| open.contains(id));
     }
 
     /// Reads the safe area of `window`, and publishes it if it is new for
@@ -241,7 +266,7 @@ impl Shell {
         C: Compositor<Renderer = P::Renderer>,
         P::Theme: theme::Base,
     {
-        let Some(area) = read(&window.raw, window.state.scale_factor()) else {
+        let Some(physical) = read(&window.raw) else {
             return;
         };
 
@@ -250,59 +275,158 @@ impl Shell {
         // over this window only when it asks: a keyboard counts while a
         // window asks for it, and for the second it takes to slide away.
         #[cfg(target_os = "android")]
-        let area = if window.ime_requested()
+        let physical = if window.ime_requested()
             || self.polls.keyboard_wanted(Instant::now())
         {
-            area
+            physical
         } else {
-            area.with_keyboard(0.0)
+            Physical {
+                keyboard: 0.0,
+                ..physical
+            }
         };
 
-        let id = window.raw.id();
-
-        match self.windows.iter_mut().find(|(known, _area)| *known == id) {
-            Some((_id, last)) if *last == area => return,
-            Some((_id, last)) => *last = area,
-            None => self.windows.push((id, area)),
-        }
-
-        if self.published == Some(area) {
-            return;
-        }
-
-        log::debug!("Safe area: {area:?}");
-
-        self.published = Some(area);
-        crate::icm::safe_area(area.insets, area.keyboard);
-        runtime::safe_area::publish(area);
+        publish(self.areas.read(
+            window.raw.id(),
+            physical,
+            window.state.scale_factor(),
+        ));
     }
 }
 
-/// The safe area of `window`, whose scale factor (the application's
-/// included) is `scale_factor`, or `None` while it cannot be known.
-#[cfg(target_os = "android")]
-fn read(window: &winit::window::Window, scale_factor: f32) -> Option<SafeArea> {
-    android::read(window).map(|area| area.to_logical(scale_factor))
+/// Hands `area`, if there is one to publish, to the launcher and to the
+/// [`safe_area`] subscriptions.
+fn publish(area: Option<SafeArea>) {
+    let Some(area) = area else {
+        return;
+    };
+
+    log::debug!("Safe area: {area:?}");
+
+    crate::icm::safe_area(area.insets, area.keyboard);
+    runtime::safe_area::publish(area);
 }
 
-/// The safe area of `window`, whose scale factor (the application's
-/// included) is `scale_factor`, or `None` while it cannot be known.
+/// What the shell read of each window last, and what it published last.
+///
+/// A reading is kept in the platform's physical pixels, with the scale
+/// factor (the application's included) it was projected with: the
+/// application can change its own scale factor at any time, and the
+/// platform announces no change then, so the last reading is projected
+/// again ([`rescale`](Self::rescale)).
+#[derive(Debug)]
+struct Areas<Id> {
+    /// Each window's last reading.
+    windows: Vec<Reading<Id>>,
+    /// What was published last.
+    published: Option<SafeArea>,
+}
+
+/// What the shell read of one window last.
+#[derive(Debug, Clone, Copy)]
+struct Reading<Id> {
+    id: Id,
+    /// As the platform reported it, in physical pixels.
+    physical: Physical,
+    /// The scale factor it was projected with.
+    scale_factor: f32,
+    /// In logical pixels.
+    area: SafeArea,
+}
+
+impl<Id> Default for Areas<Id> {
+    fn default() -> Self {
+        Self {
+            windows: Vec::new(),
+            published: None,
+        }
+    }
+}
+
+impl<Id: Copy + PartialEq> Areas<Id> {
+    /// The platform reports `physical` for window `id`, whose scale factor
+    /// (the application's included) is `scale_factor`: the area to
+    /// publish, if it is new for that window and not what was published
+    /// last.
+    fn read(
+        &mut self,
+        id: Id,
+        physical: Physical,
+        scale_factor: f32,
+    ) -> Option<SafeArea> {
+        let area = physical.to_logical(scale_factor);
+        let reading = Reading {
+            id,
+            physical,
+            scale_factor,
+            area,
+        };
+
+        match self.windows.iter_mut().find(|known| known.id == id) {
+            Some(last) => {
+                let same = last.area == area;
+                *last = reading;
+
+                if same {
+                    return None;
+                }
+            }
+            None => self.windows.push(reading),
+        }
+
+        if self.published == Some(area) {
+            return None;
+        }
+
+        self.published = Some(area);
+
+        Some(area)
+    }
+
+    /// Window `id` has the scale factor `scale_factor` now: its last
+    /// reading in the new logical pixels, to publish if that changed it.
+    /// Nothing before the window's first reading, or while its scale factor
+    /// is the one of its last.
+    fn rescale(&mut self, id: Id, scale_factor: f32) -> Option<SafeArea> {
+        let last = self.windows.iter().find(|known| known.id == id)?;
+
+        if last.scale_factor == scale_factor {
+            return None;
+        }
+
+        let physical = last.physical;
+
+        self.read(id, physical, scale_factor)
+    }
+
+    /// Forgets the windows that are not `open`.
+    #[cfg(any(target_os = "android", target_os = "ios", test))]
+    fn retain(&mut self, open: impl Fn(&Id) -> bool) {
+        self.windows.retain(|known| open(&known.id));
+    }
+}
+
+/// The safe area of `window` in physical pixels, or `None` while it cannot
+/// be known.
+#[cfg(target_os = "android")]
+fn read(window: &winit::window::Window) -> Option<Physical> {
+    android::read(window)
+}
+
+/// The safe area of `window` in physical pixels, or `None` while it cannot
+/// be known.
 #[cfg(target_os = "ios")]
-fn read(window: &winit::window::Window, scale_factor: f32) -> Option<SafeArea> {
-    ios::read(window).map(|area| area.to_logical(scale_factor))
+fn read(window: &winit::window::Window) -> Option<Physical> {
+    ios::read(window)
 }
 
 /// Nothing covers a desktop window or a web page.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn read(
-    _window: &winit::window::Window,
-    _scale_factor: f32,
-) -> Option<SafeArea> {
-    Some(SafeArea::ZERO)
+fn read(_window: &winit::window::Window) -> Option<Physical> {
+    Some(Physical::default())
 }
 
 /// A safe area in the platform's physical pixels.
-#[cfg(any(target_os = "android", target_os = "ios", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct Physical {
     /// The top, right, bottom and left insets.
@@ -311,7 +435,6 @@ struct Physical {
     keyboard: f32,
 }
 
-#[cfg(any(target_os = "android", target_os = "ios", test))]
 impl Physical {
     /// In logical pixels, for a scale factor that includes the
     /// application's own.
@@ -583,6 +706,77 @@ mod tests {
         let area = physical.to_logical(6.0);
         assert_eq!(area.insets.top, 31.0);
         assert_eq!(area.keyboard, 168.0);
+    }
+
+    /// A settled Android shell (no poll due, no keyboard, no rotation) whose
+    /// application changes its scale factor: the platform reports nothing,
+    /// so the last reading is projected again at the new scale.
+    #[test]
+    fn a_new_app_scale_factor_projects_the_last_reading_again() {
+        // The bars settled: nothing will read the window again.
+        let start = Instant::now();
+        let mut polls = Polls::default();
+
+        polls.changed(start);
+
+        while let Some(next) = polls.next() {
+            assert!(polls.due(next));
+        }
+
+        assert_eq!(polls.next(), None);
+
+        // A 2.625x phone: 48 logical pixels of status bar, 24 of
+        // navigation bar.
+        let bars = Physical {
+            insets: [126.0, 0.0, 63.0, 0.0],
+            keyboard: 0.0,
+        };
+        let phone = SafeArea::new(Padding::ZERO.top(48.0).bottom(24.0));
+        let mut areas = Areas::default();
+
+        assert_eq!(areas.read(1, bars, 2.625), Some(phone));
+        assert_eq!(areas.rescale(1, 2.625), None);
+
+        // The application's scale factor becomes 2: 5.25 pixels a unit.
+        let doubled = SafeArea::new(Padding::ZERO.top(24.0).bottom(12.0));
+
+        assert_eq!(areas.rescale(1, 5.25), Some(doubled));
+        assert_eq!(areas.rescale(1, 5.25), None);
+
+        // Reading the same bars at the new scale finds nothing new.
+        assert_eq!(areas.read(1, bars, 5.25), None);
+
+        // And back to 1.
+        assert_eq!(areas.rescale(1, 2.625), Some(phone));
+
+        // A window never read has nothing to project.
+        assert_eq!(areas.rescale(2, 5.25), None);
+    }
+
+    /// The keyboard is projected too, and a window whose new projection is
+    /// what another window published last publishes nothing.
+    #[test]
+    fn a_projected_area_is_published_once() {
+        let typing = Physical {
+            insets: [186.0, 0.0, 102.0, 0.0],
+            keyboard: 1008.0,
+        };
+        let mut areas = Areas::default();
+
+        let first = areas.read("one", typing, 3.0).expect("first reading");
+        assert_eq!(first.keyboard, 336.0);
+
+        // A second window at twice the scale, then the first one rescaled
+        // to it: the area is the second window's, published already.
+        let half = areas.read("two", typing, 6.0).expect("second window");
+        assert_eq!(half.insets, Padding::ZERO.top(31.0).bottom(17.0));
+        assert_eq!(half.keyboard, 168.0);
+        assert_eq!(areas.rescale("one", 6.0), None);
+
+        // Closed windows are forgotten.
+        areas.retain(|id| *id != "two");
+        assert_eq!(areas.rescale("two", 3.0), None);
+        assert_eq!(areas.rescale("one", 3.0), Some(first));
     }
 
     #[test]
