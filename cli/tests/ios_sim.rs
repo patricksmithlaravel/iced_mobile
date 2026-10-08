@@ -745,6 +745,48 @@ fn shutdown_without_a_session_honours_the_pinned_simulator() {
     );
 }
 
+/// A pinned `icm-test-*` simulator stays booted after `stop ios-sim
+/// --shutdown` even when the run booted it: icm shuts down only the
+/// simulators it created (Appendix D item 19, where the emulator `icm run
+/// android` booted is the one exception), so whoever made a test simulator
+/// shuts it down and deletes it (AGENTS.md "Devices").
+#[test]
+fn a_test_simulator_the_run_booted_stays_booted() {
+    let fake = Fake::new();
+    write_json(
+        &fake.state.join("devices.json"),
+        &json!({"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
+            {"udid": "TEST-UDID", "name": "icm-test-pinned", "state": "Shutdown", "isAvailable": true,
+             "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17"}
+        ]}}),
+    );
+    fake.host("[ios]\nsimulator_udid = \"TEST-UDID\"\n");
+    let run = fake.result("ok", &["run", "ios-sim", "--json", "-q"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(run["device"]["udid"], "TEST-UDID", "{run}");
+    assert!(
+        fake.xcrun_log().contains("simctl boot TEST-UDID"),
+        "{}",
+        fake.xcrun_log()
+    );
+
+    let events = fake.events("ok", &["stop", "ios-sim", "--shutdown", "--json"]);
+    let stop = events.last().unwrap();
+    assert_eq!(stop["exit"], 0, "{stop}");
+    let log = fake.xcrun_log();
+    assert!(log.contains("simctl terminate TEST-UDID"), "{log}");
+    assert!(!log.contains("simctl shutdown"), "{log}");
+    assert!(
+        checks(&events, "run.no_session")
+            .iter()
+            .any(|check| check["detail"]
+                .as_str()
+                .unwrap()
+                .contains("left icm-test-pinned running")),
+        "{events:?}"
+    );
+}
+
 /// With an ios-sim session, `stop --all --shutdown` considers only the
 /// session's simulator: a run on a test simulator (`--sim`) leaves icm's
 /// managed one alone, booted and untagged as it is, since another process

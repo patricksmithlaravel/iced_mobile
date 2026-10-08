@@ -1,7 +1,8 @@
-//! What the docs agents read say about exit 4 agrees with the catalogue:
-//! exit 4 means the environment is not ready, and `errors[].fix.by` says
-//! who acts. Some exit-4 errors need the agent or the owner, so "exit 4:
-//! run `icm doctor --fix --yes`" sends an agent the wrong way.
+//! What the docs agents read say agrees with icm. Exit 4 means the
+//! environment is not ready, and `errors[].fix.by` says who acts: some
+//! exit-4 errors need the agent or the owner, so "exit 4: run `icm doctor
+//! --fix --yes`" sends an agent the wrong way. And the fork's AGENTS.md
+//! says who shuts down a throwaway `icm-test-*` device.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -96,4 +97,36 @@ fn exit_four_says_to_follow_fix_by() {
         explained.contains("else the first remaining error's own exit"),
         "{explained}"
     );
+}
+
+/// The fork's AGENTS.md says what icm does with a throwaway `icm-test-*`
+/// device (DESIGN.md Appendix D item 19, `tests/ios_sim.rs`
+/// a_test_simulator_the_run_booted_stays_booted): every setting that names
+/// one makes icm boot it, only Android's `stop --shutdown` shuts one down
+/// (the emulator its own run booted), and a test simulator is shut down and
+/// deleted by hand. It once said `stop --shutdown` shuts down any it
+/// booted, so an agent that trusted it left simulators booted.
+#[test]
+fn agents_md_says_who_shuts_down_a_test_device() {
+    let agents = std::fs::read_to_string(fork().join("AGENTS.md")).unwrap();
+    let devices = agents
+        .split("\n## Devices\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("AGENTS.md has a Devices section");
+    let devices = devices.split_whitespace().collect::<Vec<_>>().join(" ");
+    for said in [
+        "`--avd`",
+        "`[android] avd`",
+        "`--sim`",
+        "`[ios] simulator_udid`",
+        "Only Android's `stop --shutdown` shuts one down, and only the emulator its own run booted.",
+        "`xcrun simctl shutdown <udid>`",
+        "`xcrun simctl delete <udid>`",
+    ] {
+        assert!(
+            devices.contains(said),
+            "AGENTS.md's Devices section no longer says {said}"
+        );
+    }
 }

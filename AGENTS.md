@@ -223,12 +223,17 @@ stop only the platforms they drive and leave the other platforms' devices alone
   cannot read (`ios.sim.owner_unknown`, `android.emulator.owner_unknown`).
   `stop --all --shutdown` considers only the ios-sim session's simulator, or without a session
   the one the project's runs pick (host.toml's `simulator_udid`, else the managed one).
-- Name any throwaway simulator or AVD you create `icm-test-*`, and delete it when done. icm creates
-  or boots an `icm-test-*` device only when you name it (`--avd`), and `stop --shutdown` leaves it
-  running unless icm booted it. But `icm run android` uses one, and sets it up like its own emulator (animations off, stay
-  awake), when it is the only online device. Keep one online only while you test, or pass
-  `--device`. For Android, point `ANDROID_USER_HOME` and
-  `ANDROID_AVD_HOME` at a temporary directory, as `phase1.sh` does.
+- Name any throwaway simulator or AVD you create `icm-test-*`, and delete it when done. icm boots
+  an `icm-test-*` device only when something names it: `--avd` or host.toml's `[android] avd` (icm
+  creates that AVD when it is missing), `--sim`, `--device` or host.toml's `[ios]
+  simulator_udid`. Only Android's `stop --shutdown` shuts one down, and only the emulator its own
+  run booted. `stop --shutdown` leaves an `icm-test-*` simulator booted even when icm booted it,
+  so shut it down and delete it yourself: `xcrun simctl shutdown <udid>`, then
+  `xcrun simctl delete <udid>`.
+- `icm run android` also uses an `icm-test-*` emulator, and sets it up like its own emulator
+  (animations off, stay awake), when it is the only online device. Keep one online only while you
+  test, or pass `--device`. For Android, point `ANDROID_USER_HOME` and `ANDROID_AVD_HOME` at a
+  temporary directory, as `phase1.sh` does.
 - Never boot, wipe, delete or install onto the owner's other AVDs, simulators or phones. Check
   `adb devices` first: when its own emulator is not up, `icm run android` installs onto the single
   online Android device.
