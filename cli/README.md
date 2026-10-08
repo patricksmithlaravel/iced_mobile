@@ -33,7 +33,7 @@ cargo test
 | `catalogue.rs` | every check/error id with exit code, level, `by`, title, fix; `docs/explain/<id>.md` adds detail |
 | `error.rs` | `IcmError` (one `errors[]` entry), `Check`, `Evidence`, `Fix`, `Diagnostic` |
 | `exit.rs` | the stable exit codes |
-| `process.rs` | the runner: stdin null, process groups, timeouts, file-backed output, redaction |
+| `process.rs` | the runner: stdin null, process groups, timeouts, file-backed output, redaction; a session's `secrets.json` (`keep_secrets`: the secret values handed to its app with `--env`, never one icm only inherited) |
 | `signals.rs` | SIGINT/SIGTERM/SIGHUP: record, kill registered groups |
 | `plan.rs` | `Plan`/`Step`; `--dry-run` prints, `execute` runs |
 | `config/` | icm.toml types, discovery, validation with `file:line` (`source.rs` keeps the spans) |
@@ -111,7 +111,11 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   the run directories for it raw, JSON-escaped and percent-encoded
   (`tests/support/secret.rs`, included with `#[path]`). Each
   `later_commands_without_the_secret_keep_none` hands the token to the app
-  in `run` and runs `logs`, `shot` and `stop` without it.
+  with `--env` in `run` and runs `logs`, `shot` and `stop` without it. It
+  also gives every command a secret-named variable that nothing logs
+  (`secret::INHERITED_NAME`) and fails when any file under the project's
+  `target/` holds its value: no command may write a value icm only
+  inherited.
 - `tests/web.rs` drives the web pipeline against real headless Chrome with
   a fake cargo and wasm-bindgen (`ICM_TOOL_CARGO`, `ICM_TOOL_WASM_BINDGEN`)
   whose JavaScript "app" speaks `ICM_EVENT`; it skips without Chrome or the

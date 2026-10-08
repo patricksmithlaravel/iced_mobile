@@ -364,7 +364,8 @@ fn panics_exits_and_hangs_fail_with_exit_ten() {
 /// a panic, is `<redacted>` in the copies of its stdout and stderr, in
 /// `app.log` and `logs.ndjson`, the step logs, events and results, raw or
 /// escaped. The live files in `target/icm/sessions` are the app's own
-/// output and keep it.
+/// output and keep it, and they are the only files under `target/` that
+/// do: icm writes no inherited value anywhere, `secrets.json` included.
 #[test]
 fn run_directories_keep_no_secret() {
     let sandbox = Sandbox::new();
@@ -418,24 +419,44 @@ fn run_directories_keep_no_secret() {
             .iter()
             .all(|form| !last.contains(form.as_str()))
     );
+    let live = icm
+        .join("sessions/desktop")
+        .join(leaked["run"].as_str().unwrap());
+    let holders: Vec<PathBuf> = secret::leaks(&sandbox.project.path().join("target"))
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    assert!(
+        holders
+            .iter()
+            .all(|path| *path == live.join("app.stdout") || *path == live.join("app.stderr")),
+        "{holders:?}"
+    );
 }
 
 /// A later command whose environment lacks the secret (`icm logs` from
-/// another shell after `ICM_TEST_API_TOKEN=… icm run desktop`) still
-/// redacts what the app logged: the session keeps the secret values the
-/// app was handed, the ones it inherits and its `--env`, in a 0600 file
-/// next to its live files, and every command of the project reads them.
+/// another shell after `icm run desktop --env ICM_TEST_API_TOKEN=…`) still
+/// redacts what the app logged: the session keeps the values of the app's
+/// secret-named `--env` in a 0600 file next to its live files, and every
+/// command of the project reads them. A secret-named variable of the
+/// user's shell that icm and the app only inherit (another tool's token)
+/// reaches no file under `target/`, whichever command had it.
 #[test]
 fn later_commands_without_the_secret_keep_none() {
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
     let mut apps = Apps(Vec::new());
-    let icm = sandbox.project.path().join("target/icm");
+    let target = sandbox.project.path().join("target");
+    let icm = target.join("icm");
+    let token = format!("{}={}", secret::NAME, secret::TOKEN);
     let pair = "ICM_TEST_DB_PASSWORD=given-with-env-99";
+    let shell = [(secret::INHERITED_NAME, secret::INHERITED)];
 
     let run = sandbox.result_with(
-        &["run", "desktop", "--settle", "200ms", "--env", pair],
-        &[(secret::NAME, secret::TOKEN)],
+        &[
+            "run", "desktop", "--settle", "200ms", "--env", &token, "--env", pair,
+        ],
+        &shell,
     );
     assert_eq!(run["exit"], 0, "{run}");
     let pid = run["process"]["pid"].as_i64().unwrap() as i32;
@@ -449,6 +470,8 @@ fn later_commands_without_the_secret_keep_none() {
     assert_eq!(mode & 0o777, 0o600);
     let text = std::fs::read_to_string(&kept).unwrap();
     assert!(text.contains("given-with-env-99"), "{text}");
+    assert!(text.contains(secret::TAIL), "{text}");
+    secret::assert_inherited_nowhere(&target);
 
     for args in [
         &["logs", "desktop"][..],
@@ -457,7 +480,7 @@ fn later_commands_without_the_secret_keep_none() {
         &["stop", "desktop"],
         &["logs", "desktop"],
     ] {
-        let result = sandbox.result(args);
+        let result = sandbox.result_with(args, &shell);
         assert_eq!(result["exit"], 0, "{args:?}: {result}");
     }
     wait_dead(pid);
@@ -474,7 +497,10 @@ fn later_commands_without_the_secret_keep_none() {
 
     // The next run, without the secret, removes the old live files with
     // what they kept.
-    let next = sandbox.result(&["run", "desktop", "--settle", "200ms", "--no-build"]);
+    let next = sandbox.result_with(
+        &["run", "desktop", "--settle", "200ms", "--no-build"],
+        &shell,
+    );
     assert_eq!(next["exit"], 0, "{next}");
     apps.0.push(next["process"]["pid"].as_i64().unwrap() as i32);
     assert!(!kept.exists());
@@ -482,12 +508,16 @@ fn later_commands_without_the_secret_keep_none() {
         .join("sessions/desktop")
         .join(next["run"].as_str().unwrap())
         .join("secrets.json");
-    let text = std::fs::read_to_string(again).unwrap_or_default();
-    assert!(
-        !text.contains("given-with-env-99") && !text.contains(secret::TAIL),
-        "{text}"
-    );
-    assert_eq!(sandbox.result(&["stop", "desktop"])["exit"], 0);
+    assert!(!again.exists());
+    for args in [
+        &["logs", "desktop"][..],
+        &["shot", "desktop"],
+        &["stop", "desktop"],
+    ] {
+        let result = sandbox.result_with(args, &shell);
+        assert_eq!(result["exit"], 0, "{args:?}: {result}");
+    }
+    secret::assert_inherited_nowhere(&target);
 }
 
 #[test]

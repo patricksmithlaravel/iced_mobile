@@ -52,9 +52,11 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
 - Outputs: `target/icm/latest/<platform>/` (screen.png, screen.preview.png, app.log, result.json); the
   newest result of any command is `target/icm/last.json`. Values of secret-named variables
   (`*TOKEN*`, `*KEY*`, `*SECRET*`, `*PASS*`, `*PRIVATE*`) read `<redacted>` there and on stdout; the
-  live files icm reads in `target/icm/sessions/` are the app's own output, unredacted, and a session
-  keeps the secret values it handed the app in a `secrets.json` (mode 0600) there, so later commands
-  redact them too.
+  live files icm reads in `target/icm/sessions/` are the app's own output, unredacted. A session
+  keeps the secret values given with `--env` in a `secrets.json` (mode 0600) there, so later
+  commands redact them too. A desktop app also inherits icm's environment, but icm keeps none of
+  those values in a file: a later command redacts them only when its own environment holds them,
+  so hand a secret the app logs with `--env`.
 - Flows: `tests/flows/*.ice`. A header, a `-----` line, then one instruction per line:
   ```
   viewport: 402x874

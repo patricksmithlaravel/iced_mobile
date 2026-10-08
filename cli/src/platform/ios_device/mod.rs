@@ -997,7 +997,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         as i32;
     // The secret values the app was handed (its `--env`) stay known to
     // later commands that read its console.
-    let _ = process::keep_secrets(&files, &process::handed_secrets(&launch, false));
+    let _ = process::keep_secrets(&files, &process::handed_secrets(&launch));
 
     let app_name = crate::platform::ios_sim::bundle::bundle_name(&config.app.name);
     let ready = wait_ready(

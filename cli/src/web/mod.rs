@@ -490,10 +490,10 @@ fn start_session(
     // A fresh console, and the secret values of the new page's query kept
     // for later commands that read it ([`process::keep_secrets`]).
     let _ = std::fs::remove_file(&files.console);
-    let secrets: Vec<process::Secret> = query
+    let secrets: Vec<String> = query
         .iter()
         .filter(|(key, _)| process::is_secret_name(key))
-        .map(|(_, value)| (value.clone(), 4))
+        .map(|(_, value)| value.clone())
         .collect();
     let _ = process::keep_secrets(&dir, &secrets);
 

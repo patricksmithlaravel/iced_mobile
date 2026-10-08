@@ -509,15 +509,22 @@ fn run_directories_keep_no_secret() {
 /// from another shell after `icm run ios-sim --env API_TOKEN=…`) still
 /// redacts what the app logged: the session keeps the secret values of
 /// the app's `--env` in a 0600 file next to its live files, and every
-/// command of the project reads them.
+/// command of the project reads them. A secret-named variable of the
+/// user's shell that icm only inherits reaches no file under `target/`.
 #[test]
 fn later_commands_without_the_secret_keep_none() {
     use std::os::unix::fs::PermissionsExt;
     let fake = Fake::new();
-    let icm = fake.project.join("target/icm");
+    let target = fake.project.join("target");
+    let icm = target.join("icm");
     let pair = format!("{}={}", secret::NAME, secret::TOKEN);
+    let shell = [(secret::INHERITED_NAME, secret::INHERITED)];
 
-    let run = fake.result("leak", &["run", "ios-sim", "--env", &pair, "--json", "-q"]);
+    let run = fake.result_with(
+        "leak",
+        &["run", "ios-sim", "--env", &pair, "--json", "-q"],
+        &shell,
+    );
     assert_eq!(run["exit"], 0, "{run}");
     let live = icm
         .join("sessions/ios-sim")
@@ -538,7 +545,7 @@ fn later_commands_without_the_secret_keep_none() {
         &["shot", "ios-sim", "--json", "-q"],
         &["stop", "ios-sim", "--json", "-q"],
     ] {
-        let result = fake.result("leak", args);
+        let result = fake.result_with("leak", args, &shell);
         assert_eq!(result["exit"], 0, "{args:?}: {result}");
     }
     let system = icm.join("runs");
@@ -549,6 +556,7 @@ fn later_commands_without_the_secret_keep_none() {
             .iter()
             .all(|form| !last.contains(form.as_str()))
     );
+    secret::assert_inherited_nowhere(&target);
 }
 
 #[test]

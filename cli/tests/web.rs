@@ -528,7 +528,8 @@ fn run_directories_keep_no_secret() {
 /// API_TOKEN=…`) still redacts what the page logged and the URL that
 /// carries it: the session keeps the secret values of the page's query in
 /// a 0600 file next to its live files, and every command of the project
-/// reads them.
+/// reads them. A secret-named variable of the user's shell that icm, its
+/// session host and Chrome only inherit reaches no file under `target/`.
 #[test]
 fn later_commands_without_the_secret_keep_none() {
     use std::os::unix::fs::PermissionsExt;
@@ -538,11 +539,16 @@ fn later_commands_without_the_secret_keep_none() {
     }
     let sandbox = Sandbox::new();
     let pair = format!("API_TOKEN={}", secret::TOKEN);
-    let icm = sandbox.project.path().join("target/icm");
+    let target = sandbox.project.path().join("target");
+    let icm = target.join("icm");
+    let shell = [(secret::INHERITED_NAME, secret::INHERITED)];
 
-    let run = sandbox.result(&[
-        "run", "web", "--port", "0", "--settle", "200ms", "--env", &pair,
-    ]);
+    let run = sandbox.result_with(
+        &[
+            "run", "web", "--port", "0", "--settle", "200ms", "--env", &pair,
+        ],
+        &shell,
+    );
     assert_eq!(run["exit"], 0, "{run}");
     let session = icm.join("sessions/web");
     assert!(secret::holds(&session.join("console.ndjson")));
@@ -557,7 +563,7 @@ fn later_commands_without_the_secret_keep_none() {
     assert!(host_log.contains("api_token=<redacted>"), "{host_log}");
     assert!(!secret::holds(&session.join("session.log")), "{host_log}");
 
-    let logs = sandbox.result(&["logs", "web", "--grep", "signed in"]);
+    let logs = sandbox.result_with(&["logs", "web", "--grep", "signed in"], &shell);
     assert_eq!(logs["exit"], 0, "{logs}");
     assert_eq!(
         logs["records"][0]["msg"], "signed in with <redacted>",
@@ -570,7 +576,7 @@ fn later_commands_without_the_secret_keep_none() {
         &["stop", "web"],
         &["logs", "web"],
     ] {
-        let result = sandbox.result(args);
+        let result = sandbox.result_with(args, &shell);
         assert_eq!(result["exit"], 0, "{args:?}: {result}");
     }
 
@@ -594,6 +600,7 @@ fn later_commands_without_the_secret_keep_none() {
     holders.sort();
     holders.retain(|name| name != "chrome.log");
     assert_eq!(holders, ["console.ndjson", "secrets.json"]);
+    secret::assert_inherited_nowhere(&target);
 }
 
 #[test]

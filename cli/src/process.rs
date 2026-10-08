@@ -1127,82 +1127,80 @@ fn names_a_path(name: &str, value: &str) -> bool {
 
 /// Remembers the secret-named values a command is given.
 fn remember_secrets(cmd: &Cmd) {
-    let given = handed_secrets(cmd, false);
+    let given = handed_secrets(cmd);
     if given.is_empty() {
         return;
     }
     let mut forms = registry();
-    for (value, min) in &given {
-        add_secret(&mut forms, value, *min);
+    for value in &given {
+        add_secret(&mut forms, value, HANDED_MIN);
     }
 }
+
+/// The length a value icm hands to a child under a secret name must have
+/// to count as a secret (one of icm's own environment needs 6 bytes).
+const HANDED_MIN: usize = 4;
 
 /// Remembers a value icm hands to an app some other way than its
 /// environment (the web page's query) as a secret, when its name is a
 /// secret's (at least 4 bytes, as for a child's environment).
 pub fn remember_secret(name: &str, value: &str) {
     if is_secret_name(name) {
-        add_secret(&mut registry(), value, 4);
+        add_secret(&mut registry(), value, HANDED_MIN);
     }
 }
 
-/// A secret value and the length it must have to count (4 bytes for one
-/// icm hands to a child, 6 for one of icm's environment).
-pub type Secret = (String, usize);
-
-/// The secret values a command hands its child: its secret-named
-/// environment changes and, when the child sees icm's environment (a
-/// desktop app inherits it), that environment's secret values.
-pub fn handed_secrets(cmd: &Cmd, inherits: bool) -> Vec<Secret> {
-    let mut values: Vec<Secret> = cmd
-        .env
-        .iter()
-        .filter(|(key, _)| is_secret_name(&key.to_string_lossy()))
-        .filter_map(|(_, value)| value.as_ref())
-        .map(|value| (value.to_string_lossy().into_owned(), 4))
-        .collect();
-    if inherits {
-        let removed = |name: &OsString| cmd.env.iter().any(|(key, _)| key == name);
-        let inherited = std::env::vars_os().filter(|(name, _)| !removed(name));
-        values.extend(
-            environment_secrets(inherited)
-                .into_iter()
-                .map(|value| (value, 6)),
-        );
-    }
-    let mut unique = Vec::new();
-    for value in values {
-        if value.0.len() >= value.1 && !unique.contains(&value) {
-            unique.push(value);
+/// The values a command hands its child explicitly under a secret name:
+/// its secret-named environment changes (an app's `--env`). What the child
+/// inherits from icm's own environment is not among them.
+pub fn handed_secrets(cmd: &Cmd) -> Vec<String> {
+    let mut values: Vec<String> = Vec::new();
+    for (key, value) in &cmd.env {
+        if let Some(value) = value
+            && is_secret_name(&key.to_string_lossy())
+        {
+            let value = value.to_string_lossy().into_owned();
+            if !values.contains(&value) {
+                values.push(value);
+            }
         }
     }
-    unique
+    values
 }
 
 /// The file in a session's directory that keeps the secret values the
 /// session handed its app ([`keep_secrets`]).
 pub const KEPT_SECRETS: &str = "secrets.json";
 
-/// Keeps the secret values a session handed its app (an app's `--env`, the
-/// environment a desktop app inherits, the web page's query:
-/// [`handed_secrets`]) in `<dir>/secrets.json`, mode 0600, next to the
-/// live files the app writes, which hold them as the app logged them. A
-/// later command reads them back ([`load_kept_secrets`]), so `icm logs`,
+/// The format of [`KEPT_SECRETS`]. Version 1, which no release wrote, also
+/// held the values a desktop app inherited from icm's environment; it is
+/// not read.
+const KEPT_VERSION: u64 = 2;
+
+/// Keeps the secret values a session handed its app explicitly (its
+/// secret-named `--env` values, [`handed_secrets`], and the web page's
+/// secret-named query values) in `<dir>/secrets.json`, mode 0600, next to
+/// the live files the app writes, which hold them as the app logged them.
+/// A later command reads them back ([`load_kept_secrets`]), so `icm logs`,
 /// `shot` or `stop` from a shell without the secret still redact what the
-/// app logged. Without a value the file is removed.
-pub fn keep_secrets(dir: &Path, values: &[Secret]) -> io::Result<()> {
+/// app logged. Never a value of icm's own environment that the app only
+/// inherits: those are the user's shell's, often other tools' tokens, and a
+/// later command redacts them only when its own environment holds them.
+/// A value too short to count is not kept, and without a value the file is
+/// removed.
+pub fn keep_secrets(dir: &Path, values: &[String]) -> io::Result<()> {
     let path = dir.join(KEPT_SECRETS);
+    let values: Vec<&String> = values
+        .iter()
+        .filter(|value| value.len() >= HANDED_MIN)
+        .collect();
     if values.is_empty() {
         return match std::fs::remove_file(&path) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
         };
     }
-    let values: Vec<Value> = values
-        .iter()
-        .map(|(value, min)| serde_json::json!({"value": value, "min": min}))
-        .collect();
-    let text = serde_json::json!({"v": 1, "values": values}).to_string();
+    let text = serde_json::json!({"v": KEPT_VERSION, "values": values}).to_string();
     crate::output::rundir::write_private(&path, text.as_bytes())
 }
 
@@ -1210,7 +1208,7 @@ pub fn keep_secrets(dir: &Path, values: &[Secret]) -> io::Result<()> {
 /// ([`keep_secrets`]): `<platform>/secrets.json` and
 /// `<platform>/<run>/secrets.json`. Every command that resolves a project
 /// does, so what it reports and keeps from a session's live files is
-/// redacted whatever its own environment holds.
+/// redacted whatever its own environment holds. It only reads.
 pub fn load_kept_secrets(sessions_dir: &Path) {
     let dirs = |dir: &Path| -> Vec<PathBuf> {
         std::fs::read_dir(dir)
@@ -1231,11 +1229,13 @@ pub fn load_kept_secrets(sessions_dir: &Path) {
             let Ok(kept) = serde_json::from_str::<Value>(&text) else {
                 continue;
             };
+            if kept["v"].as_u64() != Some(KEPT_VERSION) {
+                continue;
+            }
             let mut forms = registry();
-            for item in kept["values"].as_array().into_iter().flatten() {
-                if let Some(value) = item["value"].as_str() {
-                    let min = item["min"].as_u64().map_or(4, |min| min as usize);
-                    add_secret(&mut forms, value, min);
+            for value in kept["values"].as_array().into_iter().flatten() {
+                if let Some(value) = value.as_str() {
+                    add_secret(&mut forms, value, HANDED_MIN);
                 }
             }
         }
@@ -1591,19 +1591,23 @@ mod tests {
         );
     }
 
-    /// A session keeps the secret values it hands its app, mode 0600, and
-    /// a later command that resolves the project learns them.
+    /// A session keeps the secret values it hands its app explicitly, mode
+    /// 0600, and a later command that resolves the project learns them. A
+    /// file of the earlier format, which could hold inherited values, is
+    /// not read.
     #[test]
     fn sessions_keep_the_secrets_they_hand_their_apps() {
         use std::os::unix::fs::PermissionsExt;
         let cmd = sh("true")
             .env("SIMCTL_CHILD_ICM_UNIT_KEPT_TOKEN", "kept-for-later-1")
+            .env("ICM_UNIT_AGAIN_TOKEN", "kept-for-later-1")
             .env("ICM_UNIT_SHORT_KEY", "abc")
-            .env("PLAIN", "visible-value");
-        let handed = handed_secrets(&cmd, false);
-        assert_eq!(handed, [("kept-for-later-1".to_string(), 4)]);
-        let inherited = handed_secrets(&cmd, true);
-        assert_eq!(inherited.first(), handed.first());
+            .env("PLAIN", "visible-value")
+            .env_remove("ICM_UNIT_REMOVED_TOKEN");
+        let handed = handed_secrets(&cmd);
+        assert_eq!(handed, ["kept-for-later-1", "abc"]);
+        // What a child only inherits is not handed.
+        assert!(handed_secrets(&sh("true")).is_empty());
 
         let sessions = tempfile::tempdir().unwrap();
         let live = sessions.path().join("ios-sim").join("run-1");
@@ -1611,9 +1615,19 @@ mod tests {
         let kept = live.join(KEPT_SECRETS);
         let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-        keep_secrets(
-            &sessions.path().join("web"),
-            &[("kept-for-later-2".into(), 4)],
+        // A value too short to count is not kept.
+        assert_eq!(
+            std::fs::read_to_string(&kept).unwrap(),
+            r#"{"v":2,"values":["kept-for-later-1"]}"#
+        );
+        keep_secrets(&sessions.path().join("android"), &["abc".into()]).unwrap();
+        assert!(!sessions.path().join("android").join(KEPT_SECRETS).exists());
+        keep_secrets(&sessions.path().join("web"), &["kept-for-later-2".into()]).unwrap();
+        let old = sessions.path().join("desktop").join("run-0");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            old.join(KEPT_SECRETS),
+            r#"{"v":1,"values":[{"value":"kept-by-version-1","min":6}]}"#,
         )
         .unwrap();
 
@@ -1623,6 +1637,7 @@ mod tests {
             assert!(secret_values().contains(&value.to_string()), "{value}");
             assert_eq!(redact_values(&format!("a {value} b")), "a <redacted> b");
         }
+        assert!(!secret_values().contains(&"kept-by-version-1".to_string()));
 
         keep_secrets(&live, &[]).unwrap();
         assert!(!kept.exists());

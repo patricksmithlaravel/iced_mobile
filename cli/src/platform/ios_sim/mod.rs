@@ -1442,7 +1442,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     let outcome = ctx.step("simctl.launch", &launch)?;
     // The secret values the app was handed (its `--env`) stay known to
     // later commands that read its live files.
-    let _ = process::keep_secrets(&files, &process::handed_secrets(&launch, false));
+    let _ = process::keep_secrets(&files, &process::handed_secrets(&launch));
     if !outcome.success() {
         let text = format!("{}{}", outcome.stdout_text(), outcome.stderr_text());
         session.state = "exited".to_string();

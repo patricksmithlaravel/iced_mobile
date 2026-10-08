@@ -16,6 +16,17 @@ pub const TOKEN: &str = "tok/se\"kr\\it-123456";
 /// holds it holds the secret in some form, however many times escaped.
 pub const TAIL: &str = "it-123456";
 
+/// A secret-named variable of the user's shell that icm inherits (and a
+/// desktop app with it) but that no app logs: another tool's token. No
+/// command may write its value to any file under `target/`.
+pub const INHERITED_NAME: &str = "ICM_TEST_SHELL_TOKEN";
+
+/// Its value, which JSON escapes too.
+pub const INHERITED: &str = "sh/ell\"to\\ken-only-987654";
+
+/// The end of [`INHERITED`], which no escape or encoding changes.
+pub const INHERITED_TAIL: &str = "only-987654";
+
 /// A text inside a JSON string, as serde and JavaScript write it.
 fn escaped(text: &str) -> String {
     let quoted = serde_json::to_string(text).unwrap();
@@ -26,8 +37,13 @@ fn escaped(text: &str) -> String {
 /// as `\/` too), escaped twice (a JSON line in a JSON record),
 /// percent-encoded (a URL's query), and any other that keeps [`TAIL`].
 pub fn forms() -> Vec<String> {
-    let once = escaped(TOKEN);
-    let percent: String = TOKEN
+    forms_of(TOKEN, TAIL)
+}
+
+/// [`forms`] of a value whose end is `tail`.
+fn forms_of(value: &str, tail: &str) -> Vec<String> {
+    let once = escaped(value);
+    let percent: String = value
         .bytes()
         .map(|byte| {
             if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
@@ -38,19 +54,24 @@ pub fn forms() -> Vec<String> {
         })
         .collect();
     vec![
-        TOKEN.to_string(),
+        value.to_string(),
         once.replace('/', "\\/"),
         escaped(&once),
         once,
         percent,
-        TAIL.to_string(),
+        tail.to_string(),
     ]
 }
 
 /// The files under `dir` (recursively) that hold the secret, with the form
 /// each holds.
 pub fn leaks(dir: &Path) -> Vec<(PathBuf, String)> {
-    let forms = forms();
+    leaks_of(dir, &forms())
+}
+
+/// The files under `dir` (recursively) that hold one of `forms`, with the
+/// form each holds.
+fn leaks_of(dir: &Path, forms: &[String]) -> Vec<(PathBuf, String)> {
     let mut found = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -74,10 +95,25 @@ pub fn leaks(dir: &Path) -> Vec<(PathBuf, String)> {
 
 /// Panics, naming the files, when a file under `dir` holds the secret.
 pub fn assert_kept_nowhere(dir: &Path) {
-    let leaks = leaks(dir);
+    assert_none("the secret", &leaks(dir));
+}
+
+/// Panics, naming the files, when a file under `dir` (a project's whole
+/// `target/`) holds [`INHERITED`] in any form: what icm only inherited
+/// from its environment, no command may write.
+pub fn assert_inherited_nowhere(dir: &Path) {
+    assert!(dir.is_dir(), "{} is not a directory", dir.display());
+    let forms = forms_of(INHERITED, INHERITED_TAIL);
+    assert_none(
+        &format!("the inherited {INHERITED_NAME}"),
+        &leaks_of(dir, &forms),
+    );
+}
+
+fn assert_none(what: &str, leaks: &[(PathBuf, String)]) {
     assert!(
         leaks.is_empty(),
-        "the secret is in {}",
+        "{what} is in {}",
         leaks
             .iter()
             .map(|(path, form)| format!("{} (as {form})", path.display()))

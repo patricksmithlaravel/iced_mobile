@@ -448,12 +448,16 @@ fn run_directories_keep_no_secret() {
 /// ios-device` from another shell after `icm run ios-device --env
 /// API_TOKEN=…`) still redacts what the app logged on the console: the
 /// session keeps the secret values of the app's `--env` next to its
-/// console, and every command of the project reads them.
+/// console, and every command of the project reads them. A secret-named
+/// variable of the user's shell that icm only inherits reaches no file
+/// under `target/`.
 #[test]
 fn later_commands_without_the_secret_keep_none() {
     let mut device = Device::new();
     device.set("ICM_FAKE_SCENARIO", "leak");
-    let icm = device.dir().join("target/icm");
+    device.set(secret::INHERITED_NAME, secret::INHERITED);
+    let target = device.dir().join("target");
+    let icm = target.join("icm");
     let pair = format!("{}={}", secret::NAME, secret::TOKEN);
 
     let run = device.json(&["run", "ios-device", "--settle", "0s", "--env", &pair]);
@@ -479,6 +483,7 @@ fn later_commands_without_the_secret_keep_none() {
             .iter()
             .all(|form| !last.contains(form.as_str()))
     );
+    secret::assert_inherited_nowhere(&target);
 }
 
 #[test]
