@@ -578,11 +578,11 @@ fn later_commands_read_inherited_secrets_from_the_running_app() {
 }
 
 /// An app that ends by itself after its run has nobody to read its
-/// environment from: `logs` from a shell without the secret it inherited
-/// cannot redact what it logged after the run, so it reads the run's
-/// redacted copies and warns `desktop.logs.secret_unknown`, and writes the
-/// value nowhere; the live files stay the app's own output. A command
-/// whose environment holds the variable reads and redacts them.
+/// environment from: a later `logs` cannot learn the secret it inherited,
+/// so it cannot redact what the app logged after the run. It reads the
+/// run's redacted copies and warns `desktop.logs.secret_unknown`, and
+/// writes the value nowhere; the live files stay the app's own output. A
+/// shell that sets the variable changes nothing.
 #[test]
 fn an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread() {
     let sandbox = Sandbox::new();
@@ -629,19 +629,99 @@ fn an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread() {
     assert!(!secret::holds(&icm.join("last.json")));
     assert!(secret::holds(&live.join("app.stdout")));
 
-    // Where the variable is set, `logs` reads the live files, all of them,
-    // and redacts them for good.
-    let logs = sandbox.result_with(&["logs", "desktop"], &shell);
-    assert_eq!(logs["exit"], 0, "{logs}");
-    let text = logs.to_string();
-    assert!(!text.contains("desktop.logs.secret_unknown"), "{text}");
-    assert!(text.contains("after the run: <redacted>"), "{text}");
-    secret::assert_kept_nowhere(&target);
-    let logs = sandbox.result(&["logs", "desktop"]);
-    let text = logs.to_string();
-    assert!(!text.contains("desktop.logs.secret_unknown"), "{text}");
-    assert!(text.contains("after the run: <redacted>"), "{text}");
-    secret::assert_kept_nowhere(&target);
+    // A shell that sets the variable, to the same value here, does not
+    // make it known: nothing tells that value from another one
+    // (`another_value_of_the_same_name_does_not_redact_the_inherited_one`),
+    // so `logs` reads the copies and warns all the same.
+    for env in [&shell[..], &[]] {
+        let logs = sandbox.result_with(&["logs", "desktop"], env);
+        assert_eq!(logs["exit"], 0, "{logs}");
+        let text = logs.to_string();
+        assert!(text.contains("desktop.logs.secret_unknown"), "{text}");
+        assert!(text.contains("signed in with <redacted>"), "{text}");
+        assert!(!text.contains("after the run"), "{text}");
+    }
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    secret::assert_kept_nowhere(&icm.join("latest"));
+    assert!(!secret::holds(&icm.join("last.json")));
+}
+
+/// A variable of the same name is not the value the app inherited: after
+/// `ICM_TEST_API_TOKEN=<old> icm run desktop` and an app that ended by
+/// itself, `logs`, `logs --raw` and `stop` from a shell whose variable of
+/// that name holds another value cannot redact what the app logged. They
+/// read the run's redacted copies and warn `desktop.logs.secret_unknown` as
+/// from a shell without the variable, and the session keeps naming it, so a
+/// later `logs` with neither value does the same. No output, result or file
+/// of theirs holds the old value.
+#[test]
+fn another_value_of_the_same_name_does_not_redact_the_inherited_one() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps(Vec::new());
+    let icm = sandbox.project.path().join("target/icm");
+    let old = [(secret::NAME, secret::TOKEN)];
+    let new = [(secret::NAME, "another-value-24680")];
+
+    let run = sandbox.result_with(
+        &[
+            "run",
+            "desktop",
+            "--settle",
+            "200ms",
+            "--env",
+            "ICM_FIXTURE=quit",
+        ],
+        &old,
+    );
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(pid);
+    std::fs::write(sandbox.project.path().join("quit"), "").unwrap();
+    wait_dead(pid);
+    let live = icm
+        .join("sessions/desktop")
+        .join(run["run"].as_str().unwrap());
+    let stdout = std::fs::read_to_string(live.join("app.stdout")).unwrap();
+    assert!(stdout.contains("after the run: "), "{stdout}");
+    let guarded = || {
+        let text = std::fs::read_to_string(live.join("session.json")).unwrap();
+        let session: Value = serde_json::from_str(&text).unwrap();
+        session["inherited_secrets"]
+            .as_array()
+            .is_some_and(|names| names.contains(&Value::from(secret::NAME)))
+    };
+    assert!(guarded());
+
+    let none: [(&str, &str); 0] = [];
+    for (args, env) in [
+        (&["logs", "desktop"][..], &new[..]),
+        (&["logs", "desktop", "--raw"], &new),
+        (&["stop", "desktop"], &new),
+        (&["logs", "desktop"], &none),
+        (&["logs", "desktop", "--raw"], &new),
+        (&["logs", "desktop"], &none),
+    ] {
+        let mut full = args.to_vec();
+        full.push("--json");
+        let output = sandbox.run_with(&full, env);
+        let text = String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {text}");
+        let form = secret::forms()
+            .into_iter()
+            .find(|form| text.contains(form.as_str()));
+        assert_eq!(form, None, "{args:?} printed the old value: {text}");
+        if args[0] == "logs" {
+            assert!(text.contains("desktop.logs.secret_unknown"), "{text}");
+            assert!(text.contains("signed in with <redacted>"), "{text}");
+            assert!(!text.contains("after the run"), "{text}");
+        }
+        assert!(guarded(), "{args:?} forgot the inherited secret");
+    }
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    secret::assert_kept_nowhere(&icm.join("latest"));
+    assert!(!secret::holds(&icm.join("last.json")));
+    assert!(secret::holds(&live.join("app.stdout")));
 }
 
 #[test]

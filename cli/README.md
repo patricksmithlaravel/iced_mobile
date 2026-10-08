@@ -123,7 +123,9 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   `target/` holds it after `logs`, `shot` and `stop` without it;
   `an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread` checks
   the copies and the warning `logs` falls back to for an app that ended by
-  itself.
+  itself, and
+  `another_value_of_the_same_name_does_not_redact_the_inherited_one` that
+  a shell whose variable of that name holds another value changes nothing.
 - `tests/web.rs` drives the web pipeline against real headless Chrome with
   a fake cargo and wasm-bindgen (`ICM_TOOL_CARGO`, `ICM_TOOL_WASM_BINDGEN`)
   whose JavaScript "app" speaks `ICM_EVENT`; it skips without Chrome or the
