@@ -25,7 +25,9 @@
 //! The console in `target/icm/sessions/ios-device/<run>/` is the app's own
 //! output, unredacted. The run directory's `console.log` (which the
 //! evidence names), `app.log`, `logs.ndjson` and devicectl's `install.json`
-//! have the secret values icm knows redacted.
+//! have the secret values icm knows redacted. The session keeps the values
+//! of the app's secret-named `--env` in `secrets.json` next to the console
+//! ([`process::keep_secrets`]) for later commands.
 //!
 //! Nothing here ever touches a simulator: devicectl's simulator entries are
 //! left out of the device list.
@@ -993,6 +995,9 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     )
     .map_err(|error| IcmError::new(CheckId::IosDeviceLaunchFailed, error.to_string()))?
         as i32;
+    // The secret values the app was handed (its `--env`) stay known to
+    // later commands that read its console.
+    let _ = process::keep_secrets(&files, &process::handed_secrets(&launch, false));
 
     let app_name = crate::platform::ios_sim::bundle::bundle_name(&config.app.name);
     let ready = wait_ready(

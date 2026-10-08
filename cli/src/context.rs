@@ -512,6 +512,10 @@ pub fn resolve(
     };
 
     let target_dir = metadata.target_directory.clone();
+    // The secret values this project's sessions handed their apps, which
+    // the apps' live files may hold: redacted from what this command keeps
+    // and reports even when its environment lacks them.
+    process::load_kept_secrets(&target_dir.join("icm").join("sessions"));
     Ok(Project {
         icm_dir: target_dir.join("icm"),
         target_dir,

@@ -90,8 +90,11 @@ New states go into `LifecycleEvent`, which is `#[non_exhaustive]`.
   simulator the project's runs use.
 - Every file a run directory keeps from an app's or a tool's output (log copies, consoles, crash
   reports) redacts secret values on every platform, as stdout does, also where the output escapes
-  them as JSON or percent-encodes them. The live files in `target/icm/sessions/` stay the app's own
-  output.
+  them as JSON (inside a log line too) or percent-encodes them in any URL encoding. A value of a
+  secret-named variable that starts with `/` counts unless it is a path. The live files in
+  `target/icm/sessions/` stay the app's own output; a session keeps the secret values it handed
+  its app in a `secrets.json` (mode 0600) beside them, so `logs`, `shot` and `stop` from a shell
+  without the secret redact it too.
 - Android: readiness and logs count only the app's own processes, the lifecycle suite tells a
   destroyed Activity from a live one after a rotation, and a rotation warns when the app is locked
   to one axis.

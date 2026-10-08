@@ -20,15 +20,32 @@ S="$ICM_FAKE_STATE"
   echo "$*"
   env | grep '^SIMCTL_CHILD_\|^DEVICECTL_CHILD_' | sort | sed 's/^/  env /'
 } >> "$S/xcrun.log"
-# The secret JSON-escaped, and as Apple's `log` writes it; and the app's
-# JSON line `{"token":"<secret>"}` as `log` writes it.
-tok_json=$(printf '%s' "${ICM_TEST_API_TOKEN:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
-tok_log=$(printf '%s' "$tok_json" | sed -e 's/\//\\\//g')
-json_log=$(printf '{"token":"%s"}' "$tok_json" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\//\\\//g')
-# The secret in a URL with lowercase hex (for the characters the tests'
-# secret has), and as JSON with `\u002f` for `/` after a log prefix.
-tok_pct=$(printf '%s' "${ICM_TEST_API_TOKEN:-}" | sed -e 's/%/%25/g' -e 's/\//%2f/g' -e 's/"/%22/g' -e 's/\\/%5c/g')
-tok_u=$(printf '%s' "$tok_json" | sed -e 's/\//\\u002f/g')
+# The secret the "app" logs: what `--env ICM_TEST_API_TOKEN=…` hands it
+# (SIMCTL_CHILD_, DEVICECTL_CHILD_), else icm's own environment's. The
+# launch records it in $S/app.token, as the device keeps what its app
+# logged, so the log collector and a later `log show` (a command run
+# without the secret) find it.
+ICM_TEST_API_TOKEN=${SIMCTL_CHILD_ICM_TEST_API_TOKEN:-${DEVICECTL_CHILD_ICM_TEST_API_TOKEN:-${ICM_TEST_API_TOKEN:-}}}
+# The forms the "app" logs it in.
+tokens() {
+  # JSON-escaped, and as Apple's `log` writes it; and the app's JSON line
+  # `{"token":"<secret>"}` as `log` writes it.
+  tok_json=$(printf '%s' "${ICM_TEST_API_TOKEN:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+  tok_log=$(printf '%s' "$tok_json" | sed -e 's/\//\\\//g')
+  json_log=$(printf '{"token":"%s"}' "$tok_json" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\//\\\//g')
+  # In a URL with lowercase hex (for the characters the tests' secret
+  # has), and as JSON with `\u002f` for `/` after a log prefix.
+  tok_pct=$(printf '%s' "${ICM_TEST_API_TOKEN:-}" | sed -e 's/%/%25/g' -e 's/\//%2f/g' -e 's/"/%22/g' -e 's/\\/%5c/g')
+  tok_u=$(printf '%s' "$tok_json" | sed -e 's/\//\\u002f/g')
+}
+# What the launch recorded, when this command was not given the secret.
+launched_token() {
+  if [ -z "$ICM_TEST_API_TOKEN" ] && [ -f "$S/app.token" ]; then
+    ICM_TEST_API_TOKEN=$(cat "$S/app.token")
+  fi
+  tokens
+}
+tokens
 # One unified-log line of the app; $2 is its message as `log` writes it.
 oslog_line() {
   printf '{"eventType":"logEvent","subsystem":"iced","category":"app","messageType":"Default","processID":%s,"processImagePath":"\\/data\\/Fixture.app\\/fixture-app","timestamp":"%s","eventMessage":"%s"}\n' \
@@ -88,12 +105,20 @@ simctl)
       if [ "$2" = stream ]; then
         echo 'Filtering the log data using "fake"'
         if [ -n "$leak" ]; then
+          # The collector starts before the launch: wait for the app.
+          tries=0
+          while [ -z "$ICM_TEST_API_TOKEN" ] && [ ! -s "$S/app.token" ] && [ "$tries" -lt 50 ]; do
+            sleep 0.1
+            tries=$((tries + 1))
+          done
+          launched_token
           oslog_line 0 "signed in with $tok_log"
           oslog_line 0 "$json_log"
           oslog_line 0 "GET https:\/\/api.example.com\/v1?lower=$tok_pct"
         fi
         exec sleep 20
       elif [ "$2" = show ] && [ -n "$leak" ]; then
+        launched_token
         oslog_line "$(cat "$S/app.pid" 2> /dev/null)" "the system saw $tok_log"
       fi
       ;;
@@ -115,6 +140,7 @@ simctl)
     done
     mkdir -p "$(dirname "$err")"
     : > "$out"
+    printf '%s' "$ICM_TEST_API_TOKEN" > "$S/app.token"
     case "$ICM_FAKE_SCENARIO" in
     panic)
       sleep 1 > /dev/null 2>&1 &

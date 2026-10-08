@@ -444,6 +444,43 @@ fn run_directories_keep_no_secret() {
     );
 }
 
+/// A later command whose environment lacks the secret (`icm logs
+/// ios-device` from another shell after `icm run ios-device --env
+/// API_TOKEN=…`) still redacts what the app logged on the console: the
+/// session keeps the secret values of the app's `--env` next to its
+/// console, and every command of the project reads them.
+#[test]
+fn later_commands_without_the_secret_keep_none() {
+    let mut device = Device::new();
+    device.set("ICM_FAKE_SCENARIO", "leak");
+    let icm = device.dir().join("target/icm");
+    let pair = format!("{}={}", secret::NAME, secret::TOKEN);
+
+    let run = device.json(&["run", "ios-device", "--settle", "0s", "--env", &pair]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let live = icm
+        .join("sessions/ios-device")
+        .join(run["run"].as_str().unwrap());
+    assert!(secret::holds(&live.join("console.log")));
+    assert!(live.join("secrets.json").is_file());
+
+    for args in [
+        &["logs", "ios-device"][..],
+        &["logs", "ios-device", "--raw"],
+        &["stop", "ios-device"],
+    ] {
+        let result = device.json(args);
+        assert_eq!(result["exit"], 0, "{args:?}: {result}");
+    }
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    let last = std::fs::read_to_string(icm.join("last.json")).unwrap();
+    assert!(
+        secret::forms()
+            .iter()
+            .all(|form| !last.contains(form.as_str()))
+    );
+}
+
 #[test]
 fn devices_signing_and_input_failures_name_who_acts() {
     let device = Device::new();

@@ -11,7 +11,10 @@
 //! pruning never removes files the app still writes; the run directory
 //! gets a copy). The live files are the app's own output, unredacted; the
 //! copies, `app.log` and `logs.ndjson` have the secret values icm knows
-//! redacted ([`process::copy_redacted`]). It is ready on `ICM_EVENT
+//! redacted ([`process::copy_redacted`]), and the session keeps the secret
+//! values the app was handed (inherited or `--env`) in `secrets.json` next
+//! to the live files ([`process::keep_secrets`]), so a later command run
+//! without them redacts them too. It is ready on `ICM_EVENT
 //! ready`; an app that sends no events is ready when it is alive after 3 s
 //! and owns a window (`source: "probe"`). A panic, an exit or no first
 //! frame within `--wait-ready` fails the run (exit 10) and stops the app.
@@ -757,6 +760,10 @@ fn launch(
     })?;
     ctx.rep
         .step_end_internal("desktop.launch", true, started.elapsed().as_millis() as u64);
+    // The app inherits icm's environment and gets `--env`: the secret
+    // values among them stay known to later commands that read its live
+    // files.
+    let _ = process::keep_secrets(&files, &process::handed_secrets(&cmd, true));
 
     Ok(Launched {
         pid: pid as i32,

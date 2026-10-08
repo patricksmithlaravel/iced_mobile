@@ -420,6 +420,76 @@ fn run_directories_keep_no_secret() {
     );
 }
 
+/// A later command whose environment lacks the secret (`icm logs` from
+/// another shell after `ICM_TEST_API_TOKEN=… icm run desktop`) still
+/// redacts what the app logged: the session keeps the secret values the
+/// app was handed, the ones it inherits and its `--env`, in a 0600 file
+/// next to its live files, and every command of the project reads them.
+#[test]
+fn later_commands_without_the_secret_keep_none() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    let mut apps = Apps(Vec::new());
+    let icm = sandbox.project.path().join("target/icm");
+    let pair = "ICM_TEST_DB_PASSWORD=given-with-env-99";
+
+    let run = sandbox.result_with(
+        &["run", "desktop", "--settle", "200ms", "--env", pair],
+        &[(secret::NAME, secret::TOKEN)],
+    );
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(pid);
+    let live = icm
+        .join("sessions/desktop")
+        .join(run["run"].as_str().unwrap());
+    assert!(secret::holds(&live.join("app.stdout")));
+    let kept = live.join("secrets.json");
+    let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let text = std::fs::read_to_string(&kept).unwrap();
+    assert!(text.contains("given-with-env-99"), "{text}");
+
+    for args in [
+        &["logs", "desktop"][..],
+        &["logs", "desktop", "--raw"],
+        &["shot", "desktop"],
+        &["stop", "desktop"],
+        &["logs", "desktop"],
+    ] {
+        let result = sandbox.result(args);
+        assert_eq!(result["exit"], 0, "{args:?}: {result}");
+    }
+    wait_dead(pid);
+
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    secret::assert_kept_nowhere(&icm.join("latest"));
+    let last = std::fs::read_to_string(icm.join("last.json")).unwrap();
+    assert!(last.contains("signed in with <redacted>"), "{last}");
+    assert!(
+        secret::forms()
+            .iter()
+            .all(|form| !last.contains(form.as_str()))
+    );
+
+    // The next run, without the secret, removes the old live files with
+    // what they kept.
+    let next = sandbox.result(&["run", "desktop", "--settle", "200ms", "--no-build"]);
+    assert_eq!(next["exit"], 0, "{next}");
+    apps.0.push(next["process"]["pid"].as_i64().unwrap() as i32);
+    assert!(!kept.exists());
+    let again = icm
+        .join("sessions/desktop")
+        .join(next["run"].as_str().unwrap())
+        .join("secrets.json");
+    let text = std::fs::read_to_string(again).unwrap_or_default();
+    assert!(
+        !text.contains("given-with-env-99") && !text.contains(secret::TAIL),
+        "{text}"
+    );
+    assert_eq!(sandbox.result(&["stop", "desktop"])["exit"], 0);
+}
+
 #[test]
 fn dry_runs_print_the_plan() {
     let sandbox = Sandbox::new();

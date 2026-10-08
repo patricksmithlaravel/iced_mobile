@@ -494,7 +494,7 @@ fn redact_bytes(bytes: Vec<u8>, secrets: &[String]) -> Vec<u8> {
 }
 
 /// Replaces each of `secrets` (longest first) in a text, as it is and
-/// percent-encoded in any way ([`replace_encoded`]).
+/// percent-encoded in any way (`replace_encoded`).
 pub fn redact_with(text: &str, secrets: &[String]) -> String {
     redact_forms(text, secrets).unwrap_or_else(|| text.to_string())
 }
@@ -585,7 +585,7 @@ fn hex_byte(pair: &[u8]) -> Option<u8> {
 /// with escapes, in the decoded JSON strings it holds, whatever escapes
 /// their encoder used (an NDJSON record, a line of `log show --style
 /// ndjson`, a JSON document after a log line's prefix): see
-/// [`redact_json_strings`].
+/// `redact_json_strings`.
 pub fn redact_text<'a>(text: &'a str, secrets: &[String]) -> Cow<'a, str> {
     if secrets.is_empty() {
         return Cow::Borrowed(text);
@@ -1020,7 +1020,7 @@ pub fn redact_values(text: &str) -> String {
 
 /// The secret values icm knows, longest first (so a secret containing
 /// another is replaced whole): those of secret-named variables in its own
-/// environment (at least 6 bytes, not a path: [`names_a_path`]), and those it has handed to
+/// environment (at least 6 bytes, not a path: `names_a_path`), and those it has handed to
 /// a child under a secret name (at least 4 bytes). A multi-line value also
 /// counts line by line, since output is read and reported by the line.
 /// Each also counts JSON-escaped, once and twice (a JSON line inside a JSON
@@ -1029,25 +1029,33 @@ pub fn redact_values(text: &str) -> String {
 /// carry it that way, and percent-encoded, as a URL carries it
 /// ([`url_encoded`]).
 pub fn secret_values() -> Vec<String> {
-    secret_registry()
+    registry().clone()
+}
+
+/// Every form of every secret value icm knows, longest first
+/// ([`add_secret`]).
+fn registry() -> std::sync::MutexGuard<'static, Vec<String>> {
+    static SECRETS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    SECRETS
+        .get_or_init(|| {
+            let mut forms = Vec::new();
+            for value in environment_secrets(std::env::vars_os()) {
+                add_secret(&mut forms, &value, 6);
+            }
+            Mutex::new(forms)
+        })
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .clone()
 }
 
-fn secret_registry() -> &'static Mutex<Vec<String>> {
-    static SECRETS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
-    SECRETS.get_or_init(|| Mutex::new(environment_secrets(std::env::vars_os())))
-}
-
-/// The secret values of an environment's secret-named variables, in every
-/// form: at least 6 bytes, and not a path ([`names_a_path`]).
+/// The values of an environment's secret-named variables that count as
+/// secrets: at least 6 bytes, and not a path ([`names_a_path`]).
 fn environment_secrets(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Vec<String> {
     let mut values = Vec::new();
     for (name, value) in vars {
         let (name, value) = (name.to_string_lossy(), value.to_string_lossy());
-        if is_secret_name(&name) && !names_a_path(&name, &value) {
-            add_secret(&mut values, &value, 6);
+        if is_secret_name(&name) && !names_a_path(&name, &value) && value.len() >= 6 {
+            values.push(value.into_owned());
         }
     }
     values
@@ -1090,21 +1098,13 @@ fn names_a_path(name: &str, value: &str) -> bool {
 
 /// Remembers the secret-named values a command is given.
 fn remember_secrets(cmd: &Cmd) {
-    let given: Vec<String> = cmd
-        .env
-        .iter()
-        .filter(|(key, _)| is_secret_name(&key.to_string_lossy()))
-        .filter_map(|(_, value)| value.as_ref())
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect();
+    let given = handed_secrets(cmd, false);
     if given.is_empty() {
         return;
     }
-    let mut values = secret_registry()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    for value in &given {
-        add_secret(&mut values, value, 4);
+    let mut forms = registry();
+    for (value, min) in &given {
+        add_secret(&mut forms, value, *min);
     }
 }
 
@@ -1113,10 +1113,115 @@ fn remember_secrets(cmd: &Cmd) {
 /// secret's (at least 4 bytes, as for a child's environment).
 pub fn remember_secret(name: &str, value: &str) {
     if is_secret_name(name) {
-        let mut values = secret_registry()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        add_secret(&mut values, value, 4);
+        add_secret(&mut registry(), value, 4);
+    }
+}
+
+/// A secret value and the length it must have to count (4 bytes for one
+/// icm hands to a child, 6 for one of icm's environment).
+pub type Secret = (String, usize);
+
+/// The secret values a command hands its child: its secret-named
+/// environment changes and, when the child sees icm's environment (a
+/// desktop app inherits it), that environment's secret values.
+pub fn handed_secrets(cmd: &Cmd, inherits: bool) -> Vec<Secret> {
+    let mut values: Vec<Secret> = cmd
+        .env
+        .iter()
+        .filter(|(key, _)| is_secret_name(&key.to_string_lossy()))
+        .filter_map(|(_, value)| value.as_ref())
+        .map(|value| (value.to_string_lossy().into_owned(), 4))
+        .collect();
+    if inherits {
+        let removed = |name: &OsString| cmd.env.iter().any(|(key, _)| key == name);
+        let inherited = std::env::vars_os().filter(|(name, _)| !removed(name));
+        values.extend(
+            environment_secrets(inherited)
+                .into_iter()
+                .map(|value| (value, 6)),
+        );
+    }
+    let mut unique = Vec::new();
+    for value in values {
+        if value.0.len() >= value.1 && !unique.contains(&value) {
+            unique.push(value);
+        }
+    }
+    unique
+}
+
+/// The file in a session's directory that keeps the secret values the
+/// session handed its app ([`keep_secrets`]).
+pub const KEPT_SECRETS: &str = "secrets.json";
+
+/// Keeps the secret values a session handed its app (an app's `--env`, the
+/// environment a desktop app inherits, the web page's query:
+/// [`handed_secrets`]) in `<dir>/secrets.json`, mode 0600, next to the
+/// live files the app writes, which hold them as the app logged them. A
+/// later command reads them back ([`load_kept_secrets`]), so `icm logs`,
+/// `shot` or `stop` from a shell without the secret still redact what the
+/// app logged. Without a value the file is removed.
+pub fn keep_secrets(dir: &Path, values: &[Secret]) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dir.join(KEPT_SECRETS);
+    if values.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+    }
+    let values: Vec<Value> = values
+        .iter()
+        .map(|(value, min)| serde_json::json!({"value": value, "min": min}))
+        .collect();
+    let text = serde_json::json!({"v": 1, "values": values}).to_string();
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".{KEPT_SECRETS}.tmp-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(text.as_bytes())?;
+    }
+    std::fs::rename(&tmp, &path)
+}
+
+/// Learns the secret values the sessions under `sessions_dir` kept
+/// ([`keep_secrets`]): `<platform>/secrets.json` and
+/// `<platform>/<run>/secrets.json`. Every command that resolves a project
+/// does, so what it reports and keeps from a session's live files is
+/// redacted whatever its own environment holds.
+pub fn load_kept_secrets(sessions_dir: &Path) {
+    let dirs = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|read| {
+                read.flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| entry.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for platform in dirs(sessions_dir) {
+        let runs = dirs(&platform);
+        for dir in std::iter::once(platform).chain(runs) {
+            let Ok(text) = std::fs::read_to_string(dir.join(KEPT_SECRETS)) else {
+                continue;
+            };
+            let Ok(kept) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            let mut forms = registry();
+            for item in kept["values"].as_array().into_iter().flatten() {
+                if let Some(value) = item["value"].as_str() {
+                    let min = item["min"].as_u64().map_or(4, |min| min as usize);
+                    add_secret(&mut forms, value, min);
+                }
+            }
+        }
     }
 }
 
@@ -1463,6 +1568,43 @@ mod tests {
             std::fs::read_to_string(&log).unwrap(),
             "1 I app: <redacted>\n2 I app: fine\n"
         );
+    }
+
+    /// A session keeps the secret values it hands its app, mode 0600, and
+    /// a later command that resolves the project learns them.
+    #[test]
+    fn sessions_keep_the_secrets_they_hand_their_apps() {
+        use std::os::unix::fs::PermissionsExt;
+        let cmd = sh("true")
+            .env("SIMCTL_CHILD_ICM_UNIT_KEPT_TOKEN", "kept-for-later-1")
+            .env("ICM_UNIT_SHORT_KEY", "abc")
+            .env("PLAIN", "visible-value");
+        let handed = handed_secrets(&cmd, false);
+        assert_eq!(handed, [("kept-for-later-1".to_string(), 4)]);
+        let inherited = handed_secrets(&cmd, true);
+        assert_eq!(inherited.first(), handed.first());
+
+        let sessions = tempfile::tempdir().unwrap();
+        let live = sessions.path().join("ios-sim").join("run-1");
+        keep_secrets(&live, &handed).unwrap();
+        let kept = live.join(KEPT_SECRETS);
+        let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        keep_secrets(
+            &sessions.path().join("web"),
+            &[("kept-for-later-2".into(), 4)],
+        )
+        .unwrap();
+
+        assert!(!secret_values().contains(&"kept-for-later-1".to_string()));
+        load_kept_secrets(sessions.path());
+        for value in ["kept-for-later-1", "kept-for-later-2"] {
+            assert!(secret_values().contains(&value.to_string()), "{value}");
+            assert_eq!(redact_values(&format!("a {value} b")), "a <redacted> b");
+        }
+
+        keep_secrets(&live, &[]).unwrap();
+        assert!(!kept.exists());
     }
 
     #[test]

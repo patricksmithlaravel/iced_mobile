@@ -523,6 +523,60 @@ fn run_directories_keep_no_secret() {
     );
 }
 
+/// A later command whose environment lacks the secret (`icm logs web`,
+/// `shot`, `stop` from another shell after `icm run web --env
+/// API_TOKEN=…`) still redacts what the page logged and the URL that
+/// carries it: the session keeps the secret values of the page's query in
+/// a 0600 file next to its live files, and every command of the project
+/// reads them.
+#[test]
+fn later_commands_without_the_secret_keep_none() {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(reason) = skip_reason() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let pair = format!("API_TOKEN={}", secret::TOKEN);
+    let icm = sandbox.project.path().join("target/icm");
+
+    let run = sandbox.result(&[
+        "run", "web", "--port", "0", "--settle", "200ms", "--env", &pair,
+    ]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert!(secret::holds(&icm.join("sessions/web/console.ndjson")));
+    let kept = icm.join("sessions/web/secrets.json");
+    let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    let logs = sandbox.result(&["logs", "web", "--grep", "signed in"]);
+    assert_eq!(logs["exit"], 0, "{logs}");
+    assert_eq!(
+        logs["records"][0]["msg"], "signed in with <redacted>",
+        "{logs}"
+    );
+    for args in [
+        &["logs", "web", "--raw"][..],
+        &["shot", "web"],
+        &["ps"],
+        &["stop", "web"],
+        &["logs", "web"],
+    ] {
+        let result = sandbox.result(args);
+        assert_eq!(result["exit"], 0, "{args:?}: {result}");
+    }
+
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    secret::assert_kept_nowhere(&icm.join("latest"));
+    let last = std::fs::read_to_string(icm.join("last.json")).unwrap();
+    assert!(
+        secret::forms()
+            .iter()
+            .all(|form| !last.contains(form.as_str())),
+        "{last}"
+    );
+}
+
 #[test]
 fn web_commands_without_a_session() {
     let sandbox = Sandbox::new();

@@ -505,6 +505,52 @@ fn run_directories_keep_no_secret() {
     );
 }
 
+/// A later command whose environment lacks the secret (`icm logs ios-sim`
+/// from another shell after `icm run ios-sim --env API_TOKEN=…`) still
+/// redacts what the app logged: the session keeps the secret values of
+/// the app's `--env` in a 0600 file next to its live files, and every
+/// command of the project reads them.
+#[test]
+fn later_commands_without_the_secret_keep_none() {
+    use std::os::unix::fs::PermissionsExt;
+    let fake = Fake::new();
+    let icm = fake.project.join("target/icm");
+    let pair = format!("{}={}", secret::NAME, secret::TOKEN);
+
+    let run = fake.result("leak", &["run", "ios-sim", "--env", &pair, "--json", "-q"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let live = icm
+        .join("sessions/ios-sim")
+        .join(run["run"].as_str().unwrap());
+    for file in ["app.stdout", "app.stderr", "oslog.ndjson"] {
+        assert!(secret::holds(&live.join(file)), "{file}");
+    }
+    let mode = std::fs::metadata(live.join("secrets.json"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    for args in [
+        &["logs", "ios-sim", "--json", "-q"][..],
+        &["logs", "ios-sim", "--source", "all", "--json", "-q"],
+        &["logs", "ios-sim", "--raw", "--json", "-q"],
+        &["shot", "ios-sim", "--json", "-q"],
+        &["stop", "ios-sim", "--json", "-q"],
+    ] {
+        let result = fake.result("leak", args);
+        assert_eq!(result["exit"], 0, "{args:?}: {result}");
+    }
+    let system = icm.join("runs");
+    secret::assert_kept_nowhere(&system);
+    let last = std::fs::read_to_string(icm.join("last.json")).unwrap();
+    assert!(
+        secret::forms()
+            .iter()
+            .all(|form| !last.contains(form.as_str()))
+    );
+}
+
 #[test]
 fn without_events_the_probe_decides() {
     let fake = Fake::new();

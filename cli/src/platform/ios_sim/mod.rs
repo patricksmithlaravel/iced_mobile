@@ -31,7 +31,10 @@
 //! `log`'s own output, unredacted. What a command keeps in its run
 //! directory (their copies, `app.log`, `logs.ndjson`, `system.ndjson`, the
 //! crash reports) has the secret values icm knows redacted
-//! ([`process::write_redacted`], [`process::copy_redacted`]).
+//! ([`process::write_redacted`], [`process::copy_redacted`]). The session
+//! keeps the values of the app's secret-named `--env` in `secrets.json`
+//! there ([`process::keep_secrets`]), so a later command run without them
+//! redacts them too.
 
 pub mod bundle;
 pub mod image;
@@ -1437,6 +1440,9 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     session.launch_unix_ms = now_ms();
     let launched_at = Instant::now();
     let outcome = ctx.step("simctl.launch", &launch)?;
+    // The secret values the app was handed (its `--env`) stay known to
+    // later commands that read its live files.
+    let _ = process::keep_secrets(&files, &process::handed_secrets(&launch, false));
     if !outcome.success() {
         let text = format!("{}{}", outcome.stdout_text(), outcome.stderr_text());
         session.state = "exited".to_string();

@@ -35,7 +35,9 @@
 //! console's copy, `logs.ndjson`, `app.log`; the serve check's console and
 //! Chrome log, [`smoke`]) has the secret values icm knows redacted, and a
 //! secret-named `--env` value, which reaches the page in its URL, is one of
-//! them.
+//! them. The session keeps those values in `secrets.json` there
+//! ([`process::keep_secrets`]), so a later command run without them
+//! redacts them too.
 
 pub mod cdp;
 pub mod client;
@@ -483,6 +485,15 @@ fn start_session(
     let files = host::Files::new(&dir);
     let _ = std::fs::remove_file(&files.startup);
     let _ = std::fs::write(&files.host_log, b"");
+    // A fresh console, and the secret values of the new page's query kept
+    // for later commands that read it ([`process::keep_secrets`]).
+    let _ = std::fs::remove_file(&files.console);
+    let secrets: Vec<process::Secret> = query
+        .iter()
+        .filter(|(key, _)| process::is_secret_name(key))
+        .map(|(_, value)| (value.clone(), 4))
+        .collect();
+    let _ = process::keep_secrets(&dir, &secrets);
 
     let request = host::Request {
         project_dir: project.dir().to_path_buf(),
