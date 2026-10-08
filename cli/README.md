@@ -60,7 +60,7 @@ cargo test
 | `signatures.rs` | known failure signatures (design §13.4) → `likely_causes`; `signatures::annotate(error, text, &Facts)` |
 | `hooks.rs` | project hooks, `[checks] <platform>` scripts; every platform's `run` calls `hooks::run_for` once the app is up |
 | `version.rs`, `buildinfo.rs`, `gitinfo.rs` | version ordering, what the build embedded, the default framework pin |
-| `release/` | `release`, `verify`, `upload-commands`, `ledger`, `diagnose`: the core every target shares (`mod.rs`: preconditions, owner items, the `Pipeline` contract), `gates.rs` (`--sign none` and owner items), `dist.rs` and `manifest.rs` (`target/icm/dist/`, `artifacts.json`), `compile.rs` (release profiles by `--config`, `target/icm/release-target`, deployment-target stamps), `notices.rs` (THIRD_PARTY_NOTICES from `cargo metadata`, Fira Sans's OFL, the `release.notices` gate), `upload.rs` (`UPLOAD.md`, `upload.sh`), `owner_plans.rs` (the only file with upload or notarize argv), `ledger.rs`, `verify.rs`; one pipeline per target (`ios.rs` builds and gates the App Store `.ipa`, `android.rs` the Google Play `.aab`, `web.rs` the static site, and `macos.rs`, `windows.rs`, `linux.rs` the desktop installers below) and `fake.rs`, the stand-in pipeline of `icm __test release` |
+| `release/` | `release`, `verify`, `upload-commands`, `ledger`, `diagnose`: the core every target shares (`mod.rs`: preconditions, owner items, the `Pipeline` contract), `gates.rs` (`--sign none` and owner items), `dist.rs` and `manifest.rs` (`target/icm/dist/`, `artifacts.json`), `compile.rs` (release profiles by `--config`, `target/icm/release-target`, deployment-target stamps), `notices.rs` (THIRD_PARTY_NOTICES from `cargo metadata`, Fira Sans's OFL, the `release.notices` gate), `secrets.rs` (the `release.secret_in_artifacts` gate: no value of a secret-named variable in what ships), `upload.rs` (`UPLOAD.md`, `upload.sh`), `owner_plans.rs` (the only file with upload or notarize argv), `ledger.rs`, `verify.rs`; one pipeline per target (`ios.rs` builds and gates the App Store `.ipa`, `android.rs` the Google Play `.aab`, `web.rs` the static site, and `macos.rs`, `windows.rs`, `linux.rs` the desktop installers below) and `fake.rs`, the stand-in pipeline of `icm __test release` |
 | `ios/` | iOS device builds, shared by `icm release ios` (`release/ios.rs`) and `ios-device`: the device bundle and its gates (`bundle.rs`), `DT*` keys (`dt.rs`), identities (`identity.rs`), provisioning profiles (`profile.rs`), entitlements, codesign with the keychain watchdog, Mach-O symbols and UUIDs (`macho.rs`), the privacy scan, the dSYM gates, the `.ipa` (`ipa.rs`), an XML plist reader and SHA-1 |
 | `pinned.rs` | the tools icm downloads itself (`tools.toml`, embedded: version, URL, size, sha256 per host): find, install with `--yes` (curl, sha256 check, unpack), doctor's WARN and `--fix --yes` |
 | `policy.rs` | the dated store policy table (`policy/stores.toml`, embedded): the floor in force on a day, `env.policy_stale`, upcoming floors; `icm print policy` |
@@ -109,7 +109,9 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   `the_serve_check_keeps_no_secret`) puts a token in icm's environment
   that the app logs in every way an app can, then searches every file of
   the run directories for it raw, JSON-escaped and percent-encoded
-  (`tests/support/secret.rs`, included with `#[path]`).
+  (`tests/support/secret.rs`, included with `#[path]`). Each
+  `later_commands_without_the_secret_keep_none` hands the token to the app
+  in `run` and runs `logs`, `shot` and `stop` without it.
 - `tests/web.rs` drives the web pipeline against real headless Chrome with
   a fake cargo and wasm-bindgen (`ICM_TOOL_CARGO`, `ICM_TOOL_WASM_BINDGEN`)
   whose JavaScript "app" speaks `ICM_EVENT`; it skips without Chrome or the
