@@ -197,9 +197,13 @@ stop only the platforms they drive and leave the other platforms' devices alone
   (a session, an emulator, a log collector) also holds `procid::of(pid)`, read right after the start,
   and anything that signals the pid, or decides about a device because the process still runs,
   checks it again with `procid::check` (or a helper over it: `sessions::alive`, `Session::is_ours`,
-  `android::session::process`). A record without an identity proves nothing: never signal its pid,
-  and never take a live process under it for the one icm started. `kill(pid, 0)` is for a child
-  the same command spawned.
+  `android::session::process`). New records always carry an identity, and new code treats a record
+  without one as proving nothing: it never signals its pid and never takes a live process under it
+  for the one icm started. The only pid-based tests left are the legacy ones for records written
+  before identities (the web host's command-line marker, the generic write-time test, the desktop
+  executable test and the ios-sim collector's command line); `docs/icm/DESIGN.md` lists them under
+  "Process identity". They go once those records are no longer supported, so do not copy them into
+  new code. `kill(pid, 0)` is for a child the same command spawned.
 - **Commit messages:** `area: imperative summary`, with comma-separated areas when a commit spans
   several (`icm`, `iced`, `winit`, `examples/app`, `docs`, `workspace`, `graphics`, ...). The body
   says why the change is needed and what it changes, and ends with what was verified (the commands
