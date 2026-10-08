@@ -188,6 +188,27 @@ impl Session {
     pub fn emulator_process(&self) -> Process {
         process(self.emulator_pid, self.emulator_identity.as_ref())
     }
+
+    /// The emulator icm booted that this session runs on, as its record:
+    /// `None` for a session on a device icm did not boot.
+    pub fn booted(&self) -> Option<Booted> {
+        self.booted_by_icm.then(|| Booted {
+            serial: self.serial.clone(),
+            avd: self.avd.clone().unwrap_or_default(),
+            emulator_pid: self.emulator_pid,
+            emulator_identity: self.emulator_identity.clone(),
+            emulator_log: self.emulator_log.clone(),
+        })
+    }
+
+    /// Records that the session runs on `booted`, an emulator icm booted,
+    /// with the process and the identity to check it by.
+    pub fn run_on(&mut self, booted: &Booted) {
+        self.booted_by_icm = true;
+        self.emulator_pid = booted.emulator_pid;
+        self.emulator_identity = booted.emulator_identity.clone();
+        self.emulator_log = booted.emulator_log.clone();
+    }
 }
 
 /// An emulator icm booted for this project:
@@ -211,6 +232,18 @@ pub struct Booted {
 }
 
 impl Booted {
+    /// The record of the emulator icm has just started, with the identity
+    /// of its process read right after it started.
+    pub fn of(booting: &super::avd::Booting) -> Booted {
+        Booted {
+            serial: booting.serial.clone(),
+            avd: booting.avd.clone(),
+            emulator_pid: Some(booting.pid),
+            emulator_identity: booting.identity.clone(),
+            emulator_log: Some(booting.log.clone()),
+        }
+    }
+
     /// What the emulator process this record names is now.
     pub fn process(&self) -> Process {
         process(self.emulator_pid, self.emulator_identity.as_ref())
@@ -260,6 +293,7 @@ pub fn remove_booted(project: &Project, serial: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn owner_tags_fit_a_property_and_tell_projects_apart() {
@@ -328,6 +362,58 @@ mod tests {
         .unwrap();
         assert!(!older.verified());
         assert_eq!(older.process(), Process::Unverified);
+    }
+
+    /// The identity icm reads when it starts an emulator is carried into
+    /// the per-serial record and the session, and out of a session again
+    /// when a rerun carries the record forward: without it a record is
+    /// unverifiable.
+    #[test]
+    fn the_emulators_identity_is_carried_from_the_boot_to_the_next_run() {
+        let me = std::process::id();
+        let booting = super::super::avd::Booting {
+            avd: "icm-api36".to_string(),
+            serial: "emulator-5580".to_string(),
+            port: 5580,
+            pid: me,
+            identity: procid::of(me as i32),
+            log: PathBuf::from("/runs/r1/emulator.log"),
+        };
+        assert!(booting.identity.is_some());
+
+        let booted = Booted::of(&booting);
+        assert_eq!(booted.serial, "emulator-5580");
+        assert_eq!(booted.avd, "icm-api36");
+        assert_eq!(booted.emulator_pid, Some(me));
+        assert_eq!(booted.emulator_identity, booting.identity);
+        assert_eq!(
+            booted.emulator_log.as_deref(),
+            Some(Path::new("/runs/r1/emulator.log"))
+        );
+        assert!(booted.verified());
+
+        let mut session = Session {
+            schema: SCHEMA.to_string(),
+            serial: booted.serial.clone(),
+            avd: Some(booted.avd.clone()),
+            ..Session::default()
+        };
+        assert_eq!(session.booted(), None, "a device icm did not boot");
+        session.run_on(&booted);
+        assert!(session.booted_by_icm);
+        assert_eq!(session.emulator_pid, Some(me));
+        assert_eq!(session.emulator_identity, booting.identity);
+        assert_eq!(session.emulator_log, booted.emulator_log);
+        assert!(matches!(
+            session.emulator_process(),
+            Process::Verified { .. }
+        ));
+
+        // What the next run reads back from the session file.
+        let text = serde_json::to_string(&session).unwrap();
+        let read: Session = serde_json::from_str(&text).unwrap();
+        assert_eq!(read.booted().as_ref(), Some(&booted));
+        assert!(read.booted().unwrap().verified());
     }
 
     #[test]

@@ -316,19 +316,11 @@ pub(crate) fn launch_app(ctx: &mut Ctx, args: &RunArgs) -> Result<Launched> {
         .progress(format!("device: {} ({})", chosen.serial, chosen.reason));
     // An emulator an earlier run booted is still icm's to shut down: a
     // rerun on it must not forget that.
-    let booted_earlier = match &chosen.booting {
+    let booted = match &chosen.booting {
         Some(booting) => {
-            session::write_booted(
-                &project,
-                &session::Booted {
-                    serial: booting.serial.clone(),
-                    avd: booting.avd.clone(),
-                    emulator_pid: Some(booting.pid),
-                    emulator_identity: booting.identity.clone(),
-                    emulator_log: Some(booting.log.clone()),
-                },
-            );
-            None
+            let booted = session::Booted::of(booting);
+            session::write_booted(&project, &booted);
+            Some(booted)
         }
         None => {
             // The record, else (files from before it) the last session's.
@@ -337,15 +329,7 @@ pub(crate) fn launch_app(ctx: &mut Ctx, args: &RunArgs) -> Result<Launched> {
             // another process has taken, or that has no identity to
             // check, is no proof that the emulator on this serial is
             // this project's, and a rerun must not claim another's.
-            let previous = session::read(&project)
-                .filter(|previous| previous.booted_by_icm)
-                .map(|previous| session::Booted {
-                    serial: previous.serial,
-                    avd: previous.avd.unwrap_or_default(),
-                    emulator_pid: previous.emulator_pid,
-                    emulator_identity: previous.emulator_identity,
-                    emulator_log: previous.emulator_log,
-                });
+            let previous = session::read(&project).and_then(|previous| previous.booted());
             session::booted(&project)
                 .into_iter()
                 .chain(previous)
@@ -364,31 +348,14 @@ pub(crate) fn launch_app(ctx: &mut Ctx, args: &RunArgs) -> Result<Launched> {
         serial: chosen.serial.clone(),
         kind: chosen.kind().to_string(),
         avd: chosen.avd.clone(),
-        booted_by_icm: chosen.booting.is_some() || booted_earlier.is_some(),
-        emulator_pid: chosen
-            .booting
-            .as_ref()
-            .map(|b| b.pid)
-            .or_else(|| booted_earlier.as_ref().and_then(|p| p.emulator_pid)),
-        emulator_identity: chosen
-            .booting
-            .as_ref()
-            .map(|b| b.identity.clone())
-            .unwrap_or_else(|| {
-                booted_earlier
-                    .as_ref()
-                    .and_then(|p| p.emulator_identity.clone())
-            }),
-        emulator_log: chosen
-            .booting
-            .as_ref()
-            .map(|b| b.log.clone())
-            .or_else(|| booted_earlier.as_ref().and_then(|p| p.emulator_log.clone())),
         abi: chosen.abi.as_str().to_string(),
         app_id: app_id.clone(),
         started: crate::time::Utc::now().rfc3339(),
         ..Session::default()
     };
+    if let Some(booted) = &booted {
+        session.run_on(booted);
+    }
     if let Some(booting) = &chosen.booting {
         // Recorded now, so `icm stop android --shutdown` finds the emulator
         // even when the build fails.

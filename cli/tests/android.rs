@@ -458,6 +458,49 @@ impl Emulator {
     fn identity(&self) -> Value {
         serde_json::to_value(icm::procid::of(self.0 as i32).unwrap()).unwrap()
     }
+
+    /// Ends the process and waits until it is gone.
+    fn end(&self) {
+        // SAFETY: kill(2) on a process this test started.
+        unsafe {
+            let _ = libc::kill(self.0 as i32, libc::SIGKILL);
+        }
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.running() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!self.running());
+    }
+}
+
+/// The emulator a fake `emulator` script started, whose pid it wrote to the
+/// file: killed when dropped, whatever the test did.
+struct Started(PathBuf);
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        if let Some(pid) = std::fs::read_to_string(&self.0)
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok())
+        {
+            // SAFETY: kill(2) on the process a script of this test started.
+            unsafe {
+                let _ = libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// An even console port in the range host.toml accepts whose adb port, the
+/// next one, is free too.
+fn free_console_port() -> u16 {
+    (5554..=5682)
+        .step_by(2)
+        .find(|port| {
+            std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok()
+                && std::net::TcpListener::bind(("127.0.0.1", *port + 1)).is_ok()
+        })
+        .expect("every console port is busy")
 }
 
 impl Drop for Emulator {
@@ -828,6 +871,162 @@ fn an_older_session_on_an_unmarked_emulator_needs_a_managed_avd() {
         "{events:?}"
     );
     assert!(process.running());
+}
+
+/// `run` on an emulator that is already up carries an earlier booted record
+/// forward, and so claims the emulator with `debug.icm.booted_by`, only when
+/// the record's process verifies: a pid an older icm recorded without an
+/// identity, one another process has taken and one that has exited are not
+/// the emulator icm booted, and a rerun must not claim another project's
+/// (or somebody's) emulator on their account. The run stops at the NDK check
+/// after that decision, so the per-serial record is what shows it.
+#[test]
+fn a_rerun_carries_an_earlier_booted_record_forward_only_when_it_verifies() {
+    for case in [
+        "a verified process",
+        "a session an older icm wrote",
+        "another process's identity",
+        "an exited process",
+    ] {
+        let sandbox = Sandbox::new();
+        let process = Emulator::start();
+        let identity = process.identity();
+        let fields = match case {
+            "a verified process" => {
+                serde_json::json!({"emulator_pid": process.0, "emulator_identity": identity})
+            }
+            "a session an older icm wrote" => serde_json::json!({"emulator_pid": process.0}),
+            "another process's identity" => {
+                serde_json::json!({"emulator_pid": process.0, "emulator_identity": another_identity()})
+            }
+            _ => {
+                process.end();
+                serde_json::json!({"emulator_pid": process.0, "emulator_identity": identity})
+            }
+        };
+        sandbox.write_session(fields);
+
+        let result = sandbox.result(&["run", "android"]);
+        // The fake SDK has no NDK: an environment failure, after the device
+        // was chosen and the earlier emulator carried forward (or not).
+        assert_eq!(result["exit"], 4, "{case}: {result}");
+        assert!(
+            result["errors"][0]["id"]
+                .as_str()
+                .unwrap()
+                .starts_with("env."),
+            "{case}: {result}"
+        );
+        let record = sandbox.sessions().join("android-booted/emulator-5580.json");
+        if case == "a verified process" {
+            let written: Value =
+                serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+            assert_eq!(written["serial"], "emulator-5580", "{case}");
+            assert_eq!(written["avd"], "icm-api36", "{case}");
+            assert_eq!(written["emulator_pid"], process.0, "{case}");
+            // The start time is the identity; the program may differ, as
+            // the stand-in's shell becomes `sleep` after it is read.
+            assert_eq!(
+                written["emulator_identity"]["start"], identity["start"],
+                "{case}: the identity was dropped"
+            );
+        } else {
+            assert!(!record.exists(), "{case}: an emulator was claimed");
+        }
+    }
+}
+
+/// An emulator icm boots is recorded, in the session and in the per-serial
+/// record, with the identity of its process: everything later compares the
+/// pid with it, and a record without one proves nothing (a rerun would not
+/// carry it forward, `stop` could never signal it). The run stops at the NDK
+/// check, after the boot has been recorded.
+#[test]
+fn a_boot_records_the_emulators_identity() {
+    let sandbox = Sandbox::new();
+    // No device is online, so the named AVD is booted.
+    std::fs::write(sandbox.root.path().join("killed"), "").unwrap();
+    let avd_home = sandbox.root.path().join("sdk/avd");
+    std::fs::create_dir_all(avd_home.join("icm-test-api36.avd")).unwrap();
+    std::fs::write(
+        avd_home.join("icm-test-api36.ini"),
+        format!(
+            "path={}\ntarget=android-36\n",
+            avd_home.join("icm-test-api36.avd").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        avd_home.join("icm-test-api36.avd/config.ini"),
+        "abi.type=arm64-v8a\n",
+    )
+    .unwrap();
+    // An emulator that is a long `sleep` (its launcher execs it, as the real
+    // one does qemu), on a console port nothing uses.
+    let pidfile = sandbox.root.path().join("emulator-started");
+    let emulator = sandbox.root.path().join("sdk/emulator/emulator");
+    std::fs::create_dir_all(emulator.parent().unwrap()).unwrap();
+    std::fs::write(
+        &emulator,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 120\n",
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&emulator, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _guard = Started(pidfile.clone());
+    let port = free_console_port();
+    std::fs::write(
+        sandbox.root.path().join("host.toml"),
+        format!(
+            "android_sdk = \"{}\"\n[android]\nemulator_ports = [{port}]\n",
+            sandbox.root.path().join("sdk").display()
+        ),
+    )
+    .unwrap();
+
+    let result = sandbox.result(&["run", "android", "--avd", "icm-test-api36"]);
+    assert_eq!(result["exit"], 4, "{result}");
+    assert!(
+        result["errors"][0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("env."),
+        "{result}"
+    );
+    let serial = format!("emulator-{port}");
+    let pid: u32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let identity = serde_json::to_value(icm::procid::of(pid as i32).unwrap()).unwrap();
+
+    let session: Value = serde_json::from_str(
+        &std::fs::read_to_string(sandbox.sessions().join("android.json")).unwrap(),
+    )
+    .unwrap();
+    let booted: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            sandbox
+                .sessions()
+                .join(format!("android-booted/{serial}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for (what, record) in [("the session", &session), ("the booted record", &booted)] {
+        assert_eq!(record["serial"], serial.as_str(), "{what}");
+        assert_eq!(record["emulator_pid"], pid, "{what}");
+        // The start time is the identity; the program may differ (the
+        // launcher's shell becomes `sleep` after it is read).
+        assert_eq!(
+            record["emulator_identity"]["start"], identity["start"],
+            "{what} has no identity of the emulator's process"
+        );
+    }
+    assert_eq!(session["booted_by_icm"], true);
 }
 
 #[test]

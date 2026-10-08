@@ -630,6 +630,74 @@ mod tests {
         let _ = unrecorded.wait();
     }
 
+    /// A context whose output goes nowhere.
+    fn quiet_ctx() -> Ctx {
+        let rep = crate::output::Reporter::with_writers(
+            crate::output::Mode {
+                json: true,
+                ..crate::output::Mode::default()
+            },
+            crate::output::RunInfo {
+                run: "20261007T000000Z-run-android-0000".into(),
+                command: "run".into(),
+                target: Some("android".into()),
+                argv: vec![],
+                save: false,
+            },
+            Box::new(std::io::sink()),
+            Box::new(std::io::sink()),
+        );
+        Ctx::new(crate::cli::GlobalArgs::default(), rep, vec![])
+    }
+
+    /// The emulator icm starts is recorded with its identity, which is what
+    /// every later check of its pid compares against: without it a record
+    /// is unverifiable, `run` would never carry it forward and `stop` could
+    /// never signal it.
+    #[test]
+    fn a_started_emulator_carries_the_identity_stop_checks() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // An emulator that is a long `sleep`; its launcher execs it, as the
+        // real one execs qemu, so the pid is the same throughout.
+        let emulator = dir.path().join("emulator/emulator");
+        std::fs::create_dir_all(emulator.parent().unwrap()).unwrap();
+        std::fs::write(&emulator, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&emulator, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = crate::host::HostConfig {
+            android_sdk: Some(dir.path().display().to_string()),
+            ..Default::default()
+        };
+        let tools = Toolset::discover(&host, &Env::from_pairs(&[], Some(dir.path()))).unwrap();
+
+        let booting = start(
+            &quiet_ctx(),
+            &tools,
+            "icm-test-api36",
+            5580,
+            &StartOptions::default(),
+            &dir.path().join("emulator.log"),
+        )
+        .unwrap();
+        let pid = i32::try_from(booting.pid).unwrap();
+        let identity = booting.identity.clone();
+        let verdict = identity
+            .as_ref()
+            .map(|identity| crate::procid::check(pid, identity));
+        // SAFETY: kill(2) and waitpid(2) on the process this test started
+        // (a child, so it is reaped).
+        unsafe {
+            let _ = libc::kill(pid, libc::SIGKILL);
+            let mut status = 0;
+            let _ = libc::waitpid(pid, &mut status, 0);
+        }
+        assert_eq!(booting.serial, "emulator-5580");
+        assert!(identity.is_some(), "the identity was not read");
+        assert_eq!(verdict, Some(Verdict::Same));
+        // The process has ended now, and the identity says so.
+        assert_eq!(crate::procid::check(pid, &identity.unwrap()), Verdict::Gone);
+    }
+
     #[test]
     fn headless_by_default() {
         let args = start_args("icm-api36", 5580, &StartOptions::default());
