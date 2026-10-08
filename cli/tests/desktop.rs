@@ -364,8 +364,10 @@ fn panics_exits_and_hangs_fail_with_exit_ten() {
 /// a panic, is `<redacted>` in the copies of its stdout and stderr, in
 /// `app.log` and `logs.ndjson`, the step logs, events and results, raw or
 /// escaped. The live files in `target/icm/sessions` are the app's own
-/// output and keep it, and they are the only files under `target/` that
-/// do: icm writes no inherited value anywhere, `secrets.json` included.
+/// output and keep it while the app runs; once it has ended (stopped, or
+/// failed its run) they are redacted too, and no file under `target/`
+/// holds it: icm writes no inherited value anywhere, `secrets.json`
+/// included.
 #[test]
 fn run_directories_keep_no_secret() {
     let sandbox = Sandbox::new();
@@ -422,16 +424,8 @@ fn run_directories_keep_no_secret() {
     let live = icm
         .join("sessions/desktop")
         .join(leaked["run"].as_str().unwrap());
-    let holders: Vec<PathBuf> = secret::leaks(&sandbox.project.path().join("target"))
-        .into_iter()
-        .map(|(path, _)| path)
-        .collect();
-    assert!(
-        holders
-            .iter()
-            .all(|path| *path == live.join("app.stdout") || *path == live.join("app.stderr")),
-        "{holders:?}"
-    );
+    assert!(live.join("app.stderr").is_file());
+    secret::assert_kept_nowhere(&sandbox.project.path().join("target"));
 }
 
 /// A later command whose environment lacks the secret (`icm logs` from
@@ -518,6 +512,136 @@ fn later_commands_without_the_secret_keep_none() {
         assert_eq!(result["exit"], 0, "{args:?}: {result}");
     }
     secret::assert_inherited_nowhere(&target);
+}
+
+/// `ICM_TEST_API_TOKEN=… icm run desktop`, then `logs`, `logs --raw`,
+/// `shot` and `stop` from a shell without the variable: the app only
+/// inherited the secret, so the session names the variable and keeps no
+/// value, and each later command reads the value from the running app's
+/// environment, in memory. Their results and run directories redact it,
+/// `stop` redacts the live files once the app is gone, and then no file
+/// under `target/` holds it.
+#[test]
+fn later_commands_read_inherited_secrets_from_the_running_app() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps(Vec::new());
+    let target = sandbox.project.path().join("target");
+    let shell = [(secret::NAME, secret::TOKEN)];
+
+    let run = sandbox.result_with(&["run", "desktop", "--settle", "200ms"], &shell);
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(pid);
+    let live = target
+        .join("icm/sessions/desktop")
+        .join(run["run"].as_str().unwrap());
+    assert!(secret::holds(&live.join("app.stdout")));
+    assert!(!live.join("secrets.json").exists());
+    let session: Value =
+        serde_json::from_str(&std::fs::read_to_string(live.join("session.json")).unwrap()).unwrap();
+    let names = session["inherited_secrets"].as_array().unwrap();
+    assert!(names.contains(&Value::from(secret::NAME)), "{session}");
+
+    for args in [
+        &["logs", "desktop"][..],
+        &["logs", "desktop", "--raw"],
+        &["shot", "desktop"],
+    ] {
+        let result = sandbox.result(args);
+        assert_eq!(result["exit"], 0, "{args:?}: {result}");
+        let text = result.to_string();
+        assert!(!text.contains("desktop.logs.secret_unknown"), "{text}");
+        if args[0] == "logs" {
+            assert!(text.contains("signed in with <redacted>"), "{text}");
+        }
+    }
+    let leaks = secret::leaks(&target);
+    assert!(
+        leaks
+            .iter()
+            .all(|(path, _)| path.starts_with(&live) && path.file_name().unwrap() != "session.json"),
+        "{leaks:?}"
+    );
+
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    wait_dead(pid);
+    secret::assert_kept_nowhere(&target);
+
+    // The stopped app's redacted live files are what `logs` reads now.
+    let logs = sandbox.result(&["logs", "desktop"]);
+    assert_eq!(logs["exit"], 0, "{logs}");
+    let text = logs.to_string();
+    assert!(text.contains("signed in with <redacted>"), "{text}");
+    assert!(!text.contains("desktop.logs.secret_unknown"), "{text}");
+    secret::assert_kept_nowhere(&target);
+}
+
+/// An app that ends by itself after its run has nobody to read its
+/// environment from: `logs` from a shell without the secret it inherited
+/// cannot redact what it logged after the run, so it reads the run's
+/// redacted copies and warns `desktop.logs.secret_unknown`, and writes the
+/// value nowhere; the live files stay the app's own output. A command
+/// whose environment holds the variable reads and redacts them.
+#[test]
+fn an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps(Vec::new());
+    let target = sandbox.project.path().join("target");
+    let icm = target.join("icm");
+    let shell = [(secret::NAME, secret::TOKEN)];
+
+    let run = sandbox.result_with(
+        &[
+            "run",
+            "desktop",
+            "--settle",
+            "200ms",
+            "--env",
+            "ICM_FIXTURE=quit",
+        ],
+        &shell,
+    );
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.0.push(pid);
+    std::fs::write(sandbox.project.path().join("quit"), "").unwrap();
+    wait_dead(pid);
+    let live = icm
+        .join("sessions/desktop")
+        .join(run["run"].as_str().unwrap());
+    let stdout = std::fs::read_to_string(live.join("app.stdout")).unwrap();
+    assert!(stdout.contains("after the run: "), "{stdout}");
+
+    for args in [&["logs", "desktop"][..], &["logs", "desktop", "--raw"]] {
+        let logs = sandbox.result(args);
+        assert_eq!(logs["exit"], 0, "{args:?}: {logs}");
+        let text = logs.to_string();
+        assert!(text.contains("desktop.logs.secret_unknown"), "{text}");
+        assert!(text.contains(secret::NAME), "{text}");
+        assert!(text.contains("signed in with <redacted>"), "{text}");
+        assert!(!text.contains("after the run"), "{text}");
+    }
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    secret::assert_kept_nowhere(&icm.join("latest"));
+    assert!(!secret::holds(&icm.join("last.json")));
+    assert!(secret::holds(&live.join("app.stdout")));
+
+    // Where the variable is set, `logs` reads the live files, all of them,
+    // and redacts them for good.
+    let logs = sandbox.result_with(&["logs", "desktop"], &shell);
+    assert_eq!(logs["exit"], 0, "{logs}");
+    let text = logs.to_string();
+    assert!(!text.contains("desktop.logs.secret_unknown"), "{text}");
+    assert!(text.contains("after the run: <redacted>"), "{text}");
+    secret::assert_kept_nowhere(&target);
+    let logs = sandbox.result(&["logs", "desktop"]);
+    let text = logs.to_string();
+    assert!(!text.contains("desktop.logs.secret_unknown"), "{text}");
+    assert!(text.contains("after the run: <redacted>"), "{text}");
+    secret::assert_kept_nowhere(&target);
 }
 
 #[test]

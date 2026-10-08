@@ -76,14 +76,23 @@ fn main() {
             std::process::exit(3);
         }
         "hang" => {}
-        _ => {
+        mode => {
             event(&start);
             println!("hello from stdout");
             eprintln!("warning: a fixture warning");
-            let _ = log_token();
+            let token = log_token();
             event(
                 r#"{"v":1,"kind":"ready","ms":1,"window":{"size":[400,300],"physical":[800,600],"scale":2},"backend":"tiny-skia","adapter":"none","api":"none"}"#,
             );
+            if mode == "quit" {
+                // Ends by itself after the run, once the project has a
+                // `quit` file, logging the secret once more.
+                while !std::path::Path::new("quit").exists() {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                println!("after the run: {}", token.unwrap_or_default());
+                return;
+            }
         }
     }
     loop {

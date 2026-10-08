@@ -512,10 +512,13 @@ pub fn resolve(
     };
 
     let target_dir = metadata.target_directory.clone();
-    // The secret values this project's sessions handed their apps, which
-    // the apps' live files may hold: redacted from what this command keeps
-    // and reports even when its environment lacks them.
-    process::load_kept_secrets(&target_dir.join("icm").join("sessions"));
+    // The secret values this project's sessions handed their apps, and
+    // those the running desktop app inherited, which the apps' live files
+    // may hold: redacted from what this command keeps and reports even
+    // when its environment lacks them.
+    let sessions = target_dir.join("icm").join("sessions");
+    process::load_kept_secrets(&sessions);
+    crate::platform::desktop::learn_app_secrets(&sessions);
     Ok(Project {
         icm_dir: target_dir.join("icm"),
         target_dir,

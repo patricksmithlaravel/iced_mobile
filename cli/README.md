@@ -33,7 +33,7 @@ cargo test
 | `catalogue.rs` | every check/error id with exit code, level, `by`, title, fix; `docs/explain/<id>.md` adds detail |
 | `error.rs` | `IcmError` (one `errors[]` entry), `Check`, `Evidence`, `Fix`, `Diagnostic` |
 | `exit.rs` | the stable exit codes |
-| `process.rs` | the runner: stdin null, process groups, timeouts, file-backed output, redaction; a session's `secrets.json` (`keep_secrets`: the secret values handed to its app with `--env`, never one icm only inherited) |
+| `process.rs` | the runner: stdin null, process groups, timeouts, file-backed output, redaction; a session's `secrets.json` (`keep_secrets`: the secret values handed to its app with `--env`, never one icm only inherited); a running app's environment read back (`environment_of`, `learn_environment_secrets`) |
 | `signals.rs` | SIGINT/SIGTERM/SIGHUP: record, kill registered groups |
 | `plan.rs` | `Plan`/`Step`; `--dry-run` prints, `execute` runs |
 | `config/` | icm.toml types, discovery, validation with `file:line` (`source.rs` keeps the spans) |
@@ -103,8 +103,10 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
 - `tests/cli.rs` runs the binary. Each test sets `ICM_CACHE_DIR` and
   `ICM_HOST_CONFIG` to a temp dir and copies fixtures from `tests/fixtures/`.
 - `tests/desktop.rs` runs, logs, captures and stops `fixtures/desktop`, a
-  windowless stand-in app (`--env ICM_FIXTURE=ready|panic|leak|exit|hang`),
-  and kills whatever it started.
+  windowless stand-in app
+  (`--env ICM_FIXTURE=ready|panic|leak|exit|hang|quit`; `quit` ends by
+  itself once the project has a `quit` file), and kills whatever it
+  started.
 - Each platform's `run_directories_keep_no_secret` test (and web release's
   `the_serve_check_keeps_no_secret`) puts a token in icm's environment
   that the app logs in every way an app can, then searches every file of
@@ -115,7 +117,13 @@ it. For a common failure, also write `docs/explain/<id>.md` (embedded by
   also gives every command a secret-named variable that nothing logs
   (`secret::INHERITED_NAME`) and fails when any file under the project's
   `target/` holds its value: no command may write a value icm only
-  inherited.
+  inherited. Desktop's
+  `later_commands_read_inherited_secrets_from_the_running_app` gives the
+  token to `run` only, in icm's environment, and fails when any file under
+  `target/` holds it after `logs`, `shot` and `stop` without it;
+  `an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread` checks
+  the copies and the warning `logs` falls back to for an app that ended by
+  itself.
 - `tests/web.rs` drives the web pipeline against real headless Chrome with
   a fake cargo and wasm-bindgen (`ICM_TOOL_CARGO`, `ICM_TOOL_WASM_BINDGEN`)
   whose JavaScript "app" speaks `ICM_EVENT`; it skips without Chrome or the

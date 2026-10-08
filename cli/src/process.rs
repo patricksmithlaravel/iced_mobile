@@ -1020,8 +1020,10 @@ pub fn redact_values(text: &str) -> String {
 
 /// The secret values icm knows, longest first (so a secret containing
 /// another is replaced whole): those of secret-named variables in its own
-/// environment (at least 6 bytes, not a path: `names_a_path`), and those it has handed to
-/// a child under a secret name (at least 4 bytes). A multi-line value also
+/// environment (at least 6 bytes, not a path: `names_a_path`), and in the
+/// environment of an app it started and reads back
+/// ([`learn_environment_secrets`]), and those it has handed to a child
+/// under a secret name (at least 4 bytes). A multi-line value also
 /// counts line by line, since output is read and reported by the line.
 /// Each also counts JSON-escaped, once and twice (a JSON line inside a JSON
 /// record), as serde and JavaScript write it and as Apple's `log` writes it
@@ -1075,6 +1077,138 @@ fn secret_variables(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Vec
 /// into an app (`option_env!`), which a release searches its files for.
 pub fn environment_secret_variables() -> Vec<(String, String)> {
     secret_variables(std::env::vars_os())
+}
+
+/// Learns the secret values of another process's environment (an app icm
+/// started, read back with [`environment_of`]) as those of icm's own count
+/// ([`environment_secrets`]), so what this command reports and keeps of
+/// the app's output is redacted of them. They stay in memory: nothing
+/// writes them. Returns the secret-named variables' names.
+pub fn learn_environment_secrets(vars: Vec<(OsString, OsString)>) -> Vec<String> {
+    let found = secret_variables(vars);
+    let mut forms = registry();
+    for (_, value) in &found {
+        add_secret(&mut forms, value, 6);
+    }
+    found.into_iter().map(|(name, _)| name).collect()
+}
+
+/// A running process of this user: its `argv[0]` and the environment it
+/// started with, which is what an app inherited from icm and its `--env`.
+/// macOS: `sysctl` `KERN_PROCARGS2`; Linux: `/proc/<pid>/cmdline` and
+/// `environ`. `None` when the process is gone or not readable.
+pub fn environment_of(pid: i32) -> Option<(OsString, Vec<(OsString, OsString)>)> {
+    if pid <= 1 {
+        return None;
+    }
+    read_environment(pid)
+}
+
+#[cfg(target_os = "macos")]
+fn read_environment(pid: i32) -> Option<(OsString, Vec<(OsString, OsString)>)> {
+    let mut argmax: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    // SAFETY: sysctl writes at most `size` bytes into `argmax`.
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&raw mut argmax).cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; usize::try_from(argmax).ok()?];
+    let mut size = buffer.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    // SAFETY: sysctl writes at most `size` bytes into `buffer`.
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    buffer.truncate(size);
+    parse_procargs(&buffer)
+}
+
+/// `KERN_PROCARGS2`: `argc`, the executable's path and NUL padding, the
+/// `argc` arguments and the environment, each NUL-terminated; an empty
+/// string ends the environment (the system's own strings follow).
+#[cfg(any(target_os = "macos", test))]
+fn parse_procargs(buffer: &[u8]) -> Option<(OsString, Vec<(OsString, OsString)>)> {
+    let argc = i32::from_ne_bytes(buffer.get(..4)?.try_into().ok()?);
+    let rest = buffer.get(4..)?;
+    let rest = &rest[rest.iter().position(|byte| *byte == 0)?..];
+    let rest = &rest[rest.iter().position(|byte| *byte != 0)?..];
+    let mut strings = rest.split(|byte| *byte == 0);
+    let mut argv0 = None;
+    for index in 0..argc {
+        let arg = strings.next()?;
+        if index == 0 {
+            argv0 = Some(arg);
+        }
+    }
+    let vars = strings
+        .take_while(|string| !string.is_empty())
+        .filter_map(split_variable)
+        .collect();
+    Some((bytes_to_os(argv0?), vars))
+}
+
+#[cfg(target_os = "linux")]
+fn read_environment(pid: i32) -> Option<(OsString, Vec<(OsString, OsString)>)> {
+    read_proc(&PathBuf::from(format!("/proc/{pid}")))
+}
+
+/// A process's directory in `/proc`: `cmdline` and `environ`, each
+/// NUL-separated.
+#[cfg(any(target_os = "linux", test))]
+fn read_proc(dir: &Path) -> Option<(OsString, Vec<(OsString, OsString)>)> {
+    let cmdline = std::fs::read(dir.join("cmdline")).ok()?;
+    let argv0 = cmdline.split(|byte| *byte == 0).next()?;
+    let environ = std::fs::read(dir.join("environ")).ok()?;
+    let vars = environ
+        .split(|byte| *byte == 0)
+        .filter_map(split_variable)
+        .collect();
+    Some((bytes_to_os(argv0), vars))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn read_environment(_pid: i32) -> Option<(OsString, Vec<(OsString, OsString)>)> {
+    None
+}
+
+/// `NAME=value` as a pair.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn split_variable(text: &[u8]) -> Option<(OsString, OsString)> {
+    let equals = text
+        .iter()
+        .position(|byte| *byte == b'=')
+        .filter(|at| *at > 0)?;
+    Some((
+        bytes_to_os(&text[..equals]),
+        bytes_to_os(&text[equals + 1..]),
+    ))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn bytes_to_os(bytes: &[u8]) -> OsString {
+    use std::os::unix::ffi::OsStrExt;
+    OsStr::from_bytes(bytes).to_os_string()
 }
 
 /// The forms a secret value takes in output and files, the whole value
@@ -1185,7 +1319,8 @@ const KEPT_VERSION: u64 = 2;
 /// `shot` or `stop` from a shell without the secret still redact what the
 /// app logged. Never a value of icm's own environment that the app only
 /// inherits: those are the user's shell's, often other tools' tokens, and a
-/// later command redacts them only when its own environment holds them.
+/// later command learns them from the running app's environment
+/// ([`environment_of`]) or from its own.
 /// A value too short to count is not kept, and without a value the file is
 /// removed.
 pub fn keep_secrets(dir: &Path, values: &[String]) -> io::Result<()> {
@@ -1641,6 +1776,49 @@ mod tests {
 
         keep_secrets(&live, &[]).unwrap();
         assert!(!kept.exists());
+    }
+
+    /// A process's `argv[0]` and starting environment read back (this
+    /// test's own process), and `KERN_PROCARGS2`'s layout parsed: the
+    /// environment ends at the first empty string, before the system's
+    /// own strings.
+    #[test]
+    fn environments_of_processes_are_read_back() {
+        let (program, vars) = environment_of(std::process::id() as i32).unwrap();
+        assert_eq!(Some(program), std::env::args_os().next());
+        if let Some(path) = std::env::var_os("PATH") {
+            assert!(vars.contains(&(OsString::from("PATH"), path)));
+        }
+        assert!(environment_of(0).is_none());
+
+        let mut buffer = 2i32.to_ne_bytes().to_vec();
+        buffer.extend(b"/x/app\0\0\0\0/x/app\0--flag\0ICM_UNIT_APP_TOKEN=a=b-123456\0");
+        buffer.extend(b"PLAIN=1\0\0\0executable_path=/x/app\0");
+        let (program, vars) = parse_procargs(&buffer).unwrap();
+        assert_eq!(program, "/x/app");
+        assert_eq!(
+            vars,
+            [
+                ("ICM_UNIT_APP_TOKEN".into(), "a=b-123456".into()),
+                ("PLAIN".into(), "1".into())
+            ]
+        );
+        assert!(parse_procargs(&buffer[..3]).is_none());
+        let proc = tempfile::tempdir().unwrap();
+        std::fs::write(proc.path().join("cmdline"), b"/x/app\0--flag\0").unwrap();
+        std::fs::write(
+            proc.path().join("environ"),
+            b"ICM_UNIT_APP_TOKEN=a=b-123456\0=odd\0PLAIN=1\0",
+        )
+        .unwrap();
+        assert_eq!(
+            read_proc(proc.path()),
+            Some((program.clone(), vars.clone()))
+        );
+
+        assert!(!secret_values().contains(&"a=b-123456".to_string()));
+        assert_eq!(learn_environment_secrets(vars), ["ICM_UNIT_APP_TOKEN"]);
+        assert_eq!(redact_values("got a=b-123456"), "got <redacted>");
     }
 
     #[test]

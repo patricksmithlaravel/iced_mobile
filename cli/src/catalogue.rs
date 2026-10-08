@@ -643,6 +643,9 @@ catalogue! {
     DesktopShotPermission = "desktop.shot.permission", CheckFailed, Warn, Owner,
         "Screen Recording permission is not granted, so the screenshot is a headless render",
         "The owner may grant Screen Recording to the terminal (System Settings > Privacy & Security).";
+    DesktopLogsSecretUnknown = "desktop.logs.secret_unknown", CheckFailed, Warn, Agent,
+        "The app inherited a secret this command cannot redact, so its logs come from the run's redacted copies",
+        "Run the command where the variable is set, or hand the secret to the app with `icm run desktop --env NAME=…`.";
     MacosSignNoDeveloperId = "macos.sign.no_developer_id", NeedsOwner, Fail, Owner,
         "No Developer ID Application identity is installed",
         "The owner installs the Developer ID certificate.";

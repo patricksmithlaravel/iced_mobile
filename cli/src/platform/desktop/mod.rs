@@ -9,17 +9,24 @@
 //! stdout and stderr going to `app.stdout` and `app.stderr` in
 //! `target/icm/sessions/desktop/<run>/` (outside the run directories, so
 //! pruning never removes files the app still writes; the run directory
-//! gets a copy). The live files are the app's own output, unredacted; the
-//! copies, `app.log` and `logs.ndjson` have the secret values icm knows
-//! redacted ([`process::copy_redacted`]). The session keeps the values of
-//! the app's secret-named `--env` in `secrets.json` next to the live files
-//! ([`process::keep_secrets`]), so a later command run without them redacts
-//! them too. What the app inherits from icm's environment is never written
-//! there or anywhere else: `run` redacts it, and a later command only when
-//! its own environment holds it. It is ready on `ICM_EVENT ready`; an app
-//! that sends no events is ready when it is alive after 3 s and owns a
-//! window (`source: "probe"`). A panic, an exit or no first frame within
-//! `--wait-ready` fails the run (exit 10) and stops the app.
+//! gets a copy). While the app runs, the live files are its own output,
+//! unredacted; the copies, `app.log` and `logs.ndjson` have the secret
+//! values icm knows redacted ([`process::copy_redacted`]). The session
+//! keeps the values of the app's secret-named `--env` in `secrets.json`
+//! next to the live files ([`process::keep_secrets`]), so a later command
+//! run without them redacts them too. What the app inherits from icm's
+//! environment is never written there or anywhere else: the session names
+//! those variables, `run` redacts their values, and a later command reads
+//! them from the running app's environment ([`learn_app_secrets`]). A
+//! command that ends the app or finds it gone (`stop`, `logs`, `shot`,
+//! `run --attach`, a failed run) redacts the live files in place with the
+//! values it knows ([`finish_live`]). `logs` of an app that ended by itself,
+//! from a shell without such a variable, cannot redact them: it reads the
+//! run directory's copies and warns `desktop.logs.secret_unknown`. It is
+//! ready on `ICM_EVENT ready`; an app that sends no events is ready when it
+//! is alive after 3 s and owns a window (`source: "probe"`). A panic, an
+//! exit or no first frame within `--wait-ready` fails the run (exit 10) and
+//! stops the app.
 //!
 //! The screenshot on macOS is `screencapture -l <window id>` after the
 //! Screen Recording preflight ([`macos`]); without that permission, or
@@ -31,7 +38,8 @@
 //!
 //! The session file `target/icm/sessions/desktop.json` (also copied into
 //! the run directory as `session.json`) records the pid, the log files, the
-//! launch time and the window; `shot`, `logs` and `stop` read it.
+//! launch time, the window and the names of the secret-named variables the
+//! app inherited; `shot`, `logs` and `stop` read it.
 
 pub mod headless;
 pub mod linux;
@@ -56,9 +64,11 @@ use crate::time::format_duration;
 use logs::{Filter, Record};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// The platform's name.
@@ -155,6 +165,12 @@ pub struct Session {
     /// The `ready` event, if the app sent one.
     #[serde(default)]
     pub ready: Option<Value>,
+    /// The secret-named variables the app inherited from icm's environment
+    /// (not its `--env`), by name, whose values its live files may hold as
+    /// it logged them: icm writes no such value down
+    /// ([`learn_app_secrets`], [`finish_live`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_secrets: Vec<String>,
 }
 
 /// The session file.
@@ -277,6 +293,95 @@ fn remove_session(project: &Project, pid: i32) {
     }
 }
 
+// ---- secrets the app inherited -----------------------------------------------------
+
+/// The pid of the running app whose environment this command read
+/// ([`learn_app_secrets`]).
+static LEARNED: OnceLock<i32> = OnceLock::new();
+
+/// Learns the secret values in the environment of this project's running
+/// desktop app (`<sessions_dir>/desktop.json`), read back from the process
+/// ([`process::environment_of`]): what it inherited from the shell of `icm
+/// run desktop`, and its `--env`. So a later command from a shell without
+/// them redacts what the app logged of them as `run` did, while icm writes
+/// none of them down. Every command that resolves a project does; it only
+/// reads.
+pub fn learn_app_secrets(sessions_dir: &Path) {
+    let Some(session) = read_session_file(&sessions_dir.join(format!("{PLATFORM}.json"))) else {
+        return;
+    };
+    let Some((program, vars)) = process::environment_of(session.pid) else {
+        return;
+    };
+    // A reused pid runs something else.
+    if Path::new(&program) != session.exe {
+        return;
+    }
+    let _ = process::learn_environment_secrets(vars);
+    let _ = LEARNED.set(session.pid);
+}
+
+/// The session's inherited secrets (by name) whose values this command
+/// does not know: it did not read them from the running app
+/// ([`learn_app_secrets`]) and its own environment does not hold them. It
+/// cannot redact what the app's live files hold of them.
+fn unknown_inherited(session: &Session) -> Vec<String> {
+    if LEARNED.get() == Some(&session.pid) {
+        return Vec::new();
+    }
+    let known = process::environment_secret_variables();
+    session
+        .inherited_secrets
+        .iter()
+        .filter(|name| !known.iter().any(|(known, _)| known == *name))
+        .cloned()
+        .collect()
+}
+
+/// Whether `path` is one of the app's live files (not a run directory's
+/// copy).
+fn is_live(project: &Project, path: &Path) -> bool {
+    path.starts_with(project.sessions_dir().join(PLATFORM))
+}
+
+/// Once the app is gone, its live files are no longer its live output:
+/// the secret values this command knows are redacted in them, in place,
+/// so they keep no more than the run directory's copies. The live
+/// `session.json` then names only the inherited secrets this command did
+/// not know ([`unknown_inherited`]: an app that ended by itself, stopped
+/// from a shell without them), which `logs` will not read from these files.
+fn finish_live(project: &Project, session: &Session) {
+    let files = files_dir(project, &session.run);
+    if !files.is_dir() || running(session) {
+        return;
+    }
+    for name in ["app.stdout", "app.stderr"] {
+        process::redact_in_place(&files.join(name));
+    }
+    let unknown = unknown_inherited(session);
+    if unknown == session.inherited_secrets {
+        return;
+    }
+    for path in [files.join("session.json"), session_path(project)] {
+        let Some(mut recorded) = read_session_file(&path)
+            .filter(|recorded| recorded.pid == session.pid && recorded.run == session.run)
+        else {
+            continue;
+        };
+        recorded.inherited_secrets = unknown.clone();
+        let mut text = serde_json::to_string_pretty(&recorded).unwrap_or_default();
+        text.push('\n');
+        let _ = rundir::write_atomic(&path, text.as_bytes());
+    }
+}
+
+/// [`remove_session`], then [`finish_live`]: what every command that sees
+/// the app end does.
+fn end_session(project: &Project, session: &Session) {
+    remove_session(project, session.pid);
+    finish_live(project, session);
+}
+
 // ---- processes -------------------------------------------------------------------
 
 /// How a launched app ended.
@@ -392,7 +497,7 @@ pub fn stop_session(ctx: &Ctx, project: &Project) -> Result<Option<Value>> {
     } else {
         "already exited"
     };
-    remove_session(project, session.pid);
+    end_session(project, &session);
     ctx.rep.progress(format!(
         "desktop app pid {} (run {}): {how}",
         session.pid, session.run
@@ -727,6 +832,9 @@ struct Launched {
     /// The copy of stderr in the run directory, which evidence names (the
     /// live file goes when a later run starts).
     stderr_copy: PathBuf,
+    /// The secret-named variables it inherits from icm's environment, by
+    /// name ([`Session::inherited_secrets`]).
+    inherited_secrets: Vec<String>,
 }
 
 fn launch(
@@ -764,8 +872,16 @@ fn launch(
         .step_end_internal("desktop.launch", true, started.elapsed().as_millis() as u64);
     // The secret values the app was handed (its `--env`) stay known to
     // later commands that read its live files. What it inherits from icm's
-    // environment is the user's shell's, and is never written.
+    // environment is the user's shell's, and is never written: the session
+    // names those variables, and a later command reads their values from
+    // the running app ([`learn_app_secrets`]). An `--env` pair replaces the
+    // variable of its name.
     let _ = process::keep_secrets(&files, &process::handed_secrets(&cmd));
+    let inherited_secrets = process::environment_secret_variables()
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| !cmd.env.iter().any(|(key, _)| key == OsStr::new(name)))
+        .collect();
 
     Ok(Launched {
         pid: pid as i32,
@@ -774,6 +890,7 @@ fn launch(
         stdout,
         stderr,
         stderr_copy: run_dir.join("app.stderr"),
+        inherited_secrets,
     })
 }
 
@@ -1641,7 +1758,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
         .map_err(|error| IcmError::new(CheckId::UsageBadArgs, format!("--since: {error}")))?;
 
     // The running app's session, else the last run's copy.
-    let (session, live) = match read_session(&project) {
+    let (mut session, live) = match read_session(&project) {
         Some(session) => {
             let live = running(&session);
             (with_copies(session), live)
@@ -1655,6 +1772,45 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
             }
         },
     };
+    // What the live files hold of a secret this command does not know, it
+    // cannot redact: it reads the run directory's redacted copies instead.
+    // Those of an app that has ended lose what it does know.
+    let unknown = unknown_inherited(&session);
+    if !live {
+        finish_live(&project, &session);
+    }
+    if !unknown.is_empty() && is_live(&project, &session.stderr) {
+        let names = unknown.join(", ");
+        let (values, verb) = if unknown.len() == 1 {
+            ("its value", "is")
+        } else {
+            ("their values", "are")
+        };
+        let why = if live {
+            "the running app's environment could not be read"
+        } else {
+            "the app has ended"
+        };
+        ctx.rep.check(
+            Check::warn(
+                CheckId::DesktopLogsSecretUnknown,
+                format!(
+                    "the desktop app of run {} inherited the secret-named {names} from the environment of `icm run desktop`; this command cannot learn {values} ({why}) and its own environment does not hold {names}, so it could not redact what the app logged: the records come from the run's redacted copies, which end where that run did, and the app's later output is only in its live files",
+                    session.run
+                ),
+            )
+            .evidence(Evidence::file(&session.stderr))
+            .evidence(Evidence::file(&session.stdout))
+            .fix(
+                format!(
+                    "Run `icm logs desktop` where {names} {verb} set, or hand a secret the app logs with `icm run desktop --env NAME=…`, which later commands redact from any shell."
+                ),
+                &[],
+            ),
+        );
+        session.stdout = session.run_dir.join("app.stdout");
+        session.stderr = session.run_dir.join("app.stderr");
+    }
 
     ctx.rep.set(
         "process",
@@ -1731,7 +1887,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     if args.follow && live {
         match follow(ctx, &mut tails, session.pid, &filter) {
             FollowEnd::Exited(ended) => {
-                remove_session(&project, session.pid);
+                end_session(&project, &session);
                 ctx.rep.summary(format!(
                     "followed the desktop app until it {}",
                     ended.describe()
@@ -1790,6 +1946,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         profile: cargo::profile_dir(profile).to_string(),
         window: None,
         ready: None,
+        inherited_secrets: launched.inherited_secrets.clone(),
     };
     write_session(&project, &session);
     ctx.rep
@@ -1836,7 +1993,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
                 None => json!({"stopped_by_icm": terminate(launched.pid, launched.pid)}),
             };
             signals::unregister_group(launched.pid);
-            remove_session(&project, launched.pid);
+            end_session(&project, &session);
             write_logs(ctx, &session);
             ctx.rep.set(
                 "process",
@@ -1973,7 +2130,7 @@ fn attach(ctx: &Ctx, project: &Project, session: &Session, launched: &Launched) 
         FollowEnd::Exited(_) => None,
     };
     signals::unregister_group(session.pid);
-    remove_session(project, session.pid);
+    end_session(project, session);
     match end {
         FollowEnd::Exited(ended) => {
             write_logs(ctx, session);
@@ -2072,7 +2229,7 @@ pub fn shot(ctx: &mut Ctx, args: &ShotArgs) -> Result<()> {
         return Err(no_session("no desktop app is running for this project"));
     };
     if !running(&session) {
-        remove_session(&project, session.pid);
+        end_session(&project, &session);
         return Err(no_session(format!(
             "the desktop app (pid {}) of run {} is no longer running",
             session.pid, session.run
@@ -2258,6 +2415,7 @@ mod tests {
                 scale: 2.0,
             }),
             ready: None,
+            inherited_secrets: vec!["ICM_UNIT_SHELL_TOKEN".into()],
         };
         let text = serde_json::to_string(&session).unwrap();
         assert_eq!(serde_json::from_str::<Session>(&text).unwrap(), session);

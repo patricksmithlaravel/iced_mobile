@@ -94,11 +94,14 @@ New states go into `LifecycleEvent`, which is `#[non_exhaustive]`.
   reports) redacts secret values on every platform, as stdout does, also where the output escapes
   them as JSON (inside a log line too) or percent-encodes them in any URL encoding. A value of a
   secret-named variable that starts with `/` counts unless it is a path. The live files in
-  `target/icm/sessions/` stay the app's own output; a session keeps the values of its app's
-  secret-named `--env` (on the web, the page's query) in a `secrets.json` (mode 0600) beside them,
-  so `logs`, `shot` and `stop` from a shell without the secret redact it too. icm keeps no value of
-  a secret-named variable it only inherits (as a desktop app does) in any file: a later command
-  redacts it when its own environment holds it.
+  `target/icm/sessions/` stay the app's own output while it runs; a session keeps the values of
+  its app's secret-named `--env` (on the web, the page's query) in a `secrets.json` (mode 0600)
+  beside them, so `logs`, `shot` and `stop` from a shell without the secret redact it too. icm
+  keeps no value of a secret-named variable it only inherits (as a desktop app does) in any file:
+  a later command reads it from the running desktop app's environment, and the command that stops
+  the app redacts its live files. `logs` of a desktop app that ended by itself, from a shell
+  without such a variable, reads the run's redacted copies and warns
+  `desktop.logs.secret_unknown`.
 - Android: readiness and logs count only the app's own processes, the lifecycle suite tells a
   destroyed Activity from a live one after a rotation, and a rotation warns when the app is locked
   to one axis.
