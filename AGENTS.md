@@ -32,7 +32,7 @@ every app instead. Its source is [examples/app/AGENTS.md](examples/app/AGENTS.md
 | `docs/agents/limitations.md` | known limitations; generated app `AGENTS.md` files embed everything below its marker line |
 | `docs/icm/DESIGN.md` | icm's design. Appendix C overrides earlier sections, and Appendix D records what the code decided. Where code and design disagree, the code and its tests win. |
 | `docs/mobile/review-2026-10-06.md` | a dated snapshot review; many items are fixed since, so check the code |
-| `CHANGES-mobile.md` | the fork's release notes, one section per release |
+| `CHANGES-mobile.md` | the fork's release notes, one section per release, and an Unreleased section for what `main` changed since the newest one |
 
 ## Checks
 
@@ -203,7 +203,8 @@ stop only the platforms they drive and leave the other platforms' devices alone
   - the version in `cli/Cargo.toml` and icm's entry in `cli/Cargo.lock`;
   - the tag in README.md (the status line, the install command and the framework pins) and the
     current release this file names under "What this repository is";
-  - a new `## Changes in v<version>` section at the top of `CHANGES-mobile.md`;
+  - a new `## Changes in v<version>` section at the top of `CHANGES-mobile.md`, which takes over
+    the `## Unreleased` section's notes and replaces it;
   - the template's `min_icm` (`examples/app/icm.toml`) when an older icm cannot read the template,
     for example after a new `icm.toml` key.
 

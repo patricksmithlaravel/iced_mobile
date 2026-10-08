@@ -1,8 +1,32 @@
 # iced_mobile releases
 
 What changed in each release of the fork, newest first. A release is one tag, `v0.14.x-mobile.N`,
-for the framework and `icm` together. [CHANGELOG.md](CHANGELOG.md) is upstream's and stops at
-iced 0.14.0.
+for the framework and `icm` together. Unreleased lists what `main` has changed since the newest
+release; the next release's section takes it over. [CHANGELOG.md](CHANGELOG.md) is upstream's and
+stops at iced 0.14.0.
+
+## Unreleased
+
+Fixes from the re-verification of `v0.14.1-mobile.2`.
+
+- **iOS:** the vendored winit reports an insertion of only a line break as Return and one of only
+  `\t` as Tab, deciding per insertion, so a Return typed right after another key in the same turn
+  of the event loop is no longer lost.
+- **Android:** the safe area is published again when the app changes its own scale factor.
+- `icm logs desktop` of an app that ended by itself never takes a variable of the same name in its
+  own shell for a secret the app inherited: it reads the run's redacted copies and warns
+  `desktop.logs.secret_unknown` whatever the shell holds. Before, a shell where that variable held
+  another value printed the old one. Read the logs while the app runs, or hand the secret with
+  `--env`.
+- Desktop session records keep only the protocol fields of the app's `ready` event, redacted, so a
+  secret an app put in a field of its own no longer stays in them.
+- `icm stop --shutdown` leaves a managed simulator or emulator running when it cannot read which
+  project booted it, and a run that cannot mark the device as its own says so
+  (`ios.sim.owner_unknown`, `android.emulator.owner_unknown`).
+- Under `--json`, `--help` and usage errors name the command, not the value of a global option
+  written before it (`icm --config x.toml run --help`).
+- When `icm run android --wait-ready` runs out, the error says only what the readiness polls saw,
+  where it used to say the app was alive.
 
 ## Changes in v0.14.1-mobile.2
 

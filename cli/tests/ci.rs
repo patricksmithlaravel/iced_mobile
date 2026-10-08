@@ -88,8 +88,9 @@ fn a_release_tag_is_v_and_the_cli_version() {
 
 /// A release commit (AGENTS.md "Rules") names one release everywhere a
 /// new user starts: README.md's install command, framework pins and status
-/// line, AGENTS.md and the newest section of CHANGES-mobile.md all name
-/// `v` plus icm's version. The template asks for no icm newer than this
+/// line, AGENTS.md and the newest release's section of CHANGES-mobile.md
+/// (under its Unreleased section, if any) all name `v` plus icm's version.
+/// The template asks for no icm newer than this
 /// one, or `icm new` would create apps it refuses, and phase0.sh's tag
 /// step reads the version instead of naming a tag.
 #[test]
@@ -118,12 +119,20 @@ fn the_docs_name_this_release() {
         "AGENTS.md: {current:?}"
     );
 
+    // Fixes on `main` since the release wait in an `## Unreleased` section
+    // above it, which the next release commit renames.
     let changes = read("CHANGES-mobile.md");
-    let newest = changes
-        .lines()
-        .find(|line| line.starts_with("## "))
-        .expect("CHANGES-mobile.md has a section per release");
+    let mut sections = changes.lines().filter(|line| line.starts_with("## "));
+    let mut newest = sections.next();
+    if newest == Some("## Unreleased") {
+        newest = sections.next();
+    }
+    let newest = newest.expect("CHANGES-mobile.md has a section per release");
     assert_eq!(newest, format!("## Changes in {tag}"));
+    assert!(
+        sections.all(|line| line != "## Unreleased"),
+        "CHANGES-mobile.md's Unreleased section is above the newest release's"
+    );
     assert!(
         changes.contains(&format!("--tag {tag} icm")),
         "CHANGES-mobile.md's install command"
