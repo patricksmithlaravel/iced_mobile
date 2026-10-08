@@ -85,7 +85,10 @@ pub fn main() -> std::process::ExitCode {
         .collect();
 
     let exit = match Cli::try_parse_from(&argv) {
-        Ok(cli) => run(cli, argv),
+        Ok(cli) => match planned_help(&cli, &argv) {
+            Some(exit) => exit,
+            None => run(cli, argv),
+        },
         Err(error) => usage_error(&error, &argv),
     };
     std::process::ExitCode::from(exit.code())
@@ -376,25 +379,66 @@ pub fn usage_detail(rendered: &str) -> String {
     text.trim().trim_start_matches("error: ").to_string()
 }
 
+/// Whether `argv` asks for JSON (`--json` anywhere, or `ICM_JSON`) and for
+/// quiet output, read before clap has parsed it.
+fn json_and_quiet(argv: &[String]) -> (bool, bool) {
+    let args = &argv[1.min(argv.len())..];
+    (
+        args.iter().any(|a| a == "--json") || env_flag("ICM_JSON"),
+        args.iter().any(|a| is_quiet_flag(a)),
+    )
+}
+
+/// Whether a parse failure is clap answering `--help` or `--version`.
+fn is_help_or_version(error: &clap::Error) -> bool {
+    use clap::error::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    )
+}
+
+/// `icm print plan <cmd…> --help`: clap hands the command after `print
+/// plan` over unparsed, and `print plan` parses it only when it runs, where
+/// its help or version would come back as a usage error. Answered here
+/// instead, as the help of that command (exit 0, [`answer_help`]).
+fn planned_help(cli: &Cli, argv: &[String]) -> Option<Exit> {
+    let cli::Command::Print(cli::PrintArgs {
+        what: cli::PrintWhat::Plan { command },
+    }) = &cli.command
+    else {
+        return None;
+    };
+    // As `print plan` parses it (commands::print).
+    let planned: Vec<String> = std::iter::once("icm".to_string())
+        .chain(command.iter().cloned())
+        .chain(std::iter::once("--dry-run".to_string()))
+        .collect();
+    let error = Cli::try_parse_from(&planned).err()?;
+    is_help_or_version(&error).then(|| answer_help(&error, argv, named_subcommand(&planned)))
+}
+
+/// Help or version: clap's text, exit 0; under `--json` a result object
+/// ([`help_or_version`]). `subcommand` is the command the help is of.
+fn answer_help(error: &clap::Error, argv: &[String], subcommand: Option<String>) -> Exit {
+    let (json, quiet) = json_and_quiet(argv);
+    if !json {
+        let _ = error.print();
+        return Exit::Ok;
+    }
+    help_or_version(error, argv, subcommand, quiet)
+}
+
 /// A parse failure: help and version exit 0 (under `--json` as a result
 /// object, [`help_or_version`]); anything else is a usage error with a
 /// result object (exit 2).
 fn usage_error(error: &clap::Error, argv: &[String]) -> Exit {
     use clap::error::ErrorKind;
-    let args = &argv[1.min(argv.len())..];
-    let json = args.iter().any(|a| a == "--json") || env_flag("ICM_JSON");
-    let quiet = args.iter().any(|a| is_quiet_flag(a));
+    let (json, quiet) = json_and_quiet(argv);
     let subcommand = named_subcommand(argv);
 
-    if matches!(
-        error.kind(),
-        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-    ) {
-        if !json {
-            let _ = error.print();
-            return Exit::Ok;
-        }
-        return help_or_version(error, argv, subcommand, quiet);
+    if is_help_or_version(error) {
+        return answer_help(error, argv, subcommand);
     }
 
     let command = subcommand.unwrap_or_else(|| "icm".to_string());

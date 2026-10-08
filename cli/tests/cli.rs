@@ -227,10 +227,46 @@ fn help_and_version_answer_json_with_a_result() {
         );
     }
 
+    // The command after `print plan`: its help is that command's help,
+    // not a usage error, wherever `--json` is written.
+    for (args, named) in [
+        (
+            &["print", "plan", "run", "desktop", "--help", "--json", "-q"][..],
+            "run",
+        ),
+        (&["--json", "-q", "print", "plan", "build", "-h"], "build"),
+        (
+            &[
+                "print", "plan", "--config", "x.toml", "stop", "--help", "--json", "-q",
+            ],
+            "stop",
+        ),
+    ] {
+        let help = result(&sandbox.run(args));
+        assert_eq!(help["exit"], 0, "{args:?}: {help}");
+        assert_eq!(help["command"], "help", "{args:?}: {help}");
+        assert_eq!(help["target"], named, "{args:?}: {help}");
+        assert_eq!(help["errors"], serde_json::json!([]), "{args:?}: {help}");
+        assert!(
+            help["help"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("Usage: icm {named}")),
+            "{args:?}: {help}"
+        );
+    }
+
     // Human mode is unchanged: the text, exit 0.
     let output = sandbox.run(&["run", "--help"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(stdout(&output).starts_with("Build, install, launch"));
+    let output = sandbox.run(&["print", "plan", "run", "desktop", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        stdout(&output).starts_with("Build, install, launch"),
+        "{}",
+        stdout(&output)
+    );
     assert!(!sandbox.runs().exists());
 }
 

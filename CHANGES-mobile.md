@@ -25,6 +25,8 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   (`ios.sim.owner_unknown`, `android.emulator.owner_unknown`).
 - Under `--json`, `--help` and usage errors name the command, not the value of a global option
   written before it (`icm --config x.toml run --help`).
+- `icm print plan <command> --help` answers with that command's help and exit 0, where it was a
+  `usage.bad_args` error (exit 2) whose detail was the help's first line.
 - When `icm run android --wait-ready` runs out, the error says only what the readiness polls saw,
   where it used to say the app was alive. After Android relaunched the activity, it says so, where
   it used to say the wait ended before the resumed-activity probe starts.
