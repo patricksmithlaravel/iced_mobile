@@ -763,6 +763,73 @@ fn a_record_of_an_exited_emulator_proves_nothing() {
     );
 }
 
+/// A device icm did not boot (the one the run was told to use, a phone or
+/// an emulator of the owner's) is not checked against any emulator process:
+/// `stop` force-stops the app there, as it always did, without reading an
+/// owner or touching the emulator.
+#[test]
+fn the_app_is_force_stopped_on_a_device_icm_did_not_boot() {
+    let sandbox = Sandbox::new();
+    sandbox.owned_by("fedcba9876543210");
+    sandbox.write_session(serde_json::json!({"booted_by_icm": false, "kind": "device"}));
+    let result = sandbox.result(&["stop", "android"]);
+    assert_eq!(result["exit"], 0, "{result}");
+    let calls = sandbox.adb_calls();
+    assert!(
+        calls.contains("-s emulator-5580 shell am force-stop"),
+        "{calls}"
+    );
+    assert!(!calls.contains("getprop debug.icm.booted_by"), "{calls}");
+    assert!(!calls.contains("emu kill"), "{calls}");
+    assert_eq!(
+        result["stopped"],
+        serde_json::json!([
+            {"platform": "android", "app": "com.acme.fixture", "serial": "emulator-5580"}
+        ]),
+        "{result}"
+    );
+}
+
+/// A session an older icm wrote (no process identity) on an emulator nothing
+/// marks proves nothing by itself: the app is force-stopped there only when
+/// the emulator runs one of icm's own AVDs, which `--shutdown` would shut
+/// down too. On any other AVD the app is left running, and the INFO says
+/// why.
+#[test]
+fn an_older_session_on_an_unmarked_emulator_needs_a_managed_avd() {
+    let sandbox = Sandbox::new();
+    let process = Emulator::start();
+    sandbox.write_session(serde_json::json!({"emulator_pid": process.0}));
+
+    // icm-api36, nobody's: icm's own.
+    let result = sandbox.result(&["stop", "android"]);
+    assert_eq!(result["exit"], 0, "{result}");
+    assert!(sandbox.adb_calls().contains("shell am force-stop"));
+    assert!(!sandbox.adb_calls().contains("emu kill"));
+    assert!(process.running());
+
+    // The owner's own AVD on that serial: not icm's to touch.
+    std::fs::write(sandbox.log(), "").unwrap();
+    sandbox.write_session(serde_json::json!({"emulator_pid": process.0}));
+    let events = sandbox.events(&["stop", "android"], &[("FAKE_AVD", "owners_pixel")]);
+    let result = events.last().unwrap();
+    assert_eq!(result["exit"], 0, "{result}");
+    let calls = sandbox.adb_calls();
+    assert!(!calls.contains("force-stop"), "{calls}");
+    assert!(!calls.contains("emu kill"), "{calls}");
+    assert_eq!(result["stopped"], serde_json::json!([]), "{result}");
+    let info = checks(&events, "run.no_session");
+    assert_eq!(info.len(), 1, "{events:?}");
+    assert!(
+        info[0]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("com.acme.fixture was not force-stopped on emulator-5580"),
+        "{events:?}"
+    );
+    assert!(process.running());
+}
+
 #[test]
 fn another_avd_is_never_shut_down() {
     let sandbox = Sandbox::new();
