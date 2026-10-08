@@ -877,12 +877,11 @@ fn judge_app_process(
     executable: &str,
     pid: i64,
 ) -> AppProcess {
-    let suffix = format!("/{bundle}/{executable}");
     let is_app = |process: &devicectl::Listed| {
         process
             .executable
             .as_deref()
-            .is_some_and(|path| path.ends_with(&suffix))
+            .is_some_and(|path| devicectl::is_app_executable(path, bundle, executable))
     };
     match listing.iter().find(|process| process.pid == pid) {
         Some(process) if is_app(process) => AppProcess::Running,
@@ -1495,6 +1494,48 @@ mod tests {
             judge_app_process(&[listed(4242, Some(app))], "Other.app", "fixture-app", 4242),
             AppProcess::NotRunning(_)
         ));
+    }
+
+    /// devicectl lists an executable as a file URL with its path
+    /// percent-encoded, so the app `My App` runs in `My%20App.app`. The
+    /// record names the bundle as the directory is called. Matching them
+    /// raw took the app for another process: `stop` terminated nothing,
+    /// said the app was not running and removed the record.
+    #[test]
+    fn an_app_whose_bundle_name_is_escaped_in_the_listing_is_the_app() {
+        for (bundle, listed) in [
+            ("My App.app", "My%20App.app"),
+            ("Caf\u{e9}.app", "Caf%C3%A9.app"),
+            ("100%.app", "100%25.app"),
+        ] {
+            let app =
+                format!("file:///private/var/containers/Bundle/Application/X/{listed}/my-app");
+            let judge = |listing: &[devicectl::Listed], bundle: &str| {
+                judge_app_process(listing, bundle, "my-app", 4242)
+            };
+            assert_eq!(
+                judge(&[listed_process(4242, &app)], bundle),
+                AppProcess::Running,
+                "{bundle} listed as {listed}"
+            );
+            // Not for another app, whatever it is called.
+            let AppProcess::NotRunning(why) = judge(&[listed_process(4242, &app)], "Other.app")
+            else {
+                panic!("{listed} was taken for Other.app");
+            };
+            // The reason names the path as it is, not as it is escaped.
+            assert!(why.contains(&format!("/{bundle}/my-app")), "{why}");
+            // The app under another pid: not the one icm launched, and
+            // found all the same.
+            let AppProcess::NotRunning(why) = judge(&[listed_process(5000, &app)], bundle) else {
+                panic!("{bundle}: the app under another pid was taken for the recorded one");
+            };
+            assert!(why.contains("the app runs as pid 5000"), "{why}");
+        }
+    }
+
+    fn listed_process(pid: i64, executable: &str) -> devicectl::Listed {
+        listed(pid, Some(executable))
     }
 
     #[test]

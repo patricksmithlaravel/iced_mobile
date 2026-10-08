@@ -265,6 +265,18 @@ impl Device {
             .any(|line| line.starts_with("devicectl device process terminate "))
     }
 
+    /// Names the app `name` (its bundle is `<name>.app`).
+    fn rename_app(&self, name: &str) {
+        let config = self.dir().join("icm.toml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(text.contains("name = \"Fixture\""), "{text}");
+        std::fs::write(
+            &config,
+            text.replace("name = \"Fixture\"", &format!("name = \"{name}\"")),
+        )
+        .unwrap();
+    }
+
     fn session_path(&self) -> PathBuf {
         self.dir().join("target/icm/sessions/ios-device.json")
     }
@@ -542,6 +554,54 @@ fn stop_leaves_a_process_that_took_the_apps_pid_alone() {
         assert_eq!(stop["warnings"], json!([]), "{case}: {stop}");
         assert_eq!(stop["checks"]["failed"], json!([]), "{case}: {stop}");
         assert!(!device.session_path().exists(), "{case}");
+    }
+}
+
+/// devicectl lists a process's executable as a file URL, and Foundation
+/// percent-encodes a URL's path: an app named `My App` runs in
+/// `My%20App.app`, and `Café` in `Caf%C3%A9.app`. The record names the
+/// bundle as its directory is called, so the two were compared unlike and
+/// the app was taken for another process: `stop` terminated nothing, said
+/// the app was not running, and removed the record, with the app still on
+/// the phone and no stop to retry. Not seen on a phone: this host has none,
+/// so the listing's spelling is Foundation's documented one, and the fake
+/// device lists it that way.
+#[test]
+fn an_app_whose_name_the_listing_escapes_is_found_and_terminated() {
+    for (name, listed) in [("My App", "My%20App"), ("Café", "Caf%C3%A9")] {
+        let device = Device::new();
+        device.rename_app(name);
+        let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+        assert_eq!(run["exit"], 0, "{name}: {run}");
+        let session = device.session();
+        assert_eq!(session["app"]["bundle"], format!("{name}.app"), "{name}");
+        assert_eq!(session["stop"].as_array().unwrap().len(), 1, "{name}");
+        let in_bundle = |dir: &str| {
+            format!("file:///private/var/containers/Bundle/Application/X/{dir}/release-app")
+        };
+
+        // Another bundle's executable under the pid is not the app, however
+        // alike: nothing is terminated.
+        device.list_processes(&[process(4242, &in_bundle(&format!("{listed}%20Beta.app")))]);
+        let stop = device.json(&["stop", "ios-device"]);
+        assert_eq!(stop["exit"], 0, "{name}: {stop}");
+        assert_eq!(stop["stopped"][0]["app"], "not_running", "{name}: {stop}");
+        assert!(!device.terminated(), "{name}: {}", device.log("xcrun.log"));
+
+        // The app itself, listed with its path escaped, is terminated with
+        // the stored command (the record was removed by that stop, so the
+        // app is started again).
+        let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+        assert_eq!(run["exit"], 0, "{name}: {run}");
+        device.list_processes(&[process(4242, &in_bundle(&format!("{listed}.app")))]);
+        let stop = device.json(&["stop", "ios-device"]);
+        assert_eq!(stop["exit"], 0, "{name}: {stop}");
+        assert_eq!(stop["stopped"][0]["app"], "terminated", "{name}: {stop}");
+        assert_eq!(stop["stopped"][0]["app_note"], Value::Null, "{name}");
+        assert!(device.terminated(), "{name}: {}", device.log("xcrun.log"));
+        assert_eq!(stop["unverified"], json!([]), "{name}: {stop}");
+        assert_eq!(stop["warnings"], json!([]), "{name}: {stop}");
+        assert!(!device.session_path().exists(), "{name}");
     }
 }
 

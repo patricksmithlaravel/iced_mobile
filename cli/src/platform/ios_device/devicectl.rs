@@ -6,6 +6,7 @@
 //! falls back to the deprecated `hardwareProperties`, `deviceProperties` and
 //! `connectionProperties` that older devicectl versions write.
 
+use crate::web::server::percent_decode;
 use serde_json::Value;
 
 /// One physical device.
@@ -175,13 +176,27 @@ pub fn parse_devices(text: &str) -> Result<Vec<Device>, String> {
     Ok(out)
 }
 
+/// Whether `executable`, as devicectl lists it, is `binary` inside the
+/// bundle directory `bundle`. devicectl writes the executable as a file URL,
+/// and Foundation encodes a URL's path with percent escapes: an app named
+/// `My App` is listed in `My%20App.app/my-app`, and `Café` as `Caf%C3%A9`.
+/// The path is compared decoded, and as written, so that a devicectl that
+/// writes the plain path matches too. A listing that cannot be decoded
+/// (a malformed escape, bytes that are not UTF-8) matches by the text as it
+/// stands, and names no app it did not spell.
+pub fn is_app_executable(executable: &str, bundle: &str, binary: &str) -> bool {
+    let suffix = format!("/{bundle}/{binary}");
+    executable.ends_with(&suffix)
+        || percent_decode(executable).is_some_and(|path| path.ends_with(&suffix))
+}
+
 /// The pids of the running processes whose executable lies in
-/// `<bundle>/<executable>` (`devicectl device info processes`).
+/// `<bundle>/<executable>` (`devicectl device info processes`; see
+/// [`is_app_executable`] for how the executable is read).
 pub fn app_pids(text: &str, bundle: &str, executable: &str) -> Vec<i64> {
     let Ok(json) = serde_json::from_str::<Value>(text) else {
         return Vec::new();
     };
-    let suffix = format!("/{bundle}/{executable}");
     json.pointer("/result/runningProcesses")
         .and_then(Value::as_array)
         .map(|processes| {
@@ -190,7 +205,7 @@ pub fn app_pids(text: &str, bundle: &str, executable: &str) -> Vec<i64> {
                 .filter(|p| {
                     p.get("executable")
                         .and_then(Value::as_str)
-                        .is_some_and(|path| path.ends_with(&suffix))
+                        .is_some_and(|path| is_app_executable(path, bundle, executable))
                 })
                 .filter_map(|p| p.get("processIdentifier").and_then(Value::as_i64))
                 .collect()
@@ -209,10 +224,12 @@ pub struct Listed {
 }
 
 impl Listed {
-    /// The executable without its `file://`, or `?`.
-    pub fn program(&self) -> &str {
+    /// The executable's path for a message: without its `file://`, and with
+    /// the URL's percent escapes decoded when they decode, or `?`.
+    pub fn program(&self) -> String {
         let path = self.executable.as_deref().unwrap_or("?");
-        path.strip_prefix("file://").unwrap_or(path)
+        let path = path.strip_prefix("file://").unwrap_or(path);
+        percent_decode(path).unwrap_or_else(|| path.to_string())
     }
 }
 
@@ -353,5 +370,74 @@ mod tests {
         assert_eq!(app_pids(&text, "App.app", "app"), [812]);
         assert!(app_pids(&text, "Other.app", "app").is_empty());
         assert!(app_pids("not json", "App.app", "app").is_empty());
+    }
+
+    /// devicectl writes an executable as a file URL, and Foundation
+    /// percent-encodes a URL's path: an app whose name has a space, a
+    /// non-ASCII character or a `%` is not listed under its bundle's own
+    /// spelling, and was taken for another app.
+    #[test]
+    fn an_escaped_executable_is_the_apps_executable() {
+        let at = |dir: &str, binary: &str| {
+            format!("file:///private/var/containers/Bundle/Application/X/{dir}/{binary}")
+        };
+        for (bundle, listed) in [
+            ("My App.app", "My%20App.app"),
+            ("Caf\u{e9}.app", "Caf%C3%A9.app"),
+            ("100%.app", "100%25.app"),
+            ("A #1 (beta).app", "A%20%231%20(beta).app"),
+            // A plain name needs no escape, and a devicectl that writes
+            // the path as it stands matches too.
+            ("Plain.app", "Plain.app"),
+            ("My App.app", "My App.app"),
+        ] {
+            assert!(
+                is_app_executable(&at(listed, "my-app"), bundle, "my-app"),
+                "{bundle} was not found as {listed}"
+            );
+        }
+        // Another bundle's, another binary's, and a directory that only
+        // ends the same way are not this app's.
+        let spaced = at("My%20App.app", "my-app");
+        assert!(!is_app_executable(&spaced, "App.app", "my-app"));
+        assert!(!is_app_executable(&spaced, "My.app", "my-app"));
+        assert!(!is_app_executable(&spaced, "My App.app", "other"));
+        assert!(!is_app_executable(
+            &at("My%20App.app.old", "my-app"),
+            "My App.app",
+            "my-app"
+        ));
+        // An escape is decoded once: the app named `100%25` is listed as
+        // `100%2525`, and is not the app named `100%`.
+        let literal = at("100%2525.app", "my-app");
+        assert!(is_app_executable(&literal, "100%25.app", "my-app"));
+        assert!(!is_app_executable(&literal, "100%.app", "my-app"));
+        // Text that does not decode is compared as it stands, so a bundle
+        // named like it still matches, and no other does.
+        let broken = at("50%.app", "my-app");
+        assert!(is_app_executable(&broken, "50%.app", "my-app"));
+        assert!(!is_app_executable(&broken, "50.app", "my-app"));
+        let not_utf8 = at("%FF.app", "my-app");
+        assert!(is_app_executable(&not_utf8, "%FF.app", "my-app"));
+
+        let text = json!({"result": {"runningProcesses": [
+            {"executable": at("My%20App.app", "my-app"), "processIdentifier": 812},
+            {"executable": at("Caf%C3%A9.app", "my-app"), "processIdentifier": 813},
+            {"executable": "file:///usr/libexec/backboardd", "processIdentifier": 50}
+        ]}})
+        .to_string();
+        assert_eq!(app_pids(&text, "My App.app", "my-app"), [812]);
+        assert_eq!(app_pids(&text, "Caf\u{e9}.app", "my-app"), [813]);
+        assert!(app_pids(&text, "My%20App.app.x", "my-app").is_empty());
+
+        // A message names the path as it is, not as it is escaped.
+        let listed = Listed {
+            pid: 812,
+            executable: Some(at("My%20App.app", "my-app")),
+        };
+        assert_eq!(
+            listed.program(),
+            "/private/var/containers/Bundle/Application/X/My App.app/my-app"
+        );
     }
 }

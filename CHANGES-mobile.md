@@ -132,7 +132,11 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   result (the summary says the app may still be running), and the record stays so that the next
   `stop` asks again. icm's own console process is ended in every case. Before, the stored command
   ran as it stood, so an app that had exited or been restarted left its pid to another process of
-  the phone, which `stop` terminated.
+  the phone, which `stop` terminated. The device lists an executable as a file URL with its path
+  percent-escaped, so an app named `My App` or `Café` runs in `My%20App.app` or `Caf%C3%A9.app`; the
+  listing is decoded before it is compared with the app's bundle (the readiness probe too), so such
+  an app is recognised and terminated, and not taken for another process, which would have left it
+  running with the record removed. (Not seen on a phone.)
 - Plain `icm stop android` (and `icm stop --all`) says why it left the app running when the device
   names another project as the emulator's owner (`android.emulator.shared`), with the `adb` command
   that stops the app by hand, where it said nothing.
