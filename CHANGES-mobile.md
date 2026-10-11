@@ -134,16 +134,11 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   lists the recorded pid as the app. The record's `devicectl device process terminate --pid` names
   a pid of the phone, which the phone reuses like any other, so `stop` asks `devicectl device info
   processes` first and runs the command only when that pid runs the app's executable. When the
-  device lists the recorded pid with no usable executable path (none, an empty one, or one that
-  does not decode), that is not proof the app is gone: nothing is terminated and the record stays,
-  as when the device cannot be asked, where it used to remove the record and count the app stopped.
-  When the device lists another process under the pid, or none, nothing is terminated and the record is
+  device lists another process under the pid, or none, nothing is terminated and the record is
   removed. When the device cannot be asked (not connected or locked, devicectl failing), nothing is
   terminated, `ios.device.stop_unconfirmed` warns, the device is listed as `unverified` in the
   result (the summary says the app may still be running), and the record stays so that the next
-  `stop` asks again. A terminate command that fails keeps the record the same way, with the app not
-  counted as stopped: before, the record was removed and a retry said nothing was running.
-  icm's own console process is ended too while its identity checks out (one whose
+  `stop` asks again. icm's own console process is ended too while its identity checks out (one whose
   identity icm could not read is left running, with a warning). Before, the stored command
   ran as it stood, so an app that had exited or been restarted left its pid to another process of
   the phone, which `stop` terminated. The device lists an executable as a file URL with its path
@@ -156,6 +151,17 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - **iOS:** `icm stop ios-device` compares a listed executable with the app's bundle only after
   decoding its file URL once, never as raw text. So a bundle named `100%25.app` is not taken for
   the app `100%.app`, which the device lists as `100%25.app/…`.
+- `icm stop ios-device` keeps the record when the device lists the recorded app pid with no usable
+  executable path (none, an empty one, or one that does not decode). That is not proof the app is
+  gone: nothing is terminated, `ios.device.stop_unconfirmed` warns, the device is listed as
+  `unverified` and the record stays for the next `stop`. Before, the record was removed and the app
+  counted as stopped. (Not seen on a phone.)
+- `icm stop ios-device` keeps the record when its terminate command fails. The entry is not counted
+  under `stopped`, the device is listed as `unverified`, and the summary says the app may still be
+  running because its terminate command failed. The console process icm started is still ended, and
+  the next `stop` asks the device again. Before, the record was removed and the app counted as
+  stopped, so a retry after the tool recovered said nothing was running. (Fake tools only; not seen
+  on a phone.)
 - Plain `icm stop android` (and `icm stop --all`) says why it left the app running when the device
   names another project as the emulator's owner (`android.emulator.shared`), with the `adb` command
   that stops the app by hand, where it said nothing.
