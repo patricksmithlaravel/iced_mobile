@@ -729,6 +729,55 @@ fn stop_terminates_nothing_it_could_not_confirm_and_keeps_the_record() {
     assert!(!device.session_path().exists());
 }
 
+/// The terminate command can fail with the app still running: devicectl
+/// refuses, or the phone is gone after the listing. That is no stop. The
+/// record stays as it does for a device that cannot be asked, the app is not
+/// counted as stopped, the device is listed as `unverified`, and the summary
+/// says the app may still be running. Once the command works, the next stop
+/// terminates the app and removes the record. Before, the record was removed
+/// and the app counted as stopped, so a retry said nothing was running.
+#[test]
+fn a_failed_terminate_command_keeps_the_record_and_is_not_a_stop() {
+    let device = Device::new();
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let stored = device.session()["stop"].clone();
+    device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+    std::fs::write(device.state().join("terminate-fail"), "").unwrap();
+
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(device.terminated(), "{}", device.log("xcrun.log"));
+    assert_eq!(stop["stopped"], json!([]), "{stop}");
+    assert_eq!(stop["unverified"], json!([UDID]), "{stop}");
+    assert_eq!(
+        stop["summary"],
+        "the app on Jo's iPhone may still be running (its terminate command failed)",
+        "{stop}"
+    );
+    assert!(
+        stop["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["id"] == "tool.failed"),
+        "{stop}"
+    );
+    assert_eq!(device.session()["stop"], stored);
+    assert!(device.session_path().exists(), "the record was removed");
+
+    // The command works again and the device still lists the app: the retry
+    // terminates it and removes the record.
+    std::fs::remove_file(device.state().join("terminate-fail")).unwrap();
+    device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
+    assert!(!device.session_path().exists());
+}
+
 /// devicectl can list the recorded pid with no executable, or an empty one.
 /// That is no proof the app is gone: `stop` terminates nothing, lists the
 /// device as unverified, and keeps the record for the next stop, where it

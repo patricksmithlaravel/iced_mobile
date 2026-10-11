@@ -16,7 +16,8 @@
 //! so the device is asked first whether that pid is still the app
 //! ([`crate::platform::ios_device::app_process`]); when it cannot say, the
 //! command does not run, a WARN says so and the record stays (the result's
-//! `unverified` lists the device). `--shutdown` also shuts down the
+//! `unverified` lists the device). A command that fails keeps the record the
+//! same way. `--shutdown` also shuts down the
 //! icm-managed simulator or emulator (`icm-` names only, never `icm-test-`
 //! ones, never a device icm did not create, and never one icm booted for
 //! another project:
@@ -74,9 +75,11 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     // ones it could not confirm it shut down (adb would not say).
     let mut still_running: Vec<String> = Vec::new();
     let mut unverified: Vec<String> = Vec::new();
-    // The apps on physical devices whose process the device would not
-    // confirm, as (device id, device name): nothing was terminated.
-    let mut apps_unconfirmed: Vec<(String, String)> = Vec::new();
+    // The apps on physical devices icm could not end, as (device id, device
+    // name, why the summary gives): the device would not confirm the
+    // process, or the terminate command failed. Their records stay, and
+    // they are not counted as stopped.
+    let mut apps_kept: Vec<(String, String, &'static str)> = Vec::new();
     for platform in &platforms {
         match stop_platform(
             ctx,
@@ -122,21 +125,27 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
             Ok(session) => {
                 let entry = stop_one(ctx, &path, &session, args.shutdown);
                 // Not stopped: its record stays, and the WARN says why.
-                if entry["app"] == "unconfirmed" {
-                    let device = session.device.clone().unwrap_or_default();
-                    let id = if device.id.is_empty() {
-                        platform.clone()
-                    } else {
-                        device.id.clone()
-                    };
-                    let name = if device.name.is_empty() {
-                        id.clone()
-                    } else {
-                        device.name
-                    };
-                    apps_unconfirmed.push((id, name));
-                } else {
-                    stopped.push(entry);
+                let kept = match entry["app"].as_str() {
+                    Some("unconfirmed") => Some("devicectl could not confirm it"),
+                    Some("terminate_failed") => Some("its terminate command failed"),
+                    _ => None,
+                };
+                match kept {
+                    Some(why) => {
+                        let device = session.device.clone().unwrap_or_default();
+                        let id = if device.id.is_empty() {
+                            platform.clone()
+                        } else {
+                            device.id.clone()
+                        };
+                        let name = if device.name.is_empty() {
+                            id.clone()
+                        } else {
+                            device.name
+                        };
+                        apps_kept.push((id, name, why));
+                    }
+                    None => stopped.push(entry),
                 }
             }
             Err(message) => {
@@ -208,7 +217,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
             unverified
                 .iter()
                 .cloned()
-                .chain(apps_unconfirmed.iter().map(|(id, _)| id.clone()))
+                .chain(apps_kept.iter().map(|(id, _, _)| id.clone()))
                 .collect::<Vec<_>>()
         ),
     );
@@ -227,15 +236,8 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         &unverified,
     ));
     notes.extend(left_running);
-    if !apps_unconfirmed.is_empty() {
-        notes.push(format!(
-            "the app on {} may still be running (devicectl could not confirm it)",
-            apps_unconfirmed
-                .iter()
-                .map(|(_, name)| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+    for (_, name, why) in &apps_kept {
+        notes.push(format!("the app on {name} may still be running ({why})"));
     }
     ctx.rep.summary(if notes.is_empty() {
         summary
@@ -346,7 +348,8 @@ fn stop_platform(
 }
 
 /// Stops one session and removes its file, unless the app on its physical
-/// device could not be confirmed (`"app": "unconfirmed"` in the entry): the
+/// device was not confirmed ended (`"app": "unconfirmed"` in the entry, or
+/// `"app": "terminate_failed"` when its terminate command failed): the
 /// record then stays for the next stop.
 ///
 /// The record's stop commands run as they are, except for an ios-device
@@ -355,7 +358,9 @@ fn stop_platform(
 /// the app ([`crate::platform::ios_device::app_process`]): the command runs
 /// only then (`"app": "terminated"`). When the device lists another process,
 /// or none, there is nothing to end (`"app": "not_running"`); when it cannot
-/// be asked, nothing is ended and a WARN says so. The console process icm
+/// be asked, nothing is ended and a WARN says so. A terminate command that
+/// fails leaves the app running as far as icm knows, so it keeps the record
+/// the same way (`"app": "terminate_failed"`). The console process icm
 /// started is ended in every case, once its own identity checks out.
 fn stop_one(ctx: &Ctx, path: &Path, session: &Session, shutdown: bool) -> Value {
     use crate::platform::ios_device::{self, AppProcess};
@@ -461,13 +466,13 @@ fn stop_one(ctx: &Ctx, path: &Path, session: &Session, shutdown: bool) -> Value 
         }
     }
 
-    let unconfirmed = app == "unconfirmed";
-    if !unconfirmed {
+    let kept = app == "unconfirmed" || app == "terminate_failed";
+    if !kept {
         let _ = std::fs::remove_file(path);
     }
     ctx.rep.progress(format!(
         "{platform}: {}{}{}",
-        if unconfirmed {
+        if kept {
             "kept the record, the app may still run"
         } else {
             "stopped"

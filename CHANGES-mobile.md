@@ -141,7 +141,9 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   removed. When the device cannot be asked (not connected or locked, devicectl failing), nothing is
   terminated, `ios.device.stop_unconfirmed` warns, the device is listed as `unverified` in the
   result (the summary says the app may still be running), and the record stays so that the next
-  `stop` asks again. icm's own console process is ended too while its identity checks out (one whose
+  `stop` asks again. A terminate command that fails keeps the record the same way, with the app not
+  counted as stopped: before, the record was removed and a retry said nothing was running.
+  icm's own console process is ended too while its identity checks out (one whose
   identity icm could not read is left running, with a warning). Before, the stored command
   ran as it stood, so an app that had exited or been restarted left its pid to another process of
   the phone, which `stop` terminated. The device lists an executable as a file URL with its path

@@ -17,7 +17,8 @@
 # devicectl (devices from $S/devicectl-devices.json; `leak` and
 # `leak-panic` log the secret on the console too; `device info processes`
 # lists the app while its fake console runs, or what $S/processes.json says,
-# and fails while $S/processes-fail exists).
+# and fails while $S/processes-fail exists; its `terminate` fails while
+# $S/terminate-fail exists, and the app keeps running).
 S="$ICM_FAKE_STATE"
 {
   echo "$*"
@@ -298,6 +299,12 @@ devicectl)
       esac
       ;;
     terminate)
+      # $S/terminate-fail: devicectl cannot end the process. It writes its
+      # failure and exits 1, and the app keeps running.
+      if [ -f "$S/terminate-fail" ]; then
+        echo "ERROR: The operation couldn't be completed. The device is not connected." >&2
+        exit 1
+      fi
       if [ -f "$S/device-app.pid" ]; then end_fake "$(cat "$S/device-app.pid")"; rm -f "$S/device-app.pid"; fi
       ;;
     esac
