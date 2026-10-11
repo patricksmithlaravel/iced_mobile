@@ -863,23 +863,25 @@ pub enum AppProcess {
     /// has it, or another one does (what is said). Nothing to terminate.
     NotRunning(String),
     /// icm could not tell: the device or devicectl would not answer, the
-    /// record does not say what to look for, or the listing does not read
-    /// the recorded pid's executable as the app's or another process's (why).
-    /// The recorded pid may name any process on the phone, so nothing is
-    /// terminated.
+    /// record does not say what to look for, the listing does not read the
+    /// recorded pid's executable as the app's or another process's (why), or
+    /// the listing names no usable executable for the pid (why). The recorded
+    /// pid may name any process on the phone, so nothing is terminated.
     Unconfirmed(String),
 }
 
 /// Whether the recorded app pid, listed by the device, is the app: the pid
 /// must run `<bundle>/<executable>`. A process of the app under another pid
-/// is not what icm launched, so it is not the one to end.
+/// is not what icm launched, so it is not the one to end. A listed pid whose
+/// executable icm cannot read is unconfirmed, not another process: a missing
+/// answer is no proof that the app is gone.
 fn judge_app_process(
     listing: &[devicectl::Listed],
     bundle: &str,
     executable: &str,
     pid: i64,
 ) -> AppProcess {
-    // A process with no executable named is another process, as before.
+    // A process with no executable named does not run the app's binary.
     let compare = |process: &devicectl::Listed| {
         process
             .executable
@@ -889,6 +891,9 @@ fn judge_app_process(
             })
     };
     match listing.iter().find(|process| process.pid == pid) {
+        Some(process) if process.usable_program().is_none() => AppProcess::Unconfirmed(format!(
+            "the device lists pid {pid} without a usable executable path, so icm cannot tell whether that process is the app"
+        )),
         Some(process) => match compare(process) {
             devicectl::Match::Same => AppProcess::Running,
             devicectl::Match::Different => AppProcess::NotRunning(format!(
@@ -924,8 +929,9 @@ fn judge_app_process(
 /// app (`devicectl device info processes`), before `stop` runs the recorded
 /// terminate command: a pid on the phone is reused like any other, and the
 /// command would end whatever process has it now. Anything that stops the
-/// question from being answered, or the record from saying what to look
-/// for, is [`AppProcess::Unconfirmed`], never a reason to terminate.
+/// question from being answered, the record from saying what to look for,
+/// or the listing from saying what runs under the pid, is
+/// [`AppProcess::Unconfirmed`], never a reason to terminate.
 pub fn app_process(ctx: &Ctx, session: &Session) -> AppProcess {
     let unconfirmed = |why: String| AppProcess::Unconfirmed(why);
     let Some(device) = session.device.as_ref().filter(|d| !d.id.is_empty()) else {
@@ -1499,10 +1505,6 @@ mod tests {
             panic!("another process under the pid was taken for the app");
         };
         assert!(why.contains("/usr/libexec/backboardd"), "{why}");
-        let AppProcess::NotRunning(why) = judge(&[listed(4242, None)]) else {
-            panic!("a process with no executable was taken for the app");
-        };
-        assert!(why.contains("pid 4242 is ?"), "{why}");
         // The app runs under another pid: not the one icm launched.
         let AppProcess::NotRunning(why) = judge(&[listed(5000, Some(app))]) else {
             panic!("the app under another pid was taken for the recorded one");
@@ -1543,6 +1545,65 @@ mod tests {
             judge_app_process(&[listed(5000, Some(malformed))], "Fixture.app", "fixture-app", 4242),
             AppProcess::NotRunning(why) if why.contains("no process has pid 4242")
         ));
+    }
+
+    /// A listed recorded pid whose executable icm cannot read is unconfirmed,
+    /// not another process: nothing says what runs under it, so the record
+    /// stays and nothing is terminated. Missing, empty, blank and undecodable
+    /// executables all count.
+    #[test]
+    fn a_listed_pid_without_a_usable_executable_is_unconfirmed() {
+        let judge = |listing: &[devicectl::Listed]| {
+            judge_app_process(listing, "Fixture.app", "fixture-app", 4242)
+        };
+        // Missing: the entry names no executable at all.
+        let AppProcess::Unconfirmed(why) = judge(&[listed(4242, None)]) else {
+            panic!("a listed pid with no executable was taken for another process");
+        };
+        assert!(
+            why.contains("pid 4242 without a usable executable"),
+            "{why}"
+        );
+        // Empty, blank, a bare `file://`, and an escape that does not decode.
+        for executable in [
+            "",
+            "   ",
+            "file://",
+            "file:///private/var/containers/Bundle/Application/X/%ZZ/fixture-app",
+        ] {
+            assert!(
+                matches!(
+                    judge(&[listed(4242, Some(executable))]),
+                    AppProcess::Unconfirmed(_)
+                ),
+                "{executable:?} was taken for another process"
+            );
+        }
+        // An unusable entry under another pid says nothing about the one icm
+        // recorded, which no process lists: that is still not running.
+        assert!(matches!(
+            judge(&[listed(5000, None)]),
+            AppProcess::NotRunning(why) if why.contains("no process has pid 4242")
+        ));
+    }
+
+    /// A readable executable that another program runs is not the app, and
+    /// neither is a pid that nothing lists: both are NotRunning, with the
+    /// reason.
+    #[test]
+    fn a_readable_other_executable_or_an_unlisted_pid_is_not_running() {
+        let judge = |listing: &[devicectl::Listed]| {
+            judge_app_process(listing, "Fixture.app", "fixture-app", 4242)
+        };
+        let backboardd = "file:///usr/libexec/backboardd";
+        let AppProcess::NotRunning(why) = judge(&[listed(4242, Some(backboardd))]) else {
+            panic!("a readable other executable under the pid was taken for the app");
+        };
+        assert!(why.contains("pid 4242 is /usr/libexec/backboardd"), "{why}");
+        let AppProcess::NotRunning(why) = judge(&[listed(50, Some(backboardd))]) else {
+            panic!("an unlisted pid was taken for the app");
+        };
+        assert!(why.contains("no process has pid 4242"), "{why}");
     }
 
     /// devicectl lists an executable as a file URL with its path

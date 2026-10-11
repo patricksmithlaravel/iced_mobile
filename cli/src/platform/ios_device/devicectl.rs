@@ -312,6 +312,17 @@ impl Listed {
         let path = path.strip_prefix("file://").unwrap_or(path);
         decode_once(path).unwrap_or_else(|| path.to_string())
     }
+
+    /// The executable's path, as [`Listed::program`] shows it, when the entry
+    /// names one icm can read: a path that is not blank once `file://` is
+    /// removed and its escapes decoded. None when the entry names no
+    /// executable, an empty or blank one, or one that does not decode. Such
+    /// an entry says nothing about what the process is.
+    pub fn usable_program(&self) -> Option<String> {
+        let path = self.executable.as_deref()?;
+        let path = decode_once(path.strip_prefix("file://").unwrap_or(path))?;
+        (!path.trim().is_empty()).then_some(path)
+    }
 }
 
 /// Every running process in `devicectl device info processes
@@ -439,6 +450,36 @@ mod tests {
         assert!(running_processes(r#"{"result":{}}"#).is_err());
         assert!(running_processes("").is_err());
         assert!(running_processes("not json").is_err());
+    }
+
+    /// An executable icm can read is a path that is not blank once decoded.
+    /// An entry with none, an empty or blank one, or escapes that do not
+    /// decode has no usable path, and says nothing about its process.
+    #[test]
+    fn a_listed_executable_is_usable_only_as_a_path_that_decodes() {
+        let usable = |executable: Option<&str>| {
+            Listed {
+                pid: 812,
+                executable: executable.map(str::to_string),
+            }
+            .usable_program()
+        };
+        assert_eq!(
+            usable(Some(
+                "file:///private/var/containers/Bundle/Application/X/My%20App.app/app"
+            )),
+            Some("/private/var/containers/Bundle/Application/X/My App.app/app".to_string())
+        );
+        assert_eq!(
+            usable(Some("/usr/libexec/backboardd")),
+            Some("/usr/libexec/backboardd".to_string())
+        );
+        assert_eq!(usable(None), None);
+        assert_eq!(usable(Some("")), None);
+        assert_eq!(usable(Some("file://")), None);
+        assert_eq!(usable(Some(" \t ")), None);
+        assert_eq!(usable(Some("file:///var/%ZZ/app")), None);
+        assert_eq!(usable(Some("file:///var/%FF/app")), None);
     }
 
     #[test]

@@ -134,7 +134,10 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   lists the recorded pid as the app. The record's `devicectl device process terminate --pid` names
   a pid of the phone, which the phone reuses like any other, so `stop` asks `devicectl device info
   processes` first and runs the command only when that pid runs the app's executable. When the
-  device lists another process under the pid, or none, nothing is terminated and the record is
+  device lists the recorded pid with no usable executable path (none, an empty one, or one that
+  does not decode), that is not proof the app is gone: nothing is terminated and the record stays,
+  as when the device cannot be asked, where it used to remove the record and count the app stopped.
+  When the device lists another process under the pid, or none, nothing is terminated and the record is
   removed. When the device cannot be asked (not connected or locked, devicectl failing), nothing is
   terminated, `ios.device.stop_unconfirmed` warns, the device is listed as `unverified` in the
   result (the summary says the app may still be running), and the record stays so that the next

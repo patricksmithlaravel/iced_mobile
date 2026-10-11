@@ -729,6 +729,48 @@ fn stop_terminates_nothing_it_could_not_confirm_and_keeps_the_record() {
     assert!(!device.session_path().exists());
 }
 
+/// devicectl can list the recorded pid with no executable, or an empty one.
+/// That is no proof the app is gone: `stop` terminates nothing, lists the
+/// device as unverified, and keeps the record for the next stop, where it
+/// used to remove the record and count the app stopped.
+#[test]
+fn stop_keeps_the_record_when_the_recorded_pid_lists_no_usable_executable() {
+    for (case, executable) in [("no executable", None), ("an empty executable", Some(""))] {
+        let device = Device::new();
+        let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+        assert_eq!(run["exit"], 0, "{case}: {run}");
+        let stored = device.session()["stop"].clone();
+        let mut entry = json!({"processIdentifier": 4242});
+        if let Some(executable) = executable {
+            entry["executable"] = json!(executable);
+        }
+        device.list_processes(&[entry]);
+
+        let stop = device.json(&["stop", "ios-device"]);
+        assert_eq!(stop["exit"], 0, "{case}: {stop}");
+        assert!(!device.terminated(), "{case}: {}", device.log("xcrun.log"));
+        assert_eq!(stop["stopped"], json!([]), "{case}: {stop}");
+        assert_eq!(stop["unverified"], json!([UDID]), "{case}: {stop}");
+        let warned: Vec<&Value> = stop["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["id"] == "ios.device.stop_unconfirmed")
+            .collect();
+        assert_eq!(warned.len(), 1, "{case}: {stop}");
+        let detail = warned[0]["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("pid 4242 without a usable executable path"),
+            "{case}: {detail}"
+        );
+        assert_eq!(device.session()["stop"], stored, "{case}");
+        assert!(
+            device.session_path().exists(),
+            "{case}: the record was removed"
+        );
+    }
+}
+
 /// A device that answers with text that is no process list is not an empty
 /// device: devicectl writes its failures as JSON too.
 #[test]
