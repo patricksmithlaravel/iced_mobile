@@ -482,7 +482,7 @@ fn secrets_for(cmd: &Cmd) -> Vec<String> {
 
 /// [`redact_text`] for bytes: bytes that are not UTF-8 stay as they are
 /// unless the text holds a secret.
-fn redact_bytes(bytes: Vec<u8>, secrets: &[String]) -> Vec<u8> {
+pub(crate) fn redact_bytes(bytes: Vec<u8>, secrets: &[String]) -> Vec<u8> {
     if secrets.is_empty() {
         return bytes;
     }

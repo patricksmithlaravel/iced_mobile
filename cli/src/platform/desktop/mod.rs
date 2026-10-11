@@ -48,6 +48,7 @@
 //! of the secret-named variables the app inherited; `shot`, `logs` and
 //! `stop` read it.
 
+pub mod collector;
 pub mod headless;
 pub mod linux;
 pub mod logs;

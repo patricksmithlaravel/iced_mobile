@@ -253,7 +253,7 @@ pub enum Command {
     )]
     Diagnose(DiagnoseArgs),
 
-    /// Internal: the detached session host `run` spawns
+    /// Internal: the detached session host `run` spawns (`web`), and the log collector of a desktop app (`desktop`)
     #[command(name = "__session", hide = true)]
     Session(RawArgs),
 

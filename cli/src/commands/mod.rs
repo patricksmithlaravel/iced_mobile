@@ -200,6 +200,9 @@ fn route(ctx: &mut Ctx, command: Command) -> Result<()> {
         }
         Command::Logs(args) if args.platform == Platform::Web => crate::web::logs(ctx, &args),
         Command::Input(args) if args.platform == Platform::Web => crate::web::input(ctx, &args),
+        Command::Session(args) if args.args.first().map(String::as_str) == Some("desktop") => {
+            desktop::collector::main(&args.args[1..])
+        }
         Command::Session(args) => crate::web::host::main(ctx, &args.args),
         Command::Build(args) if args.all || args.platform.is_none() => build::all(ctx, &args),
         Command::Build(_) => not_implemented("build"),
