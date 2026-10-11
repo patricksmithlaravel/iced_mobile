@@ -1068,6 +1068,275 @@ fn an_app_that_kept_its_process_has_its_inherited_secrets_read() {
     assert_no_secret_printed("ready", &printed);
 }
 
+/// Waits until the file at `path` holds `text`, as the app's live output
+/// does once the collector has written what the app printed.
+fn wait_for_text(path: &Path, text: &str) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read_to_string(path).is_ok_and(|read| read.contains(text)) {
+        assert!(
+            Instant::now() < until,
+            "{} never held {text:?}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The first form of either value the rotation tests hand the app that
+/// `text` holds.
+fn printed_secret(text: &str) -> Option<String> {
+    secret::forms()
+        .into_iter()
+        .chain(secret::rotated_forms())
+        .find(|form| text.contains(form.as_str()))
+}
+
+/// Runs `args` with `--json` from a shell with `env`: it must succeed and
+/// print neither value. Returns what it printed (standard output and error).
+fn printed_by(sandbox: &Sandbox, args: &[&str], env: &[(&str, &str)]) -> String {
+    let mut full = args.to_vec();
+    full.push("--json");
+    let output = sandbox.run_with(&full, env);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{args:?}: {text}");
+    assert_eq!(
+        printed_secret(&text),
+        None,
+        "{args:?} printed a secret: {text}"
+    );
+    text
+}
+
+/// Starts the fixture app under `shell` with `ICM_FIXTURE=<mode>`, and waits
+/// until it has replaced its process (`rotate`) and the new process has
+/// logged, on both streams. Returns its pid and the run's live directory.
+fn run_rotating_app(
+    sandbox: &Sandbox,
+    mode: &str,
+    shell: &[(&str, &str)],
+    apps: &mut Apps,
+) -> (i32, PathBuf) {
+    let run = sandbox.result_with(
+        &[
+            "run",
+            "desktop",
+            "--settle",
+            "200ms",
+            "--env",
+            &format!("ICM_FIXTURE={mode}"),
+        ],
+        shell,
+    );
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.push(pid);
+    let live = sandbox
+        .project
+        .path()
+        .join("target/icm/sessions/desktop")
+        .join(run["run"].as_str().unwrap());
+    wait_for_text(&live.join("app.stdout"), "rotated\n");
+    wait_for_text(&live.join("app.stderr"), "rotated\n");
+    (pid, live)
+}
+
+/// The audit's case, under the log collector. The app inherits
+/// `ICM_TEST_API_TOKEN` and `ICM_TEST_NEXT_TOKEN` from the shell of `icm run
+/// desktop`, logs the first, then replaces its process by the same program
+/// with the first variable set to the second's value (`ICM_FIXTURE=rotate`),
+/// and logs that. Before the collector, a later `logs` learned the new value
+/// from the running app, took the name as known, and printed the original
+/// one from the raw files. Now neither value reaches a file, and no later
+/// command prints either: `logs` and `logs --raw` from a shell with other
+/// values and from one without, and `shot`. Both values are inherited, which
+/// is what the collector can know: a value the app gets some other way is
+/// the known limit of `docs/agents/limitations.md`.
+#[test]
+fn an_app_that_rotates_its_inherited_secret_keeps_neither_value_in_its_files() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps::default();
+    let target = sandbox.project.path().join("target");
+    let shell = [
+        (secret::NAME, secret::TOKEN),
+        (secret::ROTATED_NAME, secret::ROTATED),
+    ];
+    let other = [
+        (secret::NAME, "another-value-24680"),
+        (secret::ROTATED_NAME, "another-next-135791"),
+    ];
+    let none: [(&str, &str); 0] = [];
+
+    let (pid, live) = run_rotating_app(&sandbox, "rotate", &shell, &mut apps);
+    let collector = collector_of(&sandbox);
+    assert!(alive(collector));
+    secret::assert_kept_nowhere(&live);
+    secret::assert_rotated_nowhere(&live);
+    secret::assert_sessions_keep_none(&target.join("icm"));
+
+    for (args, env) in [
+        (&["logs", "desktop"][..], &other[..]),
+        (&["logs", "desktop", "--raw"][..], &other[..]),
+        (&["logs", "desktop"][..], &none[..]),
+        (&["logs", "desktop", "--raw"][..], &none[..]),
+        (&["shot", "desktop"][..], &other[..]),
+    ] {
+        let text = printed_by(&sandbox, args, env);
+        assert!(
+            !text.contains("desktop.logs.secret_unknown"),
+            "{args:?}: {text}"
+        );
+        if args[0] == "logs" {
+            assert!(
+                text.contains("signed in with <redacted>"),
+                "{args:?}: {text}"
+            );
+            assert!(text.contains("rotated"), "{args:?}: {text}");
+        }
+    }
+    secret::assert_kept_nowhere(&target);
+    secret::assert_rotated_nowhere(&target);
+
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    wait_dead(pid);
+    wait_dead(collector);
+    secret::assert_kept_nowhere(&target);
+    secret::assert_rotated_nowhere(&target);
+    let after = printed_by(&sandbox, &["logs", "desktop"], &none);
+    assert!(!after.contains("desktop.logs.secret_unknown"), "{after}");
+}
+
+/// The control of the audit's case: an ordinary app, which does not replace
+/// its process, logs the value it inherited, and the rotated variable of its
+/// shell is inherited unlogged. Its live files hold no value, and no later
+/// command prints one, from a shell with other values or from one without.
+#[test]
+fn an_ordinary_app_that_logs_its_inherited_secret_keeps_it_out_of_its_files() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps::default();
+    let target = sandbox.project.path().join("target");
+    let shell = [
+        (secret::NAME, secret::TOKEN),
+        (secret::ROTATED_NAME, secret::ROTATED),
+    ];
+    let other = [
+        (secret::NAME, "another-value-24680"),
+        (secret::ROTATED_NAME, "another-next-135791"),
+    ];
+    let none: [(&str, &str); 0] = [];
+
+    let run = sandbox.result_with(&["run", "desktop", "--settle", "200ms"], &shell);
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.push(pid);
+    let collector = collector_of(&sandbox);
+    let live = target
+        .join("icm/sessions/desktop")
+        .join(run["run"].as_str().unwrap());
+    wait_for_text(&live.join("app.stdout"), "signed in with <redacted>\n");
+    secret::assert_kept_nowhere(&live);
+    secret::assert_rotated_nowhere(&live);
+
+    for (args, env) in [
+        (&["logs", "desktop"][..], &other[..]),
+        (&["logs", "desktop", "--raw"][..], &other[..]),
+        (&["logs", "desktop"][..], &none[..]),
+        (&["shot", "desktop"][..], &none[..]),
+    ] {
+        let text = printed_by(&sandbox, args, env);
+        assert!(
+            !text.contains("desktop.logs.secret_unknown"),
+            "{args:?}: {text}"
+        );
+        if args[0] == "logs" {
+            assert!(
+                text.contains("signed in with <redacted>"),
+                "{args:?}: {text}"
+            );
+        }
+    }
+
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    wait_dead(pid);
+    wait_dead(collector);
+    secret::assert_kept_nowhere(&target);
+    secret::assert_rotated_nowhere(&target);
+}
+
+/// A session from before the log collector (simulated by
+/// [`as_before_the_collector`]) whose app rotates, as the audit's app does,
+/// and then ends by itself. The app is gone, so a later command cannot learn
+/// either value from it: `logs` and `logs --raw` warn
+/// `desktop.logs.secret_unknown` for both names, read the run's redacted
+/// copies and print neither value, from a shell with other values, from one
+/// without, and from one with the same values. The rotation does not change
+/// the guard such a session has.
+#[test]
+fn a_rotated_app_from_before_the_collector_warns_and_prints_neither_value() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps::default();
+    let icm = sandbox.project.path().join("target/icm");
+    let shell = [
+        (secret::NAME, secret::TOKEN),
+        (secret::ROTATED_NAME, secret::ROTATED),
+    ];
+    let other = [
+        (secret::NAME, "another-value-24680"),
+        (secret::ROTATED_NAME, "another-next-135791"),
+    ];
+    let none: [(&str, &str); 0] = [];
+
+    let (pid, live) = run_rotating_app(&sandbox, "rotate", &shell, &mut apps);
+    let collector = collector_of(&sandbox);
+    std::fs::write(sandbox.project.path().join("quit"), "").unwrap();
+    wait_dead(pid);
+    wait_dead(collector);
+    as_before_the_collector(
+        &sandbox,
+        &live,
+        &format!(
+            "signed in with {}\nafter the run: {}\n",
+            secret::TOKEN,
+            secret::ROTATED
+        ),
+    );
+    assert!(secret::holds(&live.join("app.stdout")));
+
+    for (args, env) in [
+        (&["logs", "desktop"][..], &other[..]),
+        (&["logs", "desktop", "--raw"][..], &other[..]),
+        (&["logs", "desktop"][..], &none[..]),
+        (&["logs", "desktop", "--raw"][..], &none[..]),
+    ] {
+        let text = printed_by(&sandbox, args, env);
+        assert!(
+            text.contains("desktop.logs.secret_unknown"),
+            "{args:?}: {text}"
+        );
+        assert!(text.contains(secret::NAME), "{args:?}: {text}");
+        assert!(
+            text.contains("signed in with <redacted>"),
+            "{args:?}: {text}"
+        );
+        assert!(!text.contains("after the run"), "{args:?}: {text}");
+    }
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    secret::assert_kept_nowhere(&icm.join("runs"));
+    secret::assert_kept_nowhere(&icm.join("latest"));
+    secret::assert_rotated_nowhere(&icm.join("runs"));
+    secret::assert_rotated_nowhere(&icm.join("latest"));
+    assert!(!secret::holds(&icm.join("last.json")));
+    assert!(secret::holds(&live.join("app.stdout")));
+
+    // A shell with the same values does not make them known either.
+    let text = printed_by(&sandbox, &["logs", "desktop"], &shell);
+    assert!(text.contains("desktop.logs.secret_unknown"), "{text}");
+    assert!(!text.contains("after the run"), "{text}");
+}
+
 /// The app's log collector (`icm __session desktop`) is a process of its own,
 /// which the session records with the identity icm read for it. It ends with
 /// its app: `stop` leaves none running, and an app that ends by itself takes

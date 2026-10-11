@@ -80,6 +80,23 @@ fn replace_process(mode: &str) -> ! {
     std::process::exit(4);
 }
 
+/// Replaces this process by the same program, as an `exec` does, with the
+/// variable `ICM_TEST_API_TOKEN` set to the value the app inherited in
+/// `ICM_TEST_NEXT_TOKEN`, and `ICM_FIXTURE=rotated`. The pid, the start time
+/// and the executable stay; the rest of the environment is kept.
+fn rotate() -> ! {
+    use std::os::unix::process::CommandExt;
+    let argv0 = std::env::args_os().next().unwrap_or_default();
+    let next = std::env::var_os("ICM_TEST_NEXT_TOKEN").unwrap_or_default();
+    let error = std::process::Command::new(&argv0)
+        .arg0(&argv0)
+        .env("ICM_TEST_API_TOKEN", next)
+        .env("ICM_FIXTURE", "rotated")
+        .exec();
+    eprintln!("error: cannot replace the process: {error}");
+    std::process::exit(4);
+}
+
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("idle") {
         loop {
@@ -106,6 +123,22 @@ fn main() {
             std::process::exit(3);
         }
         "hang" => {}
+        "rotated" => {
+            // The same process after `rotate` changed the variable: it logs
+            // the new value, on both streams, and ends once the project has
+            // a `quit` file.
+            let _ = log_token();
+            println!("rotated");
+            eprintln!("rotated");
+            while !std::path::Path::new("quit").exists() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            println!(
+                "after the run: {}",
+                std::env::var("ICM_TEST_API_TOKEN").unwrap_or_default()
+            );
+            return;
+        }
         mode => {
             event(&start);
             println!("hello from stdout");
@@ -130,6 +163,11 @@ fn main() {
                 // It keeps its pid and start time, and gives out no
                 // environment: the secret it logged was inherited.
                 replace_process(mode);
+            }
+            if mode == "rotate" {
+                // The same program takes over, with the variable it logged
+                // set to the value it inherited under another name.
+                rotate();
             }
         }
     }

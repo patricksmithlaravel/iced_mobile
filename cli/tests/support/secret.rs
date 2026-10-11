@@ -27,6 +27,18 @@ pub const INHERITED: &str = "sh/ell\"to\\ken-only-987654";
 /// The end of [`INHERITED`], which no escape or encoding changes.
 pub const INHERITED_TAIL: &str = "only-987654";
 
+/// Another secret-named variable of the user's shell, inherited the same way
+/// (`ICM_TEST_NEXT_TOKEN`). The desktop fixture's `rotate` mode makes its app
+/// take this value over from [`NAME`], by replacing its process: a secret the
+/// app inherits, and the value a later command finds in the running app.
+pub const ROTATED_NAME: &str = "ICM_TEST_NEXT_TOKEN";
+
+/// Its value, which JSON escapes too.
+pub const ROTATED: &str = "nxt/val\"ue\\-246810";
+
+/// The end of [`ROTATED`], which no escape or encoding changes.
+pub const ROTATED_TAIL: &str = "-246810";
+
 /// A text inside a JSON string, as serde and JavaScript write it.
 fn escaped(text: &str) -> String {
     let quoted = serde_json::to_string(text).unwrap();
@@ -38,6 +50,11 @@ fn escaped(text: &str) -> String {
 /// percent-encoded (a URL's query), and any other that keeps [`TAIL`].
 pub fn forms() -> Vec<String> {
     forms_of(TOKEN, TAIL)
+}
+
+/// The forms of [`ROTATED`], as [`forms`] gives those of [`TOKEN`].
+pub fn rotated_forms() -> Vec<String> {
+    forms_of(ROTATED, ROTATED_TAIL)
 }
 
 /// [`forms`] of a value whose end is `tail`.
@@ -172,6 +189,16 @@ pub fn assert_inherited_nowhere(dir: &Path) {
     assert_none(
         &format!("the inherited {INHERITED_NAME}"),
         &leaks_of(dir, &forms),
+    );
+}
+
+/// Panics, naming the files, when a file under `dir` holds [`ROTATED`] in any
+/// form (the value of [`ROTATED_NAME`], which a rotating app takes over).
+pub fn assert_rotated_nowhere(dir: &Path) {
+    assert!(dir.is_dir(), "{} is not a directory", dir.display());
+    assert_none(
+        &format!("the rotated value of {ROTATED_NAME}"),
+        &leaks_of(dir, &rotated_forms()),
     );
 }
 
