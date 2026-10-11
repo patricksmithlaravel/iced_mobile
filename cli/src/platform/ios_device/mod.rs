@@ -862,9 +862,11 @@ pub enum AppProcess {
     /// The device answered, and the recorded pid is not the app: no process
     /// has it, or another one does (what is said). Nothing to terminate.
     NotRunning(String),
-    /// icm could not tell: the device or devicectl would not answer, or the
-    /// record does not say what to look for (why). The recorded pid may
-    /// name any process on the phone, so nothing is terminated.
+    /// icm could not tell: the device or devicectl would not answer, the
+    /// record does not say what to look for, or the listing does not read
+    /// the recorded pid's executable as the app's or another process's (why).
+    /// The recorded pid may name any process on the phone, so nothing is
+    /// terminated.
     Unconfirmed(String),
 }
 
@@ -877,22 +879,33 @@ fn judge_app_process(
     executable: &str,
     pid: i64,
 ) -> AppProcess {
-    let is_app = |process: &devicectl::Listed| {
+    // A process with no executable named is another process, as before.
+    let compare = |process: &devicectl::Listed| {
         process
             .executable
             .as_deref()
-            .is_some_and(|path| devicectl::is_app_executable(path, bundle, executable))
+            .map_or(devicectl::Match::Different, |path| {
+                devicectl::match_app_executable(path, bundle, executable)
+            })
     };
     match listing.iter().find(|process| process.pid == pid) {
-        Some(process) if is_app(process) => AppProcess::Running,
-        Some(process) => AppProcess::NotRunning(format!(
-            "pid {pid} is {} on the device now, not the app",
-            process.program()
-        )),
+        Some(process) => match compare(process) {
+            devicectl::Match::Same => AppProcess::Running,
+            devicectl::Match::Different => AppProcess::NotRunning(format!(
+                "pid {pid} is {} on the device now, not the app",
+                process.program()
+            )),
+            // Its executable does not read as a path icm can compare, so
+            // the pid may still be the app: nothing may be terminated.
+            devicectl::Match::Unknown => AppProcess::Unconfirmed(format!(
+                "pid {pid} is {} on the device now, and icm cannot tell from that path whether it is the app",
+                process.program()
+            )),
+        },
         None => {
             let others: Vec<String> = listing
                 .iter()
-                .filter(|process| is_app(process))
+                .filter(|process| compare(process) == devicectl::Match::Same)
                 .map(|process| process.pid.to_string())
                 .collect();
             AppProcess::NotRunning(if others.is_empty() {
@@ -1503,6 +1516,32 @@ mod tests {
         assert!(matches!(
             judge_app_process(&[listed(4242, Some(app))], "Other.app", "fixture-app", 4242),
             AppProcess::NotRunning(_)
+        ));
+    }
+
+    /// An executable that does not read as a path icm can compare (here a
+    /// malformed escape) leaves the recorded pid unconfirmed: stop then
+    /// terminates nothing and keeps the record. Only a listing with no such
+    /// process under the pid is a definite "not running".
+    #[test]
+    fn an_executable_that_does_not_read_leaves_the_pid_unconfirmed() {
+        let malformed =
+            "file:///private/var/containers/Bundle/Application/X/Fixture%G1.app/fixture-app";
+        let AppProcess::Unconfirmed(why) = judge_app_process(
+            &[listed(4242, Some(malformed))],
+            "Fixture%G1.app",
+            "fixture-app",
+            4242,
+        ) else {
+            panic!(
+                "an executable that does not decode was taken for the app or for another process"
+            );
+        };
+        assert!(why.contains("pid 4242"), "{why}");
+        assert!(why.contains("cannot tell"), "{why}");
+        assert!(matches!(
+            judge_app_process(&[listed(5000, Some(malformed))], "Fixture.app", "fixture-app", 4242),
+            AppProcess::NotRunning(why) if why.contains("no process has pid 4242")
         ));
     }
 

@@ -6,7 +6,6 @@
 //! falls back to the deprecated `hardwareProperties`, `deviceProperties` and
 //! `connectionProperties` that older devicectl versions write.
 
-use crate::web::server::percent_decode;
 use serde_json::Value;
 
 /// One physical device.
@@ -176,23 +175,103 @@ pub fn parse_devices(text: &str) -> Result<Vec<Device>, String> {
     Ok(out)
 }
 
-/// Whether `executable`, as devicectl lists it, is `binary` inside the
-/// bundle directory `bundle`. devicectl writes the executable as a file URL,
-/// and Foundation encodes a URL's path with percent escapes: an app named
-/// `My App` is listed in `My%20App.app/my-app`, and `Café` as `Caf%C3%A9`.
-/// The path is compared decoded, and as written, so that a devicectl that
-/// writes the plain path matches too. A listing that cannot be decoded
-/// (a malformed escape, bytes that are not UTF-8) matches by the text as it
-/// stands, and names no app it did not spell.
-pub fn is_app_executable(executable: &str, bundle: &str, binary: &str) -> bool {
-    let suffix = format!("/{bundle}/{binary}");
-    executable.ends_with(&suffix)
-        || percent_decode(executable).is_some_and(|path| path.ends_with(&suffix))
+/// How a listed executable compares with an app's `<bundle>/<binary>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Match {
+    /// The executable is the app's binary, inside its bundle.
+    Same,
+    /// It is another program, or this binary in another bundle.
+    Different,
+    /// The text does not settle it (see [`match_app_executable`]), so
+    /// nothing may be concluded from it.
+    Unknown,
 }
 
-/// The pids of the running processes whose executable lies in
-/// `<bundle>/<executable>` (`devicectl device info processes`; see
-/// [`is_app_executable`] for how the executable is read).
+/// How `executable`, as devicectl lists it, compares with `binary` inside
+/// the bundle directory `bundle`. devicectl writes the executable as a file
+/// URL, and Foundation encodes a URL's path with percent escapes: an app
+/// named `My App` is listed in `My%20App.app/my-app`, and `Café` as
+/// `Caf%C3%A9`.
+///
+/// The path of a file URL is decoded once, and only the decoded path is
+/// compared: `100%25.app` is listed as `100%2525.app`, and the listed text
+/// `100%25.app` denotes the app `100%.app`, not `100%25.app`. A plain path,
+/// with no scheme, is compared as it stands. Anything else is
+/// [`Match::Unknown`]: a URL with another scheme, a file URL with another
+/// host or no path, a raw `?` or `#` (Foundation escapes both in a path, so
+/// a URL that has one does not say where its path ends), or an escape that
+/// is not two hex digits, or bytes that are not UTF-8 once decoded.
+pub fn match_app_executable(executable: &str, bundle: &str, binary: &str) -> Match {
+    let path = if executable.starts_with("file://") {
+        match file_url_path(executable) {
+            Some(path) => path,
+            None => return Match::Unknown,
+        }
+    } else if has_scheme(executable) {
+        return Match::Unknown;
+    } else {
+        executable.to_string()
+    };
+    if path.ends_with(&format!("/{bundle}/{binary}")) {
+        Match::Same
+    } else {
+        Match::Different
+    }
+}
+
+/// The decoded path of a `file://` URL whose host is empty or `localhost`,
+/// or `None` when [`match_app_executable`] cannot read one.
+fn file_url_path(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("file://")?;
+    if rest.contains(['?', '#']) {
+        return None;
+    }
+    let (host, path) = rest.split_at(rest.find('/')?);
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    decode_once(path)
+}
+
+/// Whether `text` starts with a URL scheme (`name:`). A plain path does
+/// not: a colon after a `/` or a space is part of the path.
+fn has_scheme(text: &str) -> bool {
+    let Some((scheme, _)) = text.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// `text` with each `%XX` escape decoded, once; `None` when an escape is
+/// not two hex digits or the decoded bytes are not UTF-8. Stricter than
+/// `web::server::percent_decode`, which also reads a sign after the `%`.
+fn decode_once(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = hex_value(*bytes.get(index + 1)?)?;
+            let low = hex_value(*bytes.get(index + 2)?)?;
+            out.push(high * 16 + low);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    char::from(byte).to_digit(16).map(|digit| digit as u8)
+}
+
+/// The pids of the running processes whose executable is `<bundle>/<executable>`
+/// (`devicectl device info processes`). Only a [`Match::Same`] executable
+/// counts: one that does not read as the app's is not taken for it.
 pub fn app_pids(text: &str, bundle: &str, executable: &str) -> Vec<i64> {
     let Ok(json) = serde_json::from_str::<Value>(text) else {
         return Vec::new();
@@ -205,7 +284,9 @@ pub fn app_pids(text: &str, bundle: &str, executable: &str) -> Vec<i64> {
                 .filter(|p| {
                     p.get("executable")
                         .and_then(Value::as_str)
-                        .is_some_and(|path| is_app_executable(path, bundle, executable))
+                        .is_some_and(|path| {
+                            match_app_executable(path, bundle, executable) == Match::Same
+                        })
                 })
                 .filter_map(|p| p.get("processIdentifier").and_then(Value::as_i64))
                 .collect()
@@ -229,7 +310,7 @@ impl Listed {
     pub fn program(&self) -> String {
         let path = self.executable.as_deref().unwrap_or("?");
         let path = path.strip_prefix("file://").unwrap_or(path);
-        percent_decode(path).unwrap_or_else(|| path.to_string())
+        decode_once(path).unwrap_or_else(|| path.to_string())
     }
 }
 
@@ -372,15 +453,17 @@ mod tests {
         assert!(app_pids("not json", "App.app", "app").is_empty());
     }
 
+    /// The file URL devicectl lists for a binary in the app's container.
+    fn at(dir: &str, binary: &str) -> String {
+        format!("file:///private/var/containers/Bundle/Application/X/{dir}/{binary}")
+    }
+
     /// devicectl writes an executable as a file URL, and Foundation
     /// percent-encodes a URL's path: an app whose name has a space, a
     /// non-ASCII character or a `%` is not listed under its bundle's own
     /// spelling, and was taken for another app.
     #[test]
     fn an_escaped_executable_is_the_apps_executable() {
-        let at = |dir: &str, binary: &str| {
-            format!("file:///private/var/containers/Bundle/Application/X/{dir}/{binary}")
-        };
         for (bundle, listed) in [
             ("My App.app", "My%20App.app"),
             ("Caf\u{e9}.app", "Caf%C3%A9.app"),
@@ -391,34 +474,31 @@ mod tests {
             ("Plain.app", "Plain.app"),
             ("My App.app", "My App.app"),
         ] {
-            assert!(
-                is_app_executable(&at(listed, "my-app"), bundle, "my-app"),
+            assert_eq!(
+                match_app_executable(&at(listed, "my-app"), bundle, "my-app"),
+                Match::Same,
                 "{bundle} was not found as {listed}"
             );
         }
         // Another bundle's, another binary's, and a directory that only
         // ends the same way are not this app's.
         let spaced = at("My%20App.app", "my-app");
-        assert!(!is_app_executable(&spaced, "App.app", "my-app"));
-        assert!(!is_app_executable(&spaced, "My.app", "my-app"));
-        assert!(!is_app_executable(&spaced, "My App.app", "other"));
-        assert!(!is_app_executable(
-            &at("My%20App.app.old", "my-app"),
-            "My App.app",
-            "my-app"
-        ));
-        // An escape is decoded once: the app named `100%25` is listed as
-        // `100%2525`, and is not the app named `100%`.
-        let literal = at("100%2525.app", "my-app");
-        assert!(is_app_executable(&literal, "100%25.app", "my-app"));
-        assert!(!is_app_executable(&literal, "100%.app", "my-app"));
-        // Text that does not decode is compared as it stands, so a bundle
-        // named like it still matches, and no other does.
-        let broken = at("50%.app", "my-app");
-        assert!(is_app_executable(&broken, "50%.app", "my-app"));
-        assert!(!is_app_executable(&broken, "50.app", "my-app"));
-        let not_utf8 = at("%FF.app", "my-app");
-        assert!(is_app_executable(&not_utf8, "%FF.app", "my-app"));
+        assert_eq!(
+            match_app_executable(&spaced, "App.app", "my-app"),
+            Match::Different
+        );
+        assert_eq!(
+            match_app_executable(&spaced, "My.app", "my-app"),
+            Match::Different
+        );
+        assert_eq!(
+            match_app_executable(&spaced, "My App.app", "other"),
+            Match::Different
+        );
+        assert_eq!(
+            match_app_executable(&at("My%20App.app.old", "my-app"), "My App.app", "my-app"),
+            Match::Different
+        );
 
         let text = json!({"result": {"runningProcesses": [
             {"executable": at("My%20App.app", "my-app"), "processIdentifier": 812},
@@ -438,6 +518,129 @@ mod tests {
         assert_eq!(
             listed.program(),
             "/private/var/containers/Bundle/Application/X/My App.app/my-app"
+        );
+    }
+
+    /// A file URL's path is decoded once: a bundle named `100%25.app` is
+    /// listed as `100%2525.app`, and the listed `100%25.app` is the app
+    /// `100%.app`, not the one named `100%25.app`.
+    #[test]
+    fn an_escape_is_decoded_once() {
+        let listed = at("100%25.app", "my-app");
+        assert_eq!(
+            match_app_executable(&listed, "100%25.app", "my-app"),
+            Match::Different
+        );
+        assert_eq!(
+            match_app_executable(&listed, "100%.app", "my-app"),
+            Match::Same
+        );
+        let escaped = at("100%2525.app", "my-app");
+        assert_eq!(
+            match_app_executable(&escaped, "100%25.app", "my-app"),
+            Match::Same
+        );
+        assert_eq!(
+            match_app_executable(&escaped, "100%.app", "my-app"),
+            Match::Different
+        );
+    }
+
+    #[test]
+    fn an_encoded_space_is_a_space() {
+        let listed = at("My%20App.app", "my-app");
+        assert_eq!(
+            match_app_executable(&listed, "My App.app", "my-app"),
+            Match::Same
+        );
+        assert_eq!(
+            match_app_executable(&listed, "My%20App.app", "my-app"),
+            Match::Different
+        );
+    }
+
+    #[test]
+    fn encoded_unicode_is_the_letter_it_spells() {
+        let listed = at("Caf%C3%A9.app", "my-app");
+        assert_eq!(
+            match_app_executable(&listed, "Caf\u{e9}.app", "my-app"),
+            Match::Same
+        );
+        assert_eq!(
+            match_app_executable(&listed, "Cafe.app", "my-app"),
+            Match::Different
+        );
+    }
+
+    /// An escape that is not two hex digits, or bytes that are not UTF-8
+    /// once decoded, settles nothing: the listing is neither a match nor a
+    /// mismatch for any bundle, and no app counts as running under it.
+    #[test]
+    fn a_malformed_escape_is_unknown() {
+        for dir in ["%G1.app", "50%.app", "%+1.app", "%FF.app", "a%2"] {
+            assert_eq!(
+                match_app_executable(&at(dir, "my-app"), dir, "my-app"),
+                Match::Unknown,
+                "{dir}"
+            );
+            assert_eq!(
+                match_app_executable(&at(dir, "my-app"), "50.app", "my-app"),
+                Match::Unknown,
+                "{dir}"
+            );
+        }
+        let text = json!({"result": {"runningProcesses": [
+            {"executable": at("50%.app", "my-app"), "processIdentifier": 77}
+        ]}})
+        .to_string();
+        assert!(app_pids(&text, "50%.app", "my-app").is_empty());
+    }
+
+    /// The other shapes of executable that settle nothing: another scheme,
+    /// another host, no path, and a `?` or `#` that a file URL would escape.
+    #[test]
+    fn an_executable_of_another_shape_is_unknown() {
+        for url in [
+            "https://example.com/private/My%20App.app/my-app",
+            "FILE:///private/My%20App.app/my-app",
+            "file:/private/My%20App.app/my-app",
+            "file://other-host/private/My%20App.app/my-app",
+            "file://",
+            "file:///private/My%20App.app/my-app?x",
+            "file:///private/My%20App.app/my-app#x",
+        ] {
+            assert_eq!(
+                match_app_executable(url, "My App.app", "my-app"),
+                Match::Unknown,
+                "{url}"
+            );
+        }
+        // localhost is this machine, and its path is read.
+        assert_eq!(
+            match_app_executable(
+                "file://localhost/private/My%20App.app/my-app",
+                "My App.app",
+                "my-app"
+            ),
+            Match::Same
+        );
+    }
+
+    /// A plain path, with no scheme, is compared as it stands: its escapes
+    /// are not decoded, and a colon inside it is no scheme.
+    #[test]
+    fn a_plain_path_is_compared_as_it_stands() {
+        assert_eq!(
+            match_app_executable("/private/x/50%.app/my-app", "50%.app", "my-app"),
+            Match::Same
+        );
+        assert_eq!(
+            match_app_executable("/private/x/My%20App.app/my-app", "My App.app", "my-app"),
+            Match::Different
+        );
+        assert_eq!(
+            match_app_executable("/private/a:b/My App.app/my-app", "My App.app", "my-app"),
+            Match::Same
         );
     }
 }
