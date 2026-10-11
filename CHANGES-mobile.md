@@ -148,6 +148,9 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   process, which would have left it running with the record removed. A listing that does not decode,
   or names another URL scheme, confirms nothing: `stop` terminates nothing and warns
   `ios.device.stop_unconfirmed`. (Not seen on a phone.)
+- **iOS:** `icm stop ios-device` compares a listed executable with the app's bundle only after
+  decoding its file URL once, never as raw text. So a bundle named `100%25.app` is not taken for
+  the app `100%.app`, which the device lists as `100%25.app/…`.
 - Plain `icm stop android` (and `icm stop --all`) says why it left the app running when the device
   names another project as the emulator's owner (`android.emulator.shared`), with the `adb` command
   that stops the app by hand, where it said nothing.
