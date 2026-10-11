@@ -265,6 +265,16 @@ impl Device {
             .any(|line| line.starts_with("devicectl device process terminate "))
     }
 
+    /// Every `devicectl` command the fake was given so far, in order, as its
+    /// call log writes it (`devicectl device info processes --device …`).
+    fn devicectl_calls(&self) -> Vec<String> {
+        self.log("xcrun.log")
+            .lines()
+            .filter(|line| line.starts_with("devicectl "))
+            .map(str::to_string)
+            .collect()
+    }
+
     /// Names the app `name` (its bundle is `<name>.app`).
     fn rename_app(&self, name: &str) {
         let config = self.dir().join("icm.toml");
@@ -293,6 +303,17 @@ const APP_EXECUTABLE: &str =
 
 fn process(pid: i64, executable: &str) -> Value {
     json!({"executable": executable, "processIdentifier": pid})
+}
+
+/// The `devicectl` calls of a `stop` that found the recorded pid running the
+/// app: the device is asked for its processes, then the stored terminate
+/// command runs, once each.
+fn assert_asked_then_terminated(calls: &[String], pid: i64, case: &str) {
+    let asked = format!("devicectl device info processes --device {UDID} ");
+    let terminate = format!("devicectl device process terminate --device {UDID} --pid {pid}");
+    assert_eq!(calls.len(), 2, "{case}: {calls:?}");
+    assert!(calls[0].starts_with(&asked), "{case}: {calls:?}");
+    assert_eq!(calls[1], terminate, "{case}: {calls:?}");
 }
 
 /// Ends what the fake devicectl left running under `pid`, a number a file
@@ -745,8 +766,13 @@ fn a_failed_terminate_command_keeps_the_record_and_is_not_a_stop() {
     device.list_processes(&[process(4242, APP_EXECUTABLE)]);
     std::fs::write(device.state().join("terminate-fail"), "").unwrap();
 
+    // The device lists the app, so the stored command runs and fails: a WARN,
+    // which never changes the exit code.
+    let before = device.devicectl_calls().len();
     let stop = device.json(&["stop", "ios-device"]);
     assert_eq!(stop["exit"], 0, "{stop}");
+    let calls = device.devicectl_calls().split_off(before);
+    assert_asked_then_terminated(&calls, 4242, "the failed terminate");
     assert!(device.terminated(), "{}", device.log("xcrun.log"));
     assert_eq!(stop["stopped"], json!([]), "{stop}");
     assert_eq!(stop["unverified"], json!([UDID]), "{stop}");
@@ -767,11 +793,14 @@ fn a_failed_terminate_command_keeps_the_record_and_is_not_a_stop() {
     assert!(device.session_path().exists(), "the record was removed");
 
     // The command works again and the device still lists the app: the retry
-    // terminates it and removes the record.
+    // asks the device again, runs the command once, and removes the record.
     std::fs::remove_file(device.state().join("terminate-fail")).unwrap();
     device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+    let before = device.devicectl_calls().len();
     let stop = device.json(&["stop", "ios-device"]);
     assert_eq!(stop["exit"], 0, "{stop}");
+    let calls = device.devicectl_calls().split_off(before);
+    assert_asked_then_terminated(&calls, 4242, "the retry");
     assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
     assert_eq!(stop["unverified"], json!([]), "{stop}");
     assert_eq!(stop["warnings"], json!([]), "{stop}");
@@ -781,7 +810,9 @@ fn a_failed_terminate_command_keeps_the_record_and_is_not_a_stop() {
 /// devicectl can list the recorded pid with no executable, or an empty one.
 /// That is no proof the app is gone: `stop` terminates nothing, lists the
 /// device as unverified, and keeps the record for the next stop, where it
-/// used to remove the record and count the app stopped.
+/// used to remove the record and count the app stopped. Once the listing
+/// names the app's executable under the pid, the next stop asks again and
+/// terminates the app.
 #[test]
 fn stop_keeps_the_record_when_the_recorded_pid_lists_no_usable_executable() {
     for (case, executable) in [("no executable", None), ("an empty executable", Some(""))] {
@@ -795,8 +826,15 @@ fn stop_keeps_the_record_when_the_recorded_pid_lists_no_usable_executable() {
         }
         device.list_processes(&[entry]);
 
+        let before = device.devicectl_calls().len();
         let stop = device.json(&["stop", "ios-device"]);
         assert_eq!(stop["exit"], 0, "{case}: {stop}");
+        let calls = device.devicectl_calls().split_off(before);
+        assert_eq!(calls.len(), 1, "{case}: {calls:?}");
+        assert!(
+            calls[0].starts_with(&format!("devicectl device info processes --device {UDID} ")),
+            "{case}: {calls:?}"
+        );
         assert!(!device.terminated(), "{case}: {}", device.log("xcrun.log"));
         assert_eq!(stop["stopped"], json!([]), "{case}: {stop}");
         assert_eq!(stop["unverified"], json!([UDID]), "{case}: {stop}");
@@ -817,6 +855,20 @@ fn stop_keeps_the_record_when_the_recorded_pid_lists_no_usable_executable() {
             device.session_path().exists(),
             "{case}: the record was removed"
         );
+
+        // The listing now shows the app's executable under the recorded pid:
+        // the next stop asks again, runs the stored command once, and removes
+        // the record.
+        device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+        let before = device.devicectl_calls().len();
+        let stop = device.json(&["stop", "ios-device"]);
+        assert_eq!(stop["exit"], 0, "{case}: {stop}");
+        let calls = device.devicectl_calls().split_off(before);
+        assert_asked_then_terminated(&calls, 4242, case);
+        assert_eq!(stop["stopped"][0]["app"], "terminated", "{case}: {stop}");
+        assert_eq!(stop["unverified"], json!([]), "{case}: {stop}");
+        assert_eq!(stop["warnings"], json!([]), "{case}: {stop}");
+        assert!(!device.session_path().exists(), "{case}");
     }
 }
 
