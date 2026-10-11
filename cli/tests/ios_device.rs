@@ -606,6 +606,67 @@ fn an_app_whose_name_the_listing_escapes_is_found_and_terminated() {
     }
 }
 
+/// devicectl's listing is decoded once, as a file URL is read: a bundle named
+/// `100%25.app` is listed as `100%2525.app`, so the listed text `100%25.app`
+/// denotes the app `100%.app`. A pid that runs `100%.app` is not the app
+/// `100%25.app`, although the raw listing ends with the record's own
+/// `100%25.app/<binary>`: nothing is terminated. The positive control lists
+/// `My App.app` as `My%20App.app`, which is the app, and the stored command
+/// ends it. Only fake devicectl output is used; no device is involved.
+#[test]
+fn a_listed_executable_is_the_app_once_decoded_and_no_other() {
+    let device = Device::new();
+    device.rename_app("100%25");
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(device.session()["app"]["bundle"], "100%25.app", "{run}");
+    device.list_processes(&[process(
+        4242,
+        "file:///private/var/containers/Bundle/Application/X/100%25.app/release-app",
+    )]);
+
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    let xcrun = device.log("xcrun.log");
+    assert!(
+        xcrun.contains(&format!("devicectl device info processes --device {UDID} ")),
+        "the device was not asked: {xcrun}"
+    );
+    assert!(
+        !device.terminated(),
+        "the recorded command ran for the pid of 100%.app: {xcrun}"
+    );
+    assert_eq!(stop["stopped"][0]["app"], "not_running", "{stop}");
+    let note = stop["stopped"][0]["app_note"].as_str().unwrap();
+    assert!(
+        note.contains(
+            "pid 4242 is /private/var/containers/Bundle/Application/X/100%.app/release-app on the device now, not the app"
+        ),
+        "{note}"
+    );
+    assert_eq!(stop["stopped"][0]["commands"], json!([]), "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
+    assert!(!device.session_path().exists());
+
+    // The positive control: `My App.app` listed as `My%20App.app` is the app.
+    let device = Device::new();
+    device.rename_app("My App");
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    device.list_processes(&[process(
+        4242,
+        "file:///private/var/containers/Bundle/Application/X/My%20App.app/release-app",
+    )]);
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(device.terminated(), "{}", device.log("xcrun.log"));
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
+    assert!(!device.session_path().exists());
+}
+
 /// When the device cannot be asked (not connected, locked, devicectl
 /// failing), whose process the recorded pid is cannot be told either, so
 /// nothing is terminated: a WARN says so, the result lists the device as
