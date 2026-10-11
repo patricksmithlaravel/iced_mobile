@@ -53,10 +53,11 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
   newest result of any command is `target/icm/last.json`. Values of secret-named variables
   (`*TOKEN*`, `*KEY*`, `*SECRET*`, `*PASS*`, `*PRIVATE*`) read `<redacted>` there and on stdout; the
   live files icm reads in `target/icm/sessions/` are the app's own output, unredacted, while it
-  runs. A session keeps the secret values given with `--env` in a `secrets.json` (mode 0600)
-  there, so later commands redact them too. A desktop app also inherits icm's environment, but icm
-  keeps none of those values in a file: later commands read them from the running app, and
-  `icm stop desktop` redacts its live files. If the app inherited one and ended by itself,
+  runs, except a desktop app's: its log collector redacts them as it writes them. A session keeps
+  the secret values given with `--env` in a `secrets.json` (mode 0600) there, so later commands
+  redact them too. A desktop app also inherits icm's environment, and its collector redacts those
+  values from the live files, so icm keeps none of them in a file. A session from an older icm
+  (before the collector) has no such redaction: if the app inherited one and ended by itself,
   `icm logs desktop` shows only the run's redacted copies and warns
   `desktop.logs.secret_unknown`, whatever its own shell holds, so hand a secret the app logs with
   `--env`.

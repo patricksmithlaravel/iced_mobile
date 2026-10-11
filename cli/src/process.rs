@@ -23,6 +23,7 @@ use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -752,15 +753,59 @@ pub fn spawn_detached(cmd: &Cmd, stdout: &Path, stderr: &Path) -> io::Result<u32
     } else {
         OpenOptions::new().create(true).append(true).open(stderr)?
     };
+    spawn_session(cmd, Stdio::from(out), Stdio::from(err), None)
+}
 
+/// Starts a long-lived process as [`spawn_detached`] does, with its stdout
+/// and stderr on the given pipes (an app whose output a log collector reads
+/// and writes redacted). When `read` is given, its two descriptors are the
+/// child's 3 and 4, with close-on-exec cleared; the parent's copies close
+/// when this returns, so the child is the only holder of the read ends.
+pub fn spawn_piped(
+    cmd: &Cmd,
+    stdout: Stdio,
+    stderr: Stdio,
+    read: Option<[OwnedFd; 2]>,
+) -> io::Result<u32> {
+    remember_secrets(cmd);
+    spawn_session(cmd, stdout, stderr, read)
+}
+
+/// The part [`spawn_detached`] and [`spawn_piped`] share: the child in its
+/// own session, with the given stdout and stderr, and the read ends as 3
+/// and 4 when there are any.
+fn spawn_session(
+    cmd: &Cmd,
+    stdout: Stdio,
+    stderr: Stdio,
+    read: Option<[OwnedFd; 2]>,
+) -> io::Result<u32> {
+    let sources = read
+        .as_ref()
+        .map(|fds| [fds[0].as_raw_fd(), fds[1].as_raw_fd()]);
     let mut command = cmd.command();
-    let _ = command.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+    let _ = command.stdout(stdout).stderr(stderr);
 
-    // SAFETY: setsid is async-signal-safe and touches no Rust state.
+    // SAFETY: the closure runs in the child between fork and exec. It makes
+    // only system calls (setsid, fcntl, dup2), which are async-signal-safe,
+    // and allocates nothing. Each source is first copied to a number of 5
+    // or more, so the dup2 onto 3 and 4 cannot overwrite the other source.
+    // `read` stays owned by this function until the spawn returns, so the
+    // descriptors are open when the closure runs.
     unsafe {
-        let _ = command.pre_exec(|| {
+        let _ = command.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
+            }
+            if let Some([first, second]) = sources {
+                let first = libc::fcntl(first, libc::F_DUPFD_CLOEXEC, 5);
+                let second = libc::fcntl(second, libc::F_DUPFD_CLOEXEC, 5);
+                if first == -1 || second == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::dup2(first, 3) == -1 || libc::dup2(second, 4) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
             }
             Ok(())
         });
@@ -773,6 +818,7 @@ pub fn spawn_detached(cmd: &Cmd, stdout: &Path, stderr: &Path) -> io::Result<u32
         )
     })?;
 
+    drop(read);
     Ok(child.id())
 }
 
@@ -2052,5 +2098,40 @@ mod tests {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The read ends given to [`spawn_piped`] are the child's 3 and 4, and
+    /// its stdout and stderr are the pipes given: what is written to the
+    /// read ends comes out of the child's stdout, and the child's stderr
+    /// goes to its own pipe. The parent's copies of the read ends are closed
+    /// on return, so the child is the only reader left.
+    #[test]
+    fn a_piped_child_reads_its_inputs_on_3_and_4() {
+        use std::io::Read;
+        let (three_read, mut three_write) = std::io::pipe().unwrap();
+        let (four_read, mut four_write) = std::io::pipe().unwrap();
+        let (mut out_read, out_write) = std::io::pipe().unwrap();
+        let (mut err_read, err_write) = std::io::pipe().unwrap();
+        three_write.write_all(b"three\n").unwrap();
+        four_write.write_all(b"four\n").unwrap();
+        drop((three_write, four_write));
+        let pid = spawn_piped(
+            &sh("cat <&3; cat <&4; echo oops >&2"),
+            Stdio::from(out_write),
+            Stdio::from(err_write),
+            Some([OwnedFd::from(three_read), OwnedFd::from(four_read)]),
+        )
+        .unwrap();
+        let mut out = String::new();
+        out_read.read_to_string(&mut out).unwrap();
+        let mut err = String::new();
+        err_read.read_to_string(&mut err).unwrap();
+        // SAFETY: waitpid reaps this test's own child, which spawn_piped
+        // started and nothing else waits for.
+        let mut status = 0;
+        let reaped = unsafe { libc::waitpid(pid as i32, &raw mut status, 0) };
+        assert_eq!(reaped, pid as i32);
+        assert_eq!(out, "three\nfour\n");
+        assert_eq!(err, "oops\n");
     }
 }

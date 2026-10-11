@@ -444,11 +444,11 @@ fn panics_exits_and_hangs_fail_with_exit_ten() {
 /// the app inherits and logs plain, in a JSON line, in an `ICM_EVENT` and in
 /// a panic, is `<redacted>` in the copies of its stdout and stderr, in
 /// `app.log` and `logs.ndjson`, the step logs, events and results, raw or
-/// escaped. The live files in `target/icm/sessions` are the app's own
-/// output and keep it while the app runs, but the session records never do,
-/// though the app puts it in fields of its own in its `ready` event; once
-/// it has ended (stopped, or failed its run) the live files are redacted
-/// too, and no file under `target/` holds it: icm writes no inherited value
+/// escaped. The live files in `target/icm/sessions` are written by the log
+/// collector, which redacts them as it reads the app's output, so they hold
+/// no such value either, while the app runs or after it has ended, and the
+/// session records never do, though the app puts it in fields of its own in
+/// its `ready` event; no file under `target/` holds it: icm writes no inherited value
 /// anywhere, `secrets.json` included.
 #[test]
 fn run_directories_keep_no_secret() {
@@ -469,8 +469,13 @@ fn run_directories_keep_no_secret() {
     let live = icm
         .join("sessions/desktop")
         .join(run["run"].as_str().unwrap());
-    assert!(secret::holds(&live.join("app.stdout")));
-    assert!(secret::holds(&live.join("app.stderr")));
+    assert!(!secret::holds(&live.join("app.stdout")));
+    assert!(!secret::holds(&live.join("app.stderr")));
+    assert!(
+        std::fs::read_to_string(live.join("app.stdout"))
+            .unwrap()
+            .contains("signed in with <redacted>")
+    );
     // The app sent it in its `ready` event too, in fields of its own: the
     // session records keep the event's protocol fields, redacted.
     secret::assert_sessions_keep_none(&icm);
@@ -553,7 +558,7 @@ fn later_commands_without_the_secret_keep_none() {
     let live = icm
         .join("sessions/desktop")
         .join(run["run"].as_str().unwrap());
-    assert!(secret::holds(&live.join("app.stdout")));
+    assert!(!secret::holds(&live.join("app.stdout")));
     secret::assert_sessions_keep_none(&icm);
     let kept = live.join("secrets.json");
     let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
@@ -613,10 +618,9 @@ fn later_commands_without_the_secret_keep_none() {
 /// `ICM_TEST_API_TOKEN=… icm run desktop`, then `logs`, `logs --raw`,
 /// `shot` and `stop` from a shell without the variable: the app only
 /// inherited the secret, so the session names the variable and keeps no
-/// value, and each later command reads the value from the running app's
-/// environment, in memory. Their results and run directories redact it,
-/// `stop` redacts the live files once the app is gone, and then no file
-/// under `target/` holds it.
+/// value. The collector redacted the live files as the app wrote them, and
+/// the later commands have nothing to learn for them; their results and run
+/// directories redact the value too, and no file under `target/` holds it.
 #[test]
 fn later_commands_read_inherited_secrets_from_the_running_app() {
     let sandbox = Sandbox::new();
@@ -631,7 +635,7 @@ fn later_commands_read_inherited_secrets_from_the_running_app() {
     let live = target
         .join("icm/sessions/desktop")
         .join(run["run"].as_str().unwrap());
-    assert!(secret::holds(&live.join("app.stdout")));
+    assert!(!secret::holds(&live.join("app.stdout")));
     assert!(!live.join("secrets.json").exists());
     secret::assert_sessions_keep_none(&target.join("icm"));
     let session: Value =
@@ -674,12 +678,34 @@ fn later_commands_read_inherited_secrets_from_the_running_app() {
     secret::assert_kept_nowhere(&target);
 }
 
-/// An app that ends by itself after its run has nobody to read its
-/// environment from: a later `logs` cannot learn the secret it inherited,
-/// so it cannot redact what the app logged after the run. It reads the
-/// run's redacted copies and warns `desktop.logs.secret_unknown`, and
-/// writes the value nowhere; the live files stay the app's own output. A
-/// shell that sets the variable changes nothing.
+/// Makes the session of a run one an icm from before the log collector
+/// wrote: its records lose their `collector`, and its live files hold the
+/// app's output raw, with `raw` appended, as that icm let the app write it.
+/// Nothing else changes, so the guard of such a session is what is tested.
+fn as_before_the_collector(sandbox: &Sandbox, live: &Path, raw: &str) {
+    let icm = sandbox.project.path().join("target/icm");
+    for path in secret::session_records(&icm) {
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut record: Value = serde_json::from_str(&text).unwrap();
+        if let Some(fields) = record.as_object_mut() {
+            let _ = fields.remove("collector");
+        }
+        std::fs::write(&path, record.to_string()).unwrap();
+    }
+    let mut stdout = std::fs::OpenOptions::new()
+        .append(true)
+        .open(live.join("app.stdout"))
+        .unwrap();
+    std::io::Write::write_all(&mut stdout, raw.as_bytes()).unwrap();
+}
+
+/// A session from before the log collector, whose app ends by itself
+/// (simulated by [`as_before_the_collector`]): a later `logs` cannot learn
+/// the secret the app inherited, so it cannot redact what the app logged
+/// after the run. It reads the run's redacted copies and warns
+/// `desktop.logs.secret_unknown`, and writes the value nowhere; the live
+/// files stay the app's own output. A shell that sets the variable changes
+/// nothing.
 #[test]
 fn an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread() {
     let sandbox = Sandbox::new();
@@ -704,11 +730,17 @@ fn an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread() {
     apps.push(pid);
     std::fs::write(sandbox.project.path().join("quit"), "").unwrap();
     wait_dead(pid);
+    wait_dead(collector_of(&sandbox));
     let live = icm
         .join("sessions/desktop")
         .join(run["run"].as_str().unwrap());
     let stdout = std::fs::read_to_string(live.join("app.stdout")).unwrap();
     assert!(stdout.contains("after the run: "), "{stdout}");
+    as_before_the_collector(
+        &sandbox,
+        &live,
+        &format!("after the run: {}\n", secret::TOKEN),
+    );
 
     for args in [&["logs", "desktop"][..], &["logs", "desktop", "--raw"]] {
         let logs = sandbox.result(args);
@@ -743,14 +775,84 @@ fn an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread() {
     assert!(!secret::holds(&icm.join("last.json")));
 }
 
-/// A variable of the same name is not the value the app inherited: after
-/// `ICM_TEST_API_TOKEN=<old> icm run desktop` and an app that ended by
-/// itself, `logs`, `logs --raw` and `stop` from a shell whose variable of
-/// that name holds another value cannot redact what the app logged. They
-/// read the run's redacted copies and warn `desktop.logs.secret_unknown` as
-/// from a shell without the variable, and the session keeps naming it, so a
-/// later `logs` with neither value does the same. No output, result or file
-/// of theirs holds the old value.
+/// An app that ends by itself after its run, under the log collector: what
+/// it logged after the run is in its live file redacted, as the collector
+/// wrote it, so a later `logs` prints none of the secret, from a shell
+/// without the variable, with another value of it, or with the same one. No
+/// warning is due: the collector knew the value from the app's environment
+/// from the start, and nothing has to be learned. No file under `target/`
+/// holds the value, once the app is stopped too.
+#[test]
+fn an_app_that_ends_by_itself_keeps_its_output_redacted() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps::default();
+    let target = sandbox.project.path().join("target");
+    let icm = target.join("icm");
+    let shell = [(secret::NAME, secret::TOKEN)];
+    let other = [(secret::NAME, "another-value-24680")];
+    let none: [(&str, &str); 0] = [];
+
+    let run = sandbox.result_with(
+        &[
+            "run",
+            "desktop",
+            "--settle",
+            "200ms",
+            "--env",
+            "ICM_FIXTURE=quit",
+        ],
+        &shell,
+    );
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.push(pid);
+    std::fs::write(sandbox.project.path().join("quit"), "").unwrap();
+    wait_dead(pid);
+    // The collector writes what the app wrote last, and ends after it.
+    wait_dead(collector_of(&sandbox));
+    let live = icm
+        .join("sessions/desktop")
+        .join(run["run"].as_str().unwrap());
+    let stdout = std::fs::read_to_string(live.join("app.stdout")).unwrap();
+    assert!(stdout.contains("after the run: <redacted>"), "{stdout}");
+    assert!(!secret::holds(&live.join("app.stdout")));
+
+    for (args, env) in [
+        (&["logs", "desktop"][..], &shell[..]),
+        (&["logs", "desktop", "--raw"][..], &shell[..]),
+        (&["logs", "desktop"][..], &other[..]),
+        (&["logs", "desktop"][..], &none[..]),
+    ] {
+        let logs = sandbox.result_with(args, env);
+        assert_eq!(logs["exit"], 0, "{args:?}: {logs}");
+        let text = logs.to_string();
+        assert!(
+            !ids(&logs["warnings"]).contains(&"desktop.logs.secret_unknown".to_string()),
+            "{text}"
+        );
+        assert!(text.contains("after the run: <redacted>"), "{text}");
+        assert!(text.contains("signed in with <redacted>"), "{text}");
+        let form = secret::forms()
+            .into_iter()
+            .find(|form| text.contains(form.as_str()));
+        assert_eq!(form, None, "{args:?} printed the secret: {text}");
+    }
+
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    secret::assert_kept_nowhere(&target);
+    assert!(!secret::holds(&live.join("app.stdout")));
+}
+
+/// A variable of the same name is not the value the app inherited: in a
+/// session from before the log collector (simulated by
+/// [`as_before_the_collector`]), after `ICM_TEST_API_TOKEN=<old> icm run
+/// desktop` and an app that ended by itself, `logs`, `logs --raw` and `stop`
+/// from a shell whose variable of that name holds another value cannot
+/// redact what the app logged. They read the run's redacted copies and warn
+/// `desktop.logs.secret_unknown` as from a shell without the variable, and
+/// the session keeps naming it, so a later `logs` with neither value does
+/// the same. No output, result or file of theirs holds the old value.
 #[test]
 fn another_value_of_the_same_name_does_not_redact_the_inherited_one() {
     let sandbox = Sandbox::new();
@@ -775,11 +877,17 @@ fn another_value_of_the_same_name_does_not_redact_the_inherited_one() {
     apps.push(pid);
     std::fs::write(sandbox.project.path().join("quit"), "").unwrap();
     wait_dead(pid);
+    wait_dead(collector_of(&sandbox));
     let live = icm
         .join("sessions/desktop")
         .join(run["run"].as_str().unwrap());
     let stdout = std::fs::read_to_string(live.join("app.stdout")).unwrap();
     assert!(stdout.contains("after the run: "), "{stdout}");
+    as_before_the_collector(
+        &sandbox,
+        &live,
+        &format!("after the run: {}\n", secret::TOKEN),
+    );
     let guarded = || {
         let text = std::fs::read_to_string(live.join("session.json")).unwrap();
         let session: Value = serde_json::from_str(&text).unwrap();
@@ -864,7 +972,7 @@ fn logs_from_other_shells(mode: &str, becomes: &str, replaced: bool) -> Vec<(Str
     let live = icm
         .join("sessions/desktop")
         .join(run["run"].as_str().unwrap());
-    assert!(secret::holds(&live.join("app.stdout")));
+    assert!(!secret::holds(&live.join("app.stdout")));
 
     // The app is the same process (its pid and start time) either way; it
     // may need a moment to replace itself.
@@ -909,19 +1017,19 @@ fn logs_from_other_shells(mode: &str, becomes: &str, replaced: bool) -> Vec<(Str
 }
 
 /// An app that inherited a secret, logged it and then replaced its process,
-/// keeping its pid and start time: reading the process back gives a
-/// program and no variables (an empty environment; on macOS the system's
-/// `sleep`, whose environment the OS keeps from other processes). That
-/// does not tell the secret the app inherited, so a later `logs` from a
-/// shell with another value of the variable knows nothing of it: it warns
-/// `desktop.logs.secret_unknown` and reads the run's redacted copies. It
-/// used to take the read for the app's whole environment and print the
-/// live files, with the token, in its output, `result.json` and
-/// `events.ndjson`.
+/// keeping its pid and start time: reading the process back gives a program
+/// and no variables (an empty environment; on macOS the system's `sleep`,
+/// whose environment the OS keeps from other processes). icm does not read
+/// the app's environment for its live files, which the collector redacted as
+/// the app wrote them, so the replacement does not matter: a later `logs`
+/// from a shell with another value of the variable prints no value of it,
+/// and warns nothing. (A session from before the collector takes the read
+/// for what it is, and the guard of
+/// `an_app_that_ends_by_itself_leaves_its_inherited_secrets_unread` applies.)
 #[test]
 fn an_app_that_replaced_its_process_leaves_its_inherited_secrets_unread() {
     let printed = logs_from_other_shells("exec", "idle", true);
-    assert_replaced_app_is_guarded("exec", &printed);
+    assert_no_secret_printed("exec", &printed);
 }
 
 /// The same with the system's `sleep`, whose environment macOS hides: the
@@ -930,37 +1038,18 @@ fn an_app_that_replaced_its_process_leaves_its_inherited_secrets_unread() {
 #[test]
 fn an_app_that_became_a_platform_binary_leaves_its_inherited_secrets_unread() {
     let printed = logs_from_other_shells("exec-restricted", "/bin/sleep", true);
-    assert_replaced_app_is_guarded("exec-restricted", &printed);
+    assert_no_secret_printed("exec-restricted", &printed);
 }
 
-fn assert_replaced_app_is_guarded(mode: &str, printed: &[(String, String)]) {
+/// Each command's output (`logs`, `logs --raw`, `shot`) holds no form of the
+/// token, and the `logs` ones show the app's redacted output, with no
+/// `desktop.logs.secret_unknown` warning.
+fn assert_no_secret_printed(mode: &str, printed: &[(String, String)]) {
     for (what, text) in printed {
         let form = secret::forms()
             .into_iter()
             .find(|form| text.contains(form.as_str()));
         assert_eq!(form, None, "{mode}: {what} printed the token: {text}");
-        if what.starts_with("logs") {
-            assert!(
-                text.contains("desktop.logs.secret_unknown"),
-                "{what}: {text}"
-            );
-            assert!(text.contains(secret::NAME), "{what}: {text}");
-            assert!(text.contains("signed in with <redacted>"), "{what}: {text}");
-        }
-    }
-}
-
-/// The control of the two tests above: the app keeps its process, so a
-/// later `logs` reads its environment, learns the secret it inherited and
-/// redacts what it logged from the live files, with no warning.
-#[test]
-fn an_app_that_kept_its_process_has_its_inherited_secrets_read() {
-    let printed = logs_from_other_shells("ready", "", false);
-    for (what, text) in &printed {
-        let form = secret::forms()
-            .into_iter()
-            .find(|form| text.contains(form.as_str()));
-        assert_eq!(form, None, "{what} printed the token: {text}");
         if what.starts_with("logs") {
             assert!(
                 !text.contains("desktop.logs.secret_unknown"),
@@ -969,6 +1058,76 @@ fn an_app_that_kept_its_process_has_its_inherited_secrets_read() {
             assert!(text.contains("signed in with <redacted>"), "{what}: {text}");
         }
     }
+}
+
+/// The control of the two tests above: the app keeps its process, and its
+/// later `logs` print no value of the secret it inherited either.
+#[test]
+fn an_app_that_kept_its_process_has_its_inherited_secrets_read() {
+    let printed = logs_from_other_shells("ready", "", false);
+    assert_no_secret_printed("ready", &printed);
+}
+
+/// The app's log collector (`icm __session desktop`) is a process of its own,
+/// which the session records with the identity icm read for it. It ends with
+/// its app: `stop` leaves none running, and an app that ends by itself takes
+/// its collector with it, after the collector has written the app's output.
+#[test]
+fn the_log_collector_ends_with_its_app() {
+    let sandbox = Sandbox::new();
+    let mut apps = Apps::default();
+
+    let run = sandbox.result(&["run", "desktop", "--settle", "200ms", "--no-shot"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.push(pid);
+    let collector = collector_of(&sandbox);
+    assert_ne!(collector, pid);
+    assert!(alive(collector));
+    let stop = sandbox.result(&["stop", "desktop"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    wait_dead(pid);
+    wait_dead(collector);
+
+    let run = sandbox.result(&[
+        "run",
+        "desktop",
+        "--settle",
+        "200ms",
+        "--no-shot",
+        "--env",
+        "ICM_FIXTURE=quit",
+    ]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = run["process"]["pid"].as_i64().unwrap() as i32;
+    apps.push(pid);
+    let collector = collector_of(&sandbox);
+    std::fs::write(sandbox.project.path().join("quit"), "").unwrap();
+    wait_dead(pid);
+    wait_dead(collector);
+    let live = sandbox
+        .project
+        .path()
+        .join("target/icm/sessions/desktop")
+        .join(run["run"].as_str().unwrap());
+    let stdout = std::fs::read_to_string(live.join("app.stdout")).unwrap();
+    assert!(
+        stdout.contains("hello from stdout\nafter the run: "),
+        "{stdout}"
+    );
+    assert_eq!(sandbox.result(&["stop", "desktop"])["exit"], 0);
+}
+
+/// The pid of the session's log collector, which the session must record
+/// with a non-empty identity.
+fn collector_of(sandbox: &Sandbox) -> i32 {
+    let session: Value =
+        serde_json::from_str(&std::fs::read_to_string(sandbox.session()).unwrap()).unwrap();
+    let start = session["collector"]["identity"]["start"]
+        .as_str()
+        .unwrap_or("");
+    assert!(!start.is_empty(), "{session}");
+    session["collector"]["pid"].as_i64().unwrap() as i32
 }
 
 /// Rewrites the session's record of the identity icm read for the app
@@ -1056,22 +1215,17 @@ fn an_app_whose_identity_could_not_be_read_is_left_running_and_reported() {
         "{logs}"
     );
     assert_eq!(logs["process"]["alive"], false, "{logs}");
-    // It cannot learn the secret the app inherited, so it reads the run's
-    // redacted copies and says why: a process runs under the pid, which is
-    // not the app having ended.
-    let unknown = logs["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|warning| warning["id"] == "desktop.logs.secret_unknown")
-        .unwrap_or_else(|| panic!("no desktop.logs.secret_unknown in {logs}"));
-    let detail = unknown["detail"].as_str().unwrap();
+    // The live files are the collector's redacted output, so there is no
+    // inherited value to learn for them, and no `secret_unknown` warning:
+    // the output shows the app's lines redacted.
     assert!(
-        detail.contains("a process runs under the app's pid that icm cannot tell from the app"),
-        "{detail}"
+        !ids(&logs["warnings"]).contains(&"desktop.logs.secret_unknown".to_string()),
+        "{logs}"
     );
-    assert!(detail.contains(why), "{detail}");
-    assert!(!detail.contains("the app has ended"), "{detail}");
+    assert!(
+        logs.to_string().contains("signed in with <redacted>"),
+        "{logs}"
+    );
     assert!(!logs.to_string().contains(secret::TOKEN), "{logs}");
     let shot = sandbox.result(&["shot", "desktop"]);
     assert_eq!(shot["exit"], 7, "{shot}");

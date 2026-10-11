@@ -5,9 +5,10 @@
 //! those files raw, so a value it inherits from icm's environment does not
 //! reach the disk.
 //!
-//! The launcher starts the helper with the read ends of the app's two pipes
-//! on file descriptors 3 (stdout) and 4 (stderr), with the app's environment
-//! (so the helper's registry holds the values the app inherits and is
+//! The launcher starts the helper after the app, with the read ends of the
+//! app's two pipes on file descriptors 3 (stdout) and 4 (stderr), with
+//! icm's environment and the app's secret-named variable changes ([`start`]:
+//! the helper's registry then holds the values the app inherits and is
 //! given), and with stdin, stdout and stderr on `/dev/null`. Its argv
 //! carries names only: `--handed NAME` for a secret-named value the launcher
 //! gave the app explicitly, whose value the helper reads from its own
@@ -32,13 +33,15 @@
 use crate::catalogue::CheckId;
 use crate::error::{IcmError, Result};
 use crate::process;
+use crate::process::Cmd;
 use crate::procid::{self, Identity, Verdict};
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::io::{self, PipeReader, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// The read end of the app's stdout pipe, as the launcher leaves it.
@@ -69,7 +72,6 @@ const USAGE: &str = "usage: icm __session desktop --app-pid N --app-identity <js
 /// The helper's argv, after the program's name: what the launcher starts it
 /// with. It carries the names of the secret-named values the app was handed
 /// explicitly, never their values.
-#[allow(dead_code)] // the launcher that starts the helper comes in a later change
 pub fn argv(app_pid: i32, identity: &Identity, files: &Path, handed: &[String]) -> Vec<OsString> {
     let identity = serde_json::to_string(identity).unwrap_or_default();
     let mut args = vec![
@@ -87,6 +89,46 @@ pub fn argv(app_pid: i32, identity: &Identity, files: &Path, handed: &[String]) 
         args.push(OsString::from(name));
     }
     args
+}
+
+/// Starts the helper for the app `app_pid` (its identity `identity`, the
+/// live files in `files`), on the read ends of the app's pipes, which the
+/// app was started with. `app` is the command the app was started with: the
+/// helper inherits icm's environment, with the app's secret-named variable
+/// changes applied, so its registry holds what the app inherited and was
+/// given. Returns the helper's pid. The helper is in its own session, so
+/// nothing that signals the app's group reaches it.
+pub fn start(
+    app_pid: i32,
+    identity: &Identity,
+    files: &Path,
+    app: &Cmd,
+    stdout: PipeReader,
+    stderr: PipeReader,
+) -> io::Result<u32> {
+    let handed = handed_names(app);
+    let mut cmd = Cmd::new(std::env::current_exe()?).args(argv(app_pid, identity, files, &handed));
+    for (key, value) in &app.env {
+        if process::is_secret_name(&key.to_string_lossy()) {
+            cmd.env.push((key.clone(), value.clone()));
+        }
+    }
+    process::spawn_piped(
+        &cmd,
+        Stdio::null(),
+        Stdio::null(),
+        Some([OwnedFd::from(stdout), OwnedFd::from(stderr)]),
+    )
+}
+
+/// The names of the secret-named variables the app was given explicitly
+/// (its `--env` pairs, not its removals), as [`argv`] carries them.
+fn handed_names(app: &Cmd) -> Vec<String> {
+    app.env
+        .iter()
+        .filter(|(key, value)| value.is_some() && process::is_secret_name(&key.to_string_lossy()))
+        .map(|(key, _)| key.to_string_lossy().into_owned())
+        .collect()
 }
 
 /// What the launcher passes the helper.

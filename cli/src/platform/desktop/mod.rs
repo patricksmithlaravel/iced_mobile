@@ -5,32 +5,38 @@
 //! 4) and `MACOSX_DEPLOYMENT_TARGET` from `[desktop.macos] min_os`, links it
 //! into `target/icm/build/desktop/<profile>/`, stops this project's previous
 //! desktop app (Appendix C item 13), and starts the new one in its own
-//! session and process group with `ICM_EVENTS=1` (Appendix C item 27), its
-//! stdout and stderr going to `app.stdout` and `app.stderr` in
+//! session and process group with `ICM_EVENTS=1` (Appendix C item 27). Its
+//! stdout and stderr are pipes that a log collector reads (`collector`: an
+//! `icm __session desktop` process, in its own session, started after the
+//! app), and the collector writes them to `app.stdout` and `app.stderr` in
 //! `target/icm/sessions/desktop/<run>/` (outside the run directories, so
 //! pruning never removes files the app still writes; the run directory
-//! gets a copy). While the app runs, the live files are its own output,
-//! unredacted; the copies, `app.log` and `logs.ndjson` have the secret
-//! values icm knows redacted ([`process::copy_redacted`]). The session
-//! keeps the values of the app's secret-named `--env` in `secrets.json`
-//! next to the live files ([`process::keep_secrets`]), so a later command
-//! run without them redacts them too. What the app inherits from icm's
-//! environment is never written there or anywhere else: the session names
-//! those variables, `run` redacts their values, and a later command reads
-//! them from the running app's environment ([`learn_app_secrets`]), each
-//! one only when that read returns it. A
-//! command that ends the app or finds it gone (`stop`, `logs`, `shot`,
-//! `run --attach`, a failed run) redacts the live files in place with the
-//! values it knows ([`finish_live`]). `logs` of an app that ended by itself
-//! cannot learn them (a variable of the same name in its own environment
-//! may hold another value), nor can it of a running app whose environment
-//! reads back without them (it replaced its process, or the OS gives no
-//! variables), so it cannot redact them: it reads the run directory's
-//! copies and warns `desktop.logs.secret_unknown`. It is
-//! ready on `ICM_EVENT ready`; an app that sends no events is ready when it
-//! is alive after 3 s and owns a window (`source: "probe"`). A panic, an
-//! exit or no first frame within `--wait-ready` fails the run (exit 10) and
-//! stops the app.
+//! gets a copy). The collector redacts what it writes with the secret values
+//! icm knows, as it reads them: the values of the secret-named variables in
+//! its environment, which is the app's inherited one, and those the app was
+//! handed with `--env`. So the live files hold no inherited value either.
+//! The copies, `app.log` and `logs.ndjson` have the secret values icm knows
+//! redacted ([`process::copy_redacted`]). The session keeps the values of
+//! the app's secret-named `--env` in `secrets.json` next to the live files
+//! ([`process::keep_secrets`]), so a later command run without them redacts
+//! them too. What the app inherits from icm's environment is never written
+//! there or anywhere else: the session names those variables
+//! (`inherited_secrets`), and a session without a collector, which an icm
+//! from before the collector wrote, has live files the app wrote raw. For
+//! such a session, a later command reads the variables' values back from
+//! the running app's environment ([`learn_app_secrets`]), each one only when
+//! that read returns it, and a command that ends the app or finds it gone
+//! (`stop`, `logs`, `shot`, `run --attach`, a failed run) redacts its live
+//! files in place with the values it knows ([`finish_live`]). `logs` of
+//! such an app that ended by itself cannot learn them (a variable of the same
+//! name in its own environment may hold another value), nor can it of a
+//! running app whose environment reads back without them (it replaced its
+//! process, or the OS gives no variables), so it reads the run directory's
+//! copies and warns `desktop.logs.secret_unknown`. It is ready on
+//! `ICM_EVENT ready`; an app that sends no events is ready when it is alive
+//! after 3 s and owns a window (`source: "probe"`). A panic, an exit or no
+//! first frame within `--wait-ready` fails the run (exit 10) and stops the
+//! app.
 //!
 //! The screenshot on macOS is `screencapture -l <window id>` after the
 //! Screen Recording preflight ([`macos`]); without that permission, or
@@ -77,6 +83,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -93,6 +100,12 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 /// How long icm waits for a panic's message, or the exit, after the panic
 /// event before it reports the panic.
 const PANIC_GRACE: Duration = Duration::from_millis(500);
+
+/// How long a command that finds its app gone waits for the app's log
+/// collector to end by itself, which writes what the app's pipes still hold
+/// ([`end_collector`]). The collector ends within a fraction of a second of
+/// the app's exit unless a child of the app holds its pipes.
+const COLLECTOR_GRACE: Duration = Duration::from_secs(2);
 
 const POLL: Duration = Duration::from_millis(50);
 
@@ -143,6 +156,16 @@ impl WindowHint {
     }
 }
 
+/// The log collector of a session: the `icm __session desktop` process that
+/// reads the app's output and writes its live files redacted
+/// ([`collector`]). Its pid counts only while it still has `identity`, which
+/// icm read right after it started it ([`procid::capture`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Collector {
+    pub pid: i32,
+    pub identity: Identity,
+}
+
 /// `target/icm/sessions/desktop.json`: the running app.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -184,9 +207,16 @@ pub struct Session {
     /// The secret-named variables the app inherited from icm's environment
     /// (not its `--env`), by name, whose values its live files may hold as
     /// it logged them: icm writes no such value down
-    /// ([`learn_app_secrets`], [`finish_live`]).
+    /// ([`learn_app_secrets`], [`finish_live`]). A session with a
+    /// [`collector`](Session::collector) needs no more than the names: its
+    /// live files hold none of the values ([`unknown_inherited`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherited_secrets: Vec<String>,
+    /// The log collector that writes the live files redacted, from the
+    /// launch ([`Collector`]). A session without one was written before
+    /// collectors, and its live files hold what the app wrote raw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collector: Option<Collector>,
 }
 
 /// The session file.
@@ -465,12 +495,52 @@ fn learn_environment(session: &Session, read: Option<(OsString, Vec<(OsString, O
 /// the app logged the one it inherited. The command cannot redact what the
 /// app's live files hold of them.
 fn unknown_inherited(session: &Session) -> Vec<String> {
+    // A session with a collector has live files that the collector wrote
+    // redacted, with the values the app inherited: it knew them from its own
+    // environment, which is the app's, from the start. Nothing is left to
+    // learn for them, so a later command reads them as they are.
+    if session.collector.is_some() {
+        return Vec::new();
+    }
     session
         .inherited_secrets
         .iter()
         .filter(|name| !knows_secret(session.pid, name))
         .cloned()
         .collect()
+}
+
+/// Whether the session's collector is still the process icm started: its
+/// pid with the identity icm read when it started it.
+fn collector_running(collector: &Collector) -> bool {
+    procid::check(collector.pid, &collector.identity) == Verdict::Same
+}
+
+/// Ends the log collector of an app that is gone. The collector ends by
+/// itself once the app's pipes close, or once the app is gone and quiet, so
+/// this waits up to [`COLLECTOR_GRACE`] for that, which also lets it write
+/// what the pipes still hold before the caller reads the live files. A
+/// collector that still runs then gets SIGTERM, but only once its pid is
+/// checked again and still has its identity: nothing is signalled by a bare
+/// pid.
+fn end_collector(collector: Option<&Collector>) {
+    let Some(collector) = collector else {
+        return;
+    };
+    let until = Instant::now() + COLLECTOR_GRACE;
+    while collector_running(collector) {
+        if Instant::now() >= until {
+            if collector_running(collector) {
+                // SAFETY: kill(2) to this one pid, not a group. The pid was
+                // just checked to be the collector icm started.
+                unsafe {
+                    let _ = libc::kill(collector.pid, libc::SIGTERM);
+                }
+            }
+            return;
+        }
+        std::thread::sleep(POLL);
+    }
 }
 
 /// Whether `path` is one of the app's live files (not a run directory's
@@ -483,17 +553,21 @@ fn is_live(project: &Project, path: &Path) -> bool {
 /// cannot tell from the app: [`Standing::Unverified`]), its live files are
 /// no longer its live output: the secret values this command knows are
 /// redacted in them, in place, so they keep no more than the run
-/// directory's copies. When this command knew the app's environment
-/// ([`unknown_inherited`]), the live `session.json` stops naming the
-/// inherited secrets; otherwise (an app that ended by itself, seen by a
-/// later command) it keeps them, and `logs` will not read these files.
+/// directory's copies. A collector that still runs writes these files, so
+/// they are left to it then: it redacts what it writes. When this command
+/// knew the app's environment ([`unknown_inherited`]), the live
+/// `session.json` stops naming the inherited secrets; otherwise (an app
+/// that ended by itself, seen by a later command) it keeps them, and `logs`
+/// will not read these files.
 fn finish_live(project: &Project, session: &Session) {
     let files = files_dir(project, &session.run);
     if !files.is_dir() || standing(session) != Standing::Gone {
         return;
     }
-    for name in ["app.stdout", "app.stderr"] {
-        process::redact_in_place(&files.join(name));
+    if !session.collector.as_ref().is_some_and(collector_running) {
+        for name in ["app.stdout", "app.stderr"] {
+            process::redact_in_place(&files.join(name));
+        }
     }
     if session.inherited_secrets.is_empty() || !unknown_inherited(session).is_empty() {
         return;
@@ -509,10 +583,11 @@ fn finish_live(project: &Project, session: &Session) {
     }
 }
 
-/// [`remove_session`], then [`finish_live`]: what every command that sees
-/// the app end does.
+/// [`remove_session`], then the collector's end ([`end_collector`]), then
+/// [`finish_live`]: what every command that sees the app end does.
 fn end_session(project: &Project, session: &Session) {
     remove_session(project, session.pid);
+    end_collector(session.collector.as_ref());
     finish_live(project, session);
 }
 
@@ -1015,7 +1090,7 @@ struct Launched {
     identity: Option<Identity>,
     started: Instant,
     launched: String,
-    /// The live files the app writes.
+    /// The live files the collector writes.
     stdout: PathBuf,
     stderr: PathBuf,
     /// The copy of stderr in the run directory, which evidence names (the
@@ -1024,6 +1099,8 @@ struct Launched {
     /// The secret-named variables it inherits from icm's environment, by
     /// name ([`Session::inherited_secrets`]).
     inherited_secrets: Vec<String>,
+    /// Its log collector ([`Session::collector`]).
+    collector: Option<Collector>,
 }
 
 fn launch(
@@ -1050,31 +1127,21 @@ fn launch(
     );
     let started = Instant::now();
     let launched = logs::timestamp(SystemTime::now());
-    let pid = process::spawn_detached(&cmd, &stdout, &stderr).map_err(|error| {
-        ctx.rep.step_end_internal("desktop.launch", false, 0);
-        IcmError::new(
-            CheckId::ToolFailed,
-            format!("cannot start {}: {error}", paths::display(exe)),
-        )
-    })?;
+    let (pid, identity, collector) = match spawn_app(ctx, &cmd, exe, &files) {
+        Ok(spawned) => spawned,
+        Err(error) => {
+            ctx.rep.step_end_internal("desktop.launch", false, 0);
+            return Err(error);
+        }
+    };
     ctx.rep
         .step_end_internal("desktop.launch", true, started.elapsed().as_millis() as u64);
     // The secret values the app was handed (its `--env`) stay known to
     // later commands that read its live files. What it inherits from icm's
     // environment is the user's shell's, and is never written: the session
-    // names those variables, and a later command reads their values from
-    // the running app ([`learn_app_secrets`]). This command knows them: they
-    // are its own. An `--env` pair replaces the variable of its name.
-    let pid = pid as i32;
-    // What the app's process is, for the session to check its pid against
-    // later; when the OS will not say, the session records that it could
-    // not, and the app is never signalled by its pid.
-    let identity = Some(procid::capture(pid));
-    if let Some(check) =
-        crate::session::unavailable_check("the desktop app", pid, identity.as_ref())
-    {
-        ctx.rep.check(check);
-    }
+    // names those variables, and the collector redacts their values from
+    // the app's output as it writes it. This command knows them: they are
+    // its own. An `--env` pair replaces the variable of its name.
     know_environment(pid);
     let _ = process::keep_secrets(&files, &process::handed_secrets(&cmd));
     let inherited_secrets = process::environment_secret_variables()
@@ -1085,14 +1152,67 @@ fn launch(
 
     Ok(Launched {
         pid,
-        identity,
+        identity: Some(identity),
         started,
         launched,
         stdout,
         stderr,
         stderr_copy: run_dir.join("app.stderr"),
         inherited_secrets,
+        collector: Some(collector),
     })
+}
+
+/// Starts the app with its stdout and stderr on pipes, then its log
+/// collector on their read ends ([`collector::start`]). Returns the app's
+/// pid, its identity and the collector. The app's identity is read right
+/// after its start, for the session to check its pid against later; when
+/// the OS will not say, the session records that it could not, and the app
+/// is never signalled by its pid. A collector that cannot start ends the
+/// app, which nothing would read, and fails the launch.
+fn spawn_app(ctx: &Ctx, cmd: &Cmd, exe: &Path, files: &Path) -> Result<(i32, Identity, Collector)> {
+    let (out_read, out_write) = std::io::pipe()
+        .map_err(|error| internal("cannot make a pipe for the app's stdout", error))?;
+    let (err_read, err_write) = std::io::pipe()
+        .map_err(|error| internal("cannot make a pipe for the app's stderr", error))?;
+    let pid = process::spawn_piped(cmd, Stdio::from(out_write), Stdio::from(err_write), None)
+        .map_err(|error| {
+            IcmError::new(
+                CheckId::ToolFailed,
+                format!("cannot start {}: {error}", paths::display(exe)),
+            )
+        })? as i32;
+    let identity = procid::capture(pid);
+    if let Some(check) = crate::session::unavailable_check("the desktop app", pid, Some(&identity))
+    {
+        ctx.rep.check(check);
+    }
+    match collector::start(pid, &identity, files, cmd, out_read, err_read) {
+        Ok(collector_pid) => {
+            let collector_pid = collector_pid as i32;
+            let collector = Collector {
+                pid: collector_pid,
+                identity: procid::capture(collector_pid),
+            };
+            if let Some(check) = crate::session::unavailable_check(
+                "the log collector",
+                collector_pid,
+                Some(&collector.identity),
+            ) {
+                ctx.rep.check(check);
+            }
+            Ok((pid, identity, collector))
+        }
+        Err(error) => {
+            // The app was started just now and is still this process's
+            // child, so its pid is its own to end.
+            let _ = terminate(pid, pid);
+            Err(IcmError::new(
+                CheckId::ToolFailed,
+                format!("cannot start the log collector of the desktop app: {error}"),
+            ))
+        }
+    }
 }
 
 /// A panic the app reported.
@@ -1111,6 +1231,9 @@ struct Panic {
 struct Watch {
     pid: i32,
     stderr: PathBuf,
+    /// The app's log collector, which writes `stderr` as the app's output
+    /// comes in ([`Collector`]).
+    collector: Option<Collector>,
     offset: u64,
     partial: Vec<u8>,
     lines: u32,
@@ -1124,10 +1247,11 @@ struct Watch {
 }
 
 impl Watch {
-    fn new(pid: i32, stderr: &Path) -> Watch {
+    fn new(pid: i32, stderr: &Path, collector: Option<Collector>) -> Watch {
         Watch {
             pid,
             stderr: stderr.to_path_buf(),
+            collector,
             offset: 0,
             partial: Vec::new(),
             lines: 0,
@@ -1142,10 +1266,14 @@ impl Watch {
     }
 
     /// Checks the pid, then reads what stderr gained (so everything written
-    /// before an exit is seen).
+    /// before an exit is seen). Once the app is gone, its collector is ended
+    /// first, so the last of its output is in the file.
     fn poll(&mut self) {
         if self.ended.is_none() {
             self.ended = reap(self.pid);
+            if self.ended.is_some() {
+                end_collector(self.collector.as_ref());
+            }
         }
         self.read();
     }
@@ -1911,10 +2039,15 @@ enum FollowEnd {
 }
 
 /// Streams new records as `log` events until the app ends, a signal
-/// arrives or the overall deadline passes.
-fn follow(ctx: &Ctx, tails: &mut [Tail], pid: i32, filter: &Filter) -> FollowEnd {
+/// arrives or the overall deadline passes. Once the app has ended, its
+/// collector is ended first, so the records of its last output are read.
+fn follow(ctx: &Ctx, tails: &mut [Tail], session: &Session, filter: &Filter) -> FollowEnd {
+    let pid = session.pid;
     loop {
         let ended = reap(pid);
+        if ended.is_some() {
+            end_collector(session.collector.as_ref());
+        }
         for tail in tails.iter_mut() {
             for record in tail.read() {
                 if filter.keeps(&record) {
@@ -2101,7 +2234,7 @@ pub fn logs(ctx: &mut Ctx, args: &LogsArgs) -> Result<()> {
     ctx.rep.summary(summary);
 
     if args.follow && live {
-        match follow(ctx, &mut tails, session.pid, &filter) {
+        match follow(ctx, &mut tails, &session, &filter) {
             FollowEnd::Exited(ended) => {
                 end_session(&project, &session);
                 ctx.rep.summary(format!(
@@ -2164,6 +2297,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         window: None,
         ready: None,
         inherited_secrets: launched.inherited_secrets.clone(),
+        collector: launched.collector.clone(),
     };
     write_session(&project, &session);
     ctx.rep
@@ -2173,7 +2307,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
 
     // Until the run succeeds, a signal to icm stops the app too.
     signals::register_group(launched.pid);
-    let mut watch = Watch::new(launched.pid, &launched.stderr);
+    let mut watch = Watch::new(launched.pid, &launched.stderr, launched.collector.clone());
     let outcome = observe(ctx, &project, args, &launched, &mut watch, &mut session);
 
     match outcome {
@@ -2339,7 +2473,7 @@ fn attach(ctx: &Ctx, project: &Project, session: &Session, launched: &Launched) 
         emit_record(ctx, record, session.pid);
     }
     signals::register_group(session.pid);
-    let end = follow(ctx, &mut tails, session.pid, &Filter::default());
+    let end = follow(ctx, &mut tails, session, &Filter::default());
     // As in `run`: registered until the app is gone, and the watchdog waits.
     let _cleanup = signals::cleanup();
     let how = match end {
@@ -2358,7 +2492,7 @@ fn attach(ctx: &Ctx, project: &Project, session: &Session, launched: &Launched) 
                 "process",
                 json!({"pid": session.pid, "alive": false, "exit": ended.to_json()}),
             );
-            let mut watch = Watch::new(session.pid, &session.stderr);
+            let mut watch = Watch::new(session.pid, &session.stderr, session.collector.clone());
             watch.read();
             watch.ended = Some(ended);
             match ended {
@@ -2568,7 +2702,7 @@ mod tests {
         )
         .unwrap();
         // A pid that is not this process's child and does not exist.
-        let mut watch = Watch::new(i32::MAX, &stderr);
+        let mut watch = Watch::new(i32::MAX, &stderr, None);
         watch.read();
         assert!(watch.start.is_some());
         let hint = WindowHint::from_ready(watch.ready.as_ref().unwrap()).unwrap();
@@ -2594,7 +2728,7 @@ mod tests {
             "thread 'main' panicked at src/main.rs:2:5:\nexplicit panic\n",
         )
         .unwrap();
-        let mut watch = Watch::new(i32::MAX, &other);
+        let mut watch = Watch::new(i32::MAX, &other, None);
         watch.read();
         assert_eq!(watch.panic.unwrap().message, "explicit panic");
     }
@@ -2649,6 +2783,7 @@ mod tests {
             }),
             ready: None,
             inherited_secrets: vec!["ICM_UNIT_SHELL_TOKEN".into()],
+            collector: None,
         };
         let text = serde_json::to_string(&session).unwrap();
         assert_eq!(serde_json::from_str::<Session>(&text).unwrap(), session);
@@ -2767,6 +2902,7 @@ mod tests {
             window: None,
             ready: Some(event),
             inherited_secrets: Vec::new(),
+            collector: None,
         };
         let text = session_text(&session);
         assert!(!text.contains("sekrit"), "{text}");
@@ -2795,6 +2931,7 @@ mod tests {
             window: None,
             ready: None,
             inherited_secrets: vec!["ICM_UNIT_SHELL_TOKEN".into(), "PATH".into()],
+            collector: None,
         };
         // `PATH` is in this command's environment, and still unknown.
         assert_eq!(
@@ -2803,6 +2940,22 @@ mod tests {
         );
         know_environment(session.pid);
         assert!(unknown_inherited(&session).is_empty());
+    }
+
+    /// A session with a collector has live files the collector wrote
+    /// redacted: none of its inherited secrets is unknown, whether or not
+    /// this command knows the app's environment, and a session without one
+    /// keeps the guard above.
+    #[test]
+    fn a_session_with_a_collector_has_no_unknown_inherited_secret() {
+        let mut session = session_of(i32::MAX - 19, "/bin/sleep", &["ICM_UNIT_SHELL_TOKEN"]);
+        assert_eq!(unknown_inherited(&session), ["ICM_UNIT_SHELL_TOKEN"]);
+        session.collector = Some(Collector {
+            pid: i32::MAX - 20,
+            identity: Identity::unavailable("test"),
+        });
+        assert!(unknown_inherited(&session).is_empty());
+        assert!(!session.inherited_secrets.is_empty());
     }
 
     fn session_of(pid: i32, exe: &str, inherited: &[&str]) -> Session {
@@ -2822,6 +2975,7 @@ mod tests {
             window: None,
             ready: None,
             inherited_secrets: inherited.iter().map(|name| (*name).to_string()).collect(),
+            collector: None,
         }
     }
 

@@ -9,6 +9,16 @@ stops at iced 0.14.0.
 
 Fixes from the re-verification of `v0.14.1-mobile.2`.
 
+- `icm run desktop` no longer writes a value the app inherited from icm's environment to the app's
+  live files. The app's stdout and stderr go through a log collector (`icm __session desktop`, a
+  process of its own, started after the app), which writes `app.stdout` and `app.stderr` with the
+  secret values icm knows redacted as it reads them. Before, the live files held the app's raw
+  output while it ran, so a `logs` from a shell that could not learn the value printed it, and an
+  app that had ended by itself kept it in them. `logs` of such a session warns nothing about
+  inherited secrets, and reads its live files as they are. A session from before this change keeps
+  the old guard, and
+  `docs/agents/limitations.md` says what the collector does not redact. `icm stop` ends the
+  collector with its app, after it has written the app's last output.
 - **iOS:** the vendored winit reports an insertion of only a line break as Return and one of only
   `\t` as Tab, deciding per insertion, so a Return typed right after another key in the same turn
   of the event loop is no longer lost.
