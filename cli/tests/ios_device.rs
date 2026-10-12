@@ -598,6 +598,58 @@ fn stop_leaves_a_process_that_took_the_apps_pid_alone() {
     }
 }
 
+/// A record whose app is not running on the phone (the device lists no
+/// process under its pid) is counted as stopped only when `stop` ended
+/// something: the console process icm started. With the console already gone
+/// nothing was ended, the record is only removed, and the summary says nothing
+/// was running; the count took the record for a stopped session. The control
+/// leaves the console up, which `stop` ends, so the session counts as stopped.
+#[test]
+fn a_record_that_ended_nothing_is_not_counted_as_stopped() {
+    for (case, console_up) in [
+        ("the console had already exited", false),
+        ("the console was still up", true),
+    ] {
+        let device = Device::new();
+        let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+        assert_eq!(run["exit"], 0, "{case}: {run}");
+        let console = device.session()["pid"].as_i64().unwrap();
+        device.list_processes(&[]);
+        if !console_up {
+            end_fake_console(&console.to_string());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while icm::procid::of(console as i32).is_some() && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(
+                icm::procid::of(console as i32).is_none(),
+                "{case}: the console did not end"
+            );
+        }
+
+        let stop = device.json(&["stop", "ios-device"]);
+        assert_eq!(stop["exit"], 0, "{case}: {stop}");
+        assert!(!device.terminated(), "{case}: {}", device.log("xcrun.log"));
+        assert_eq!(stop["stopped"][0]["app"], "not_running", "{case}: {stop}");
+        assert!(!device.session_path().exists(), "{case}");
+        if console_up {
+            assert_eq!(
+                stop["stopped"][0]["processes"],
+                json!([console]),
+                "{case}: {stop}"
+            );
+            assert_eq!(stop["summary"], "stopped 1 session(s)", "{case}: {stop}");
+        } else {
+            assert_eq!(stop["stopped"][0]["processes"], json!([]), "{case}: {stop}");
+            assert_eq!(
+                stop["summary"], "nothing was running for ios-device",
+                "{case}: {stop}"
+            );
+        }
+    }
+}
+
 /// The app icm installed is in container `X`. After the app exited, its pid
 /// may be reused by a copy of an app with the same bundle name installed in
 /// another container (`OTHER-UUID`). That copy's executable ends in the same

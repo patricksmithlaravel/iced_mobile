@@ -184,12 +184,22 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
                 .is_none_or(|pids| pids.is_empty())
             && entry["app"] != "terminated"
     };
+    // An ios-device record whose app was not running on its phone, and whose
+    // console process had already gone, ended nothing either: the record is
+    // only removed. Its entry has no `stopped` or `how` to tell that by.
+    let ended_nothing = |entry: &Value| {
+        entry["app"] == "not_running"
+            && entry["processes"]
+                .as_array()
+                .is_none_or(|pids| pids.is_empty())
+    };
     let count = stopped
         .iter()
         .filter(|entry| {
             entry["stopped"] != "was not running"
                 && entry["how"] != "already exited"
                 && !only_left(entry)
+                && !ended_nothing(entry)
         })
         .count();
     // The processes left running because nothing tells them from another

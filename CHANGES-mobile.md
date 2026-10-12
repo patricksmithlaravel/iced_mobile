@@ -53,6 +53,11 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   `internal.bug`). `AGENTS.md` and
   `docs/icm/DESIGN.md` now say exactly what the identity rule guarantees: it is the start time, not
   the program or the environment.
+- `icm stop ios-device` no longer counts a record as a stopped session when the app was not running
+  on the phone and its console process had already gone: nothing was ended, the record is only
+  removed, and the summary says nothing was running (it said `stopped 1 session(s)`). The console
+  icm ends still counts, as before (`tests/ios_device.rs`:
+  `a_record_that_ended_nothing_is_not_counted_as_stopped`).
 - `icm logs desktop` of a running app whose environment could not be read back in full no longer
   prints the secrets it inherited. A read of the process that returned its arguments and no
   variables (macOS does for a platform binary), or another environment than the app's (the app
