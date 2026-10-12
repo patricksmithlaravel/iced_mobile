@@ -378,10 +378,13 @@ Text input on Android, and secure fields on Android and iOS:
   another purpose: the letters typed right after the Enter whose `on_submit` focuses the password
   field, which the keyboard composed for the field it left, reach no field as a preedit until the
   redraw that tells the shell the field's purpose, which commits them as typed text in a password
-  field; a field made secure while the keyboard composes gets its composition as typed text at that
+  field; a tap that focuses a password field holds its compositions back the same way until that
+  redraw; a field made secure while the keyboard composes gets its composition as typed text at that
   redraw; and what the keyboard composes before it is set up for the password field is read as typed
-  text too. On Android and iOS the window never draws a password field's preedit (the desktop and
-  the web draw it as upstream does). On iOS the vendored winit implements `Window::set_ime_purpose`
+  text too. On an edit of a password field, a `text_input` builds its paragraph from the bullets:
+  the paragraph logs the text it is built from at trace level, which used to be the password. On
+  Android and iOS the window never draws a password field's preedit (the desktop and the web draw it
+  as upstream does). On iOS the vendored winit implements `Window::set_ime_purpose`
   (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers `isSecureTextEntry` and
   turns off autocorrection, spell checking, auto-capitalisation and smart punctuation for a
   password, the terminal purpose turns off the same without secure entry, and a changed purpose

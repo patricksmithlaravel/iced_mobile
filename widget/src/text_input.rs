@@ -38,6 +38,8 @@ pub mod cursor;
 pub use cursor::Cursor;
 pub use value::Value;
 
+use std::borrow::Cow;
+
 use editor::Editor;
 
 use crate::core::alignment;
@@ -707,7 +709,7 @@ where
                 renderer,
                 state,
                 layout,
-                value,
+                &paragraph_value(value, self.is_secure),
                 self.font,
                 self.size,
                 self.line_height,
@@ -1660,6 +1662,18 @@ fn find_cursor_position<P: text::Paragraph>(
     )
 }
 
+/// The value a paragraph is built from: a password field's bullets, never
+/// its text. The paragraph logs the text it is allocated with (at trace
+/// level), so a password must not reach it on an edit. Layout and drawing
+/// mask the paragraph the same way.
+fn paragraph_value(value: &Value, is_secure: bool) -> Cow<'_, Value> {
+    if is_secure {
+        Cow::Owned(value.secure())
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
 fn replace_paragraph<Renderer>(
     renderer: &Renderer,
     state: &mut State<Renderer::Paragraph>,
@@ -1811,5 +1825,30 @@ fn alignment_offset(
             }
             alignment::Horizontal::Right => text_bounds_width - text_min_width,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_password_field_builds_its_paragraph_from_bullets_only() {
+        let password = Value::new("hunter2");
+
+        assert_eq!(
+            paragraph_value(&password, true).to_string(),
+            "\u{2022}".repeat(7)
+        );
+        assert_eq!(paragraph_value(&password, false).to_string(), "hunter2");
+
+        // A grapheme is one bullet, as layout and drawing count them.
+        let combined = Value::new("e\u{301}x");
+
+        assert_eq!(
+            paragraph_value(&combined, true).to_string(),
+            "\u{2022}\u{2022}"
+        );
+        assert_eq!(paragraph_value(&combined, false).to_string(), "e\u{301}x");
     }
 }
