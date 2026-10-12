@@ -491,11 +491,11 @@ final class KeyboardView extends View {
         // its cursor learns that it is gone.
         sendSelection();
 
-        // A password is not kept here, the mirror stays small, and the text
-        // the shell asked to forget goes, even when the mirror is empty. A
-        // composition is kept until the keyboard commits it, and a batch
-        // edit's text until the batch ends: the keyboard worked the rest of
-        // the batch out from it.
+        // A password stays here only while it is composed or in a batch, the
+        // mirror stays small, and the text the shell asked to forget goes,
+        // even when the mirror is empty. A composition is kept until the
+        // keyboard commits it, and a batch edit's text until the batch ends:
+        // the keyboard worked the rest of the batch out from it.
         boolean clear = forgetting
                 || (secure ? mirror.length() > 0 : mirror.length() > CAP);
 

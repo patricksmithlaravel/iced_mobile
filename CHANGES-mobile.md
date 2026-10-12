@@ -328,13 +328,22 @@ Text input on Android, and secure fields on Android and iOS:
   the word. Shift, Ctrl, Alt and the other modifiers leave the word alone.
 - **Android:** when the app moves the focus from code (`operation::focus`, `focus_next`,
   `focus_previous`, or `focusable::unfocus` run with `iced::advanced::widget::operate`) or the
-  field leaves the view, the word being composed is dropped and the field's preedit cleared: the
-  window gets `input_method::Event::Closed`, as winit's desktop backends send it when the input
-  method is turned off. The next field's keyboard starts with no text. A caret moved from code in
-  the field the keyboard types into (`move_cursor_to`, `select_all`) commits the word where it was
-  typed first, then moves; the caret of another field moves and leaves the word alone. What the
-  keyboard typed before such an operation, and what it sends while the operation runs, reaches the
-  field before the caret moves.
+  field leaves the view, the word being composed is dropped and the field's preedit cleared. The
+  window gets `input_method::Event::Closed` then, and whenever no field asks for the keyboard any
+  more (a tap elsewhere, Escape), as winit's desktop backends send it when the input method is
+  turned off, but never `input_method::Event::Opened`, which they send when it is turned on, so a
+  widget sees `Closed` with no `Opened` before it; before, Android sent neither. The next field's
+  keyboard starts with no text. A caret moved from code in the field the keyboard types into
+  (`move_cursor_to`, `select_all`) commits the word where it was typed first, then moves; the caret
+  of another field moves and leaves the word alone. What the keyboard typed before such an
+  operation, and what it sends while the operation runs, reaches the field before the caret moves.
+  Any widget operation the app returns while the keyboard has sent edits the field has not had yet,
+  or while the app takes its turn after the keyboard's Enter, Tab or Escape, a scroll or a query
+  too, runs once the field has them and the app has handled them, a turn of the event loop later,
+  and the operations returned after it wait behind it, in order. An app whose `on_input`, or whose
+  `text_editor` `on_action`, refuses or changes what the keyboard typed starts the keyboard over
+  with `operation::move_cursor_to_end` on a `text_input` or `operation::focus` on a `text_editor`
+  (`docs/agents/limitations.md`).
 - **Android:** while no field asks for the keyboard, the keyboard's view is no text editor, so a
   hardware keyboard's keys reach the app as before, also with input methods that compose hardware
   keys.

@@ -37,11 +37,18 @@ changed files; cargo clippy --lib --tests -D warnings, cargo doc
 With UIKit under Mac Catalyst (macOS 27 SDK), -[UITextInputTraits
 takeTraitsFrom:] took byte-identical traits from a UIKeyInput object
 that answers the defaults above and from one that implements none of
-the getters, and the answers for Password and Terminal as listed. Not
-yet seen on a simulator or device: the view adopts only UIKeyInput, and
-its keyboard on the simulator shows no predictions and capitalizes
-nothing in any field, with or without this change, so what the traits
-change for it there has not been observed.
+the getters, and the answers for Password and Terminal as listed. On
+the iOS 27.0 Simulator, with the purpose set to Password the keyboard
+has no emoji or dictation key, typing, Backspace and Return work, and
+it switches to and from that keyboard as the purpose changes while the
+view stays the first responder. After typing with Password and a change
+to Normal with the keyboard up, the reloaded keyboard can label its
+numbers key ".?123" instead of "123" until its numbers are shown once
+or it is hidden and shown again; it types as usual. The view adopts
+only UIKeyInput, so its keyboard on the simulator shows no predictions
+and capitalizes nothing in any field, with or without this change, and
+what the other traits change there has not been observed. Not tried on
+a device.
 ---
  src/changelog/unreleased.md     |   6 ++
  src/platform_impl/ios/view.rs   | 115 +++++++++++++++++++++++++++++++-

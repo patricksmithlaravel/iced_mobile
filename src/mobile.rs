@@ -409,26 +409,36 @@
 //!   starts over when the field gets the focus; at a touch that starts, a
 //!   hardware key other than a modifier, or the window losing the focus;
 //!   after its own Enter, Tab, Escape, arrow (but for one that only ends a
-//!   selection the keyboard made, below), Home or End keys (moving the
-//!   cursor with the space bar sends arrows) and its Select all; after a
-//!   caret move from code or a change between a password field and another
-//!   field; once its text passes 4096 UTF-16 units; when what it typed
-//!   starts with a character that joins the one before it (a combining
-//!   mark, vowel sign or virama typed first, or a consonant right after a
-//!   virama it typed before it started over); and, in a password field,
-//!   after every edit. The field asks the keyboard for no automatic
+//!   selection the keyboard made, below), Home or End keys and its Select
+//!   all (a cursor swipe on the space bar moves inside the text it typed
+//!   without starting over, and sends arrows only past either end of that
+//!   text); after a caret move from code or a change between a password
+//!   field and another field; once its text passes 4096 UTF-16 units; when
+//!   what it typed starts with a character that joins the one before it (a
+//!   combining mark, vowel sign or virama typed first, or a consonant right
+//!   after a virama it typed before it started over); and, in a password
+//!   field, after every edit that leaves nothing composing: a keyboard that
+//!   composes there (some CJK and third-party keyboards) keeps the password
+//!   it composes in that text, which the application's process holds for
+//!   it, until it commits it. The field asks the keyboard for no automatic
 //!   capitals.
 //! - The keyboard keeps its own copy of the text it typed and takes it that
 //!   the field has all of it. An `on_input` that refuses that text or
 //!   changes its length (a length limit, digits only, formatting that adds
-//!   spaces), or a change of the field's value from code while the keyboard
-//!   has typed into it (from a subscription or a task's result), puts it
-//!   out of step: a later edit that reaches back into that text (a
-//!   Backspace into the previous word, an autocorrection undone) can delete
-//!   or replace characters the field shows. Typing does not bring it back
-//!   in step; starting over does. Return a caret move from code with the
-//!   refusal or the change (`operation::move_cursor_to_end`), which starts
-//!   the keyboard over from what the field shows.
+//!   spaces), a `text_editor`'s `on_action` that drops or changes the
+//!   `Edit::Paste` that text arrives as, or a change of the field's value
+//!   or the editor's content from code while the keyboard has typed into
+//!   it (from a subscription or a task's result), puts it out of step: a
+//!   later edit that reaches back into that text (a Backspace into the
+//!   previous word, an autocorrection undone) can delete or replace
+//!   characters the field shows. Typing does not bring it back in step;
+//!   starting over does. Return an operation that starts it over with the
+//!   refusal or the change: `operation::move_cursor_to_end` on a
+//!   `text_input`, and `operation::focus` on a `text_editor`, which the
+//!   caret operations do not reach (focusing the editor that has the focus
+//!   leaves its caret where it is). Either starts the keyboard over from
+//!   what the field shows; the focus also brings back a keyboard the user
+//!   hid.
 //! - The keyboard's Enter (its key, its action button, or a commit of a
 //!   lone line break) reaches the application as the Enter key, after the
 //!   text typed before it, and submits a `text_input`; Tab (its key, or a
@@ -487,6 +497,23 @@
 //!   too). The caret of another field moves and leaves the word alone.
 //!   What the keyboard typed before the operation, and what it sends while
 //!   the operation runs, reaches the field before the caret moves.
+//! - A widget operation the application returns while the keyboard has
+//!   sent edits the field has not had yet, or while the application takes
+//!   its turn after the keyboard's Enter, Tab or Escape, runs once the
+//!   field has them and the application has handled them, a turn of the
+//!   event loop later than without the keyboard, and the operations
+//!   returned after it wait behind it, in order. That holds for every
+//!   operation, a scroll (`snap_to`, `scroll_to`) or a query (`is_focused`,
+//!   `find_focused`, `count`) too: do not count on an operation running in
+//!   the same turn as the `update` that returned it.
+//! - The window gets `input_method::Event::Closed` whenever no field asks
+//!   for the keyboard any more (a tap elsewhere, Escape, the field leaving
+//!   the view) and when the application moves the focus from code after the
+//!   keyboard typed into the field, but never `input_method::Event::Opened`,
+//!   so a custom widget sees `Closed` with no `Opened` before it. The
+//!   desktop sends both, as its input method is turned on and off, and iOS
+//!   neither. `text_input` and `text_editor` only clear their preedit at
+//!   `Closed`.
 //! - The keyboard's keys reach a field only as text, Backspace, Delete,
 //!   Enter, Tab, Escape, the arrows, Home and End. Its Ctrl and Meta
 //!   shortcuts (on keyboards that have a Ctrl key) and its other keys (Page
@@ -519,18 +546,19 @@
 //!   the credentials it suggests in the keyboard) offers nothing, in
 //!   password fields either.
 //! - If the user hides the keyboard while a field keeps the focus, a tap on
-//!   a field brings it back, also on a `text_editor`, which otherwise
-//!   ignores the tap. A tap elsewhere leaves it hidden. Focusing a field
-//!   from code (`operation::focus`) brings it back too, also the field that
-//!   has the focus (a `text_editor` an Edit button focuses again), and so
-//!   does the window getting the focus back (after the notification shade,
-//!   a system dialog or another app): the shell is not told that the user
-//!   hid it. A keyboard hidden right after it came up stays hidden. Only
-//!   when it was still up as the window got the focus back, or as the
-//!   focus moved between a password field and another kind of field, can
-//!   hiding it within half a second bring it back once (Android 11 and
-//!   later): the shell cannot tell that hide from a show the system
-//!   dropped, which it shows again.
+//!   a field brings it back, also on a `text_editor` focused from code,
+//!   which otherwise ignores the tap. A tap elsewhere leaves it hidden, a
+//!   tap on a `text_editor` without the focus included: a tap does not
+//!   focus one. Focusing a field from code (`operation::focus`) brings it
+//!   back too, also the field that has the focus (a `text_editor` an Edit
+//!   button focuses again), and so does the window getting the focus back
+//!   (after the notification shade, a system dialog or another app): the
+//!   shell is not told that the user hid it. A keyboard hidden right after
+//!   it came up stays hidden. Only when it was still up as the window got
+//!   the focus back, or as the focus moved between a password field and
+//!   another kind of field, can hiding it within half a second bring it
+//!   back once (Android 11 and later): the shell cannot tell that hide from
+//!   a show the system dropped, which it shows again.
 //!
 //! When the input connection cannot be installed (before Android 8, or
 //! after a failure, with one warning in the log), the keyboard reaches the
@@ -919,10 +947,14 @@
 //!   consonant it types right after a virama the field holds where it
 //!   started over (a tap right after a half-typed conjunct), which its next
 //!   change there replaces with the whole conjunct. An `on_input` that
-//!   refuses the keyboard's text or changes its length, or a change of the
+//!   refuses the keyboard's text or changes its length, a `text_editor`'s
+//!   `on_action` that drops or changes its `Edit::Paste`, or a change of the
 //!   field's value from code while the keyboard types, puts the keyboard out
-//!   of step until it starts over, which typing does not do. The keyboard's
-//!   Ctrl and Meta shortcuts do not reach fields, and its keys come without
+//!   of step until it starts over, which typing does not do. A widget
+//!   operation returned while the field has the keyboard's edits to take
+//!   can run a turn of the event loop later, and the window gets
+//!   `input_method::Event::Closed` with no `Opened`. The keyboard's Ctrl
+//!   and Meta shortcuts do not reach fields, and its keys come without
 //!   modifiers, its own Shift or one held on a hardware keyboard, so its
 //!   arrows never select. While a field asks for the keyboard, an input
 //!   method that composes a hardware keyboard's letters sends them as text,

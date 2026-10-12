@@ -130,8 +130,9 @@
 //! `nativeRebase` says the mirror is now empty while the text it had stays
 //! in the field: the app's caret is where the next text goes. It follows:
 //!
-//! - every report for a secure field, so no password is kept in Java and
-//!   its keyboard sees an empty field;
+//! - every report for a secure field, so a password stays in Java only
+//!   while the keyboard composes it (below), and its keyboard otherwise
+//!   sees an empty field;
 //! - a report whose text exceeds 4096 UTF-16 units;
 //! - an Enter, Tab, Escape or caret-moving key, or Select all, as above;
 //! - [`FORGET`];

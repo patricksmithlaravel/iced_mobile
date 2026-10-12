@@ -95,25 +95,35 @@ this file in the commit that fixes or finds a limitation.
     at a touch that starts, a hardware key other than a modifier, or the
     window losing the focus; after its own Enter, Tab, Escape, arrow (but
     for one that only ends a selection the keyboard made, below), Home or
-    End keys (moving the cursor with the space bar sends arrows) and its
-    Select all; after a caret move from code or a change between a password
-    field and another field; once its text passes 4096 UTF-16 units; when
-    what it typed starts with a character that joins the one before it (a
-    combining mark, vowel sign or virama typed first, or a consonant right
-    after a virama it typed before it started over); and, in a password
-    field, after every edit. The field asks it for no automatic capitals.
+    End keys and its Select all (a cursor swipe on the space bar moves
+    inside the text it typed without starting over, and sends arrows only
+    past either end of that text); after a caret move from code or a change
+    between a password field and another field; once its text passes 4096
+    UTF-16 units; when what it typed starts with a character that joins the
+    one before it (a combining mark, vowel sign or virama typed first, or a
+    consonant right after a virama it typed before it started over); and,
+    in a password field, after every edit that leaves nothing composing: a
+    keyboard that composes there (some CJK and third-party keyboards) keeps
+    the password it composes in that text, which the app's process holds
+    for it, until it commits it. The field asks it for no automatic
+    capitals.
   - The Android keyboard keeps its own copy of the text it typed and takes
     it that the field has all of it. When `on_input` refuses that text or
     changes its length (a length limit, digits only, formatting that adds
-    spaces), or the app changes the field's value itself while the
-    keyboard has typed into it (from a subscription or a task's result), a
-    later edit that reaches back into that text, such as a Backspace into
-    the previous word or an autocorrection the user undoes, can delete or
-    replace characters the field shows. Typing does not bring the keyboard
-    back in step; starting over (above) does. With such a field, return a
-    caret move from code with the refusal or the change
-    (`operation::move_cursor_to_end`): it starts the keyboard over from
-    what the field shows.
+    spaces), a `text_editor`'s `on_action` drops or changes the
+    `Edit::Paste` that text arrives as, or the app changes the field's
+    value or the editor's content itself while the keyboard has typed into
+    it (from a subscription or a task's result), a later edit that reaches
+    back into that text, such as a Backspace into the previous word or an
+    autocorrection the user undoes, can delete or replace characters the
+    field shows. Typing does not bring the keyboard back in step; starting
+    over (above) does. With such a field, return an operation that starts
+    it over with the refusal or the change: `operation::move_cursor_to_end`
+    on a `text_input`, and `operation::focus` on a `text_editor`, which
+    the caret operations do not reach (focusing the editor that has the
+    focus leaves its caret where it is). Either starts the keyboard over
+    from what the field shows; the focus also brings back a keyboard the
+    user hid.
   - When the app moves the focus itself (`operation::focus`, `focus_next`,
     `focus_previous`, `focusable::unfocus` run with
     `iced::advanced::widget::operate`, or the field leaving the view) while
@@ -127,6 +137,23 @@ this file in the commit that fixes or finds a limitation.
     operation, and what it sends while the operation runs, reaches the field
     before the caret moves. Let the user's tap or Enter move the focus where
     it can.
+  - On Android, a widget operation the app returns while the keyboard has
+    sent edits the field has not had yet, or while the app takes its turn
+    after the keyboard's Enter, Tab or Escape (below), runs once the field
+    has them and the app has handled them, a turn of the event loop later
+    than without the keyboard, and the operations returned after it wait
+    behind it, in order. That holds for every operation, a scroll
+    (`snap_to`, `scroll_to`) or a query (`is_focused`, `find_focused`,
+    `count`) too: do not count on an operation running in the same turn as
+    the `update` that returned it.
+  - On Android the window gets `input_method::Event::Closed` whenever no
+    field asks for the keyboard any more (a tap elsewhere, Escape, the
+    field leaving the view) and when the app moves the focus from code
+    after the keyboard typed into the field, but never
+    `input_method::Event::Opened`, so a custom widget sees `Closed` with no
+    `Opened` before it. The desktop sends both, as its input method is
+    turned on and off, and iOS neither. `text_input` and `text_editor` only
+    clear their preedit at `Closed`.
   - `text_input` deletes by character cluster, as on the desktop: a
     combining mark, vowel sign or virama typed right after the place the
     user tapped joins the character before it, and Backspace then deletes
@@ -188,15 +215,16 @@ this file in the commit that fixes or finds a limitation.
     the credentials it suggests in the keyboard) offers nothing, in
     password fields either.
   - On Android, a keyboard the user hid while a field keeps the focus
-    comes back at a tap on a field, when the app focuses a field from code
-    (`operation::focus`, also on the field that has the focus, such as a
-    `text_editor` an Edit button focuses again), and also whenever the
-    window gets the focus back (after the notification shade, a system
-    dialog or another app): nothing tells the app that the user hid it. A
-    keyboard hidden right after it came up stays hidden. Only when it was
-    still up as the window got the focus back, or as the focus moved
-    between a password field and another kind of field, can hiding it
-    within half a second bring it back once (Android 11 and later): the
+    comes back at a tap on a field (on a `text_editor` only while it has
+    the focus: a tap does not focus one), when the app focuses a field
+    from code (`operation::focus`, also on the field that has the focus,
+    such as a `text_editor` an Edit button focuses again), and also
+    whenever the window gets the focus back (after the notification shade,
+    a system dialog or another app): nothing tells the app that the user
+    hid it. A keyboard hidden right after it came up stays hidden. Only
+    when it was still up as the window got the focus back, or as the focus
+    moved between a password field and another kind of field, can hiding
+    it within half a second bring it back once (Android 11 and later): the
     shell cannot tell that hide from a show the system dropped, which it
     shows again.
   - Password fields (`.secure(true)`) are marked secure to the Android
