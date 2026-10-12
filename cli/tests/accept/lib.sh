@@ -256,3 +256,57 @@ png_size() {
 is_png() {
     [ -s "$1" ] && [ "$(od -An -tx1 -N8 "$1" | tr -d ' \n')" = 89504e470d0a1a0a ]
 }
+
+# --- the keychain search list (macOS) ---------------------------------------
+#
+# phase2.sh and phase5.sh sign with a throwaway identity in a temporary
+# keychain that stays off the user's keychain search list, and each checks
+# the list is unchanged. But codesign's --keychain only narrows its search
+# to one keychain of that list (Apple DTS,
+# https://developer.apple.com/forums/thread/728073): macOS 27.0.1's codesign
+# found the identity outside the list, the macOS 26.6.2 CI runner's did not
+# ("<sha1>: no identity found"). With ICM_ACCEPT_KEYCHAIN_SEARCH=1 on a CI
+# runner (GITHUB_ACTIONS=true, which Actions sets; the CI workflows set the
+# variable), the test keychain joins the end of the list for the signed
+# release only, icm still names it with ICM_KEYCHAIN, and the list is then
+# put back. Both read the list from before the run in the script's
+# SEARCH_LIST_BEFORE. Setting the variable alone, on a developer's machine,
+# changes nothing: the list is then never touched.
+
+# keychain_paths: the paths of a `security list-keychains` listing on
+# stdin, one per line, without their quotes.
+keychain_paths() {
+    sed -n 's/^[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p'
+}
+
+# keychain_search_allowed: true only on a CI runner that asks for it, so a
+# local run that sets the variable by mistake never edits the user's list.
+keychain_search_allowed() {
+    [ "${ICM_ACCEPT_KEYCHAIN_SEARCH:-}" = 1 ] && [ "${GITHUB_ACTIONS:-}" = true ]
+}
+
+# join_search_list KEYCHAIN: on a CI runner that asks for it (see
+# keychain_search_allowed), KEYCHAIN joins the end of the user's search
+# list, as codesign needs; otherwise nothing changes.
+join_search_list() {
+    keychain_search_allowed || return 0
+    local list=() path
+    while IFS= read -r path; do
+        list+=("$path")
+    done < <(printf '%s\n' "$SEARCH_LIST_BEFORE" | keychain_paths)
+    security list-keychains -d user -s ${list[@]+"${list[@]}"} "$1"
+    evidence "ICM_ACCEPT_KEYCHAIN_SEARCH=1: $(basename "$1") joined the search list for this release"
+}
+
+# restore_search_list: on a CI runner that asks for it (see
+# keychain_search_allowed), the user's search list as it was before the
+# run, when it differs.
+restore_search_list() {
+    keychain_search_allowed || return 0
+    [ "$(security list-keychains -d user)" != "$SEARCH_LIST_BEFORE" ] || return 0
+    local list=() path
+    while IFS= read -r path; do
+        list+=("$path")
+    done < <(printf '%s\n' "$SEARCH_LIST_BEFORE" | keychain_paths)
+    security list-keychains -d user -s ${list[@]+"${list[@]}"}
+}

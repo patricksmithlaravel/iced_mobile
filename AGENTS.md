@@ -82,11 +82,14 @@ the template on every platform, tests on macOS, Linux and Windows, the `rust-ver
 `.github/workflows/icm.yml` (icm's checks, the `cargo install --git` check, a fresh resolve of a new
 app, the desktop releases with `--sign none`, and the tag check). The jobs' logic is in
 `.github/ci/*.sh`, which run locally too. `cli/tests/ci.rs` fails when the workflows stop running a
-command listed above, so change both together. `icm-ios.yml`, `icm-android.yml`, `icm-web.yml` and
-`icm-desktop.yml` run each platform's acceptance and real-host jobs when `cli/` or the template
-changes; the Windows jobs wait for the repository variable `ICM_WINDOWS_HOST`, since icm does not
-build on Windows yet. Actions has not run on the fork yet: the owner enables workflows on its Actions
-tab. Never add a step that uploads, publishes or reads a secret.
+command listed above, so change both together. On macOS it also fails when a bash step of a macOS
+job, a `.github/ci` script or an acceptance script does not parse under `/bin/bash`: macOS runners
+have only that bash 3.2, which cannot parse a `case` inside `$(...)`. `icm-ios.yml`,
+`icm-android.yml`, `icm-web.yml` and `icm-desktop.yml` run each platform's acceptance and real-host
+jobs when `cli/` or the template changes; the Windows jobs wait for the repository variable
+`ICM_WINDOWS_HOST`, since icm does not build on Windows yet. Actions has run on the fork since
+2026-10-07; the CI section of the design's Appendix D records what its runs found. Never add a step
+that uploads, publishes or reads a secret.
 
 ### Acceptance scripts
 
@@ -135,7 +138,10 @@ stop only the platforms they drive and leave the other platforms' devices alone
     `ICM_KEYCHAIN` names a keychain file that does not exist and `ICM_PROVISIONING_PROFILES` an
     empty directory in `$ACCEPT`. The test identity lives in a temporary keychain made by
     `test-identity.sh`, which never joins the search list (a step checks it) and is deleted at the
-    end; the profile is a CMS envelope signed by a throwaway key.
+    end; the profile is a CMS envelope signed by a throwaway key. As in phase5.sh, only a CI runner
+    with `GITHUB_ACTIONS=true` and `ICM_ACCEPT_KEYCHAIN_SEARCH=1` (the CI job sets it) lets that
+    keychain join the list for the signed release (`join_search_list` in `lib.sh`); the list is put
+    back and checked.
   - It creates the managed `icm-iphone-<n>-pro-max-ios-<version>` simulator when it is missing and
     shuts it down. The owner's signed release, upload and a physical iPhone are SKIP
     (`ICM_ACCEPT_DEVICE=1` runs on a connected, provisioned iPhone).
@@ -156,7 +162,10 @@ stop only the platforms they drive and leave the other platforms' devices alone
   - macOS: an unsigned release and its DMG, which it mounts and verifies, and the app launched. A
     release signed with a throwaway self-signed identity (`test-identity.sh`) in a temporary
     keychain, which never joins the user's search list (the script checks the list is unchanged)
-    and is deleted at the end. The owner's notarization steps are SKIP.
+    and is deleted at the end. The owner's notarization steps are SKIP. Only on a CI runner with
+    `GITHUB_ACTIONS=true` and `ICM_ACCEPT_KEYCHAIN_SEARCH=1` (the CI job sets it) does that keychain
+    join the list for the signed release, since codesign's `--keychain` only narrows a search of the
+    list and macOS 26's codesign finds no identity outside it; the list is put back and checked.
   - Linux: the `.deb` and the AppImage (`--sign none`), `linux.glibc_floor`, `icm verify linux`,
     `dpkg -i` and `dpkg -r` (as root, or with `ICM_ACCEPT_INSTALL=1` and passwordless sudo), and
     the AppImage's first frame under `xvfb-run` or the session's display.
@@ -269,13 +278,14 @@ stop only the platforms they drive and leave the other platforms' devices alone
 - Never boot, wipe, delete or install onto the owner's other AVDs, simulators or phones. Check
   `adb devices` first: when its own emulator is not up, `icm run android` installs onto the single
   online Android device.
-- `--dry-run` (or `icm print plan <cmd…>`) prints the plan and touches no device, browser or
-  file for `new`, `doctor`, `release`, `ledger mark-uploaded`, `devices`, and `build`, `run`,
-  `stop`, `shot` (`--headless` included), `logs` and `input` on every platform (`build --all` and
-  `stop --all` included), and for `test --on android --lifecycle`. `check`, `ui`, `verify` and
-  host `test` have no plan: they refuse it (exit 2, `usage.bad_args`) before they start, and
-  never run for real. `input desktop` and `input ios-device` are refused (exit 2) with or
-  without it.
+- `--dry-run` (or `icm print plan <cmd…>`) prints the plan and touches no device, browser or file
+  for `new`, `doctor`, `release`, `ledger mark-uploaded`, `devices`, and `build`, `run`, `stop`,
+  `shot` (`--headless` included), `logs` and `input` on every platform (`build --all` and
+  `stop --all` included), and for `test --on android --lifecycle`, except that `build ios-sim` and
+  `run ios-sim` need macOS: elsewhere they are refused (`env.unsupported_host`) before they plan.
+  `check`, `ui`, `verify` and host `test` have no plan: they refuse it (exit 2, `usage.bad_args`)
+  before they start, and never run for real. `input desktop` and `input ios-device` are refused
+  (exit 2) with or without it.
 - `icm test --on android --lifecycle` changes the device's night mode, rotation, font scale and
   font weight, sends Home and Back and kills the app's process (`am kill`); it restores the
   settings at the end. `icm release android` installs the release onto icm's running emulator (or

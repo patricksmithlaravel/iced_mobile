@@ -935,17 +935,24 @@ exit 0
     fn a_started_emulator_carries_the_identity_stop_checks() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
+        // A fake SDK. `platform-tools` is what makes the directory an SDK to
+        // discovery: without it discovery skips host.toml's directory and
+        // takes the host's own SDK, if it has one, and its real emulator.
+        std::fs::create_dir_all(dir.path().join("platform-tools")).unwrap();
         // An emulator that is a long `sleep`; its launcher execs it, as the
-        // real one execs qemu, so the pid is the same throughout.
+        // real one execs qemu, so the pid is the same throughout. The path
+        // is absolute: the toolset gives the child a `PATH` without `/bin`.
         let emulator = dir.path().join("emulator/emulator");
         std::fs::create_dir_all(emulator.parent().unwrap()).unwrap();
-        std::fs::write(&emulator, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::write(&emulator, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
         std::fs::set_permissions(&emulator, std::fs::Permissions::from_mode(0o755)).unwrap();
         let host = crate::host::HostConfig {
             android_sdk: Some(dir.path().display().to_string()),
             ..Default::default()
         };
         let tools = Toolset::discover(&host, &Env::from_pairs(&[], Some(dir.path()))).unwrap();
+        assert_eq!(tools.sdk.root, dir.path(), "the fake SDK was not taken");
+        assert_eq!(tools.sdk.source, "host.toml android_sdk");
 
         let booting = start(
             &quiet_ctx(),

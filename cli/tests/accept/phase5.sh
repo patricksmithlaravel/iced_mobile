@@ -40,6 +40,17 @@
 # unchanged) and are deleted at the end. The user's own keychains are
 # never searched. Windows and Linux releases here are `--sign none`.
 #
+# Except on a CI runner that asks for it: codesign's --keychain only
+# narrows its search to one keychain of the search list (Apple DTS,
+# https://developer.apple.com/forums/thread/728073). macOS 27.0.1's codesign
+# found the identity outside the list; the macOS 26.6.2 CI runner's did not
+# ("<sha1>: no identity found"). With GITHUB_ACTIONS=true (Actions sets it)
+# and ICM_ACCEPT_KEYCHAIN_SEARCH=1, which the CI workflow sets, the test
+# keychain joins the end of the search list for the signed release only,
+# and icm still names it with ICM_KEYCHAIN.
+# The list is then restored, and the step's own check and the final one
+# still compare it with the list from before the run.
+#
 # Owner steps (never run here; printed as SKIP):
 #   - macOS: notarization and stapling (UPLOAD.md), `icm release macos
 #     --dmg` of the stapled app, and `icm verify macos --after-notarize`.
@@ -84,6 +95,7 @@ echo "host: $HOST"
 
 cleanup() {
     if [ "$HOST" = macos ]; then
+        restore_search_list
         local kc
         for kc in "$EMPTY_KC" "$TEST_KC"; do
             if [ -f "$kc" ]; then
@@ -236,6 +248,11 @@ other_hosts() {
 
 # --- macOS ----------------------------------------------------------------
 
+# join_search_list and restore_search_list (lib.sh) let the test keychain
+# join the search list for the signed release with
+# ICM_ACCEPT_KEYCHAIN_SEARCH=1 on a CI runner (GITHUB_ACTIONS=true) only
+# (see the header).
+
 keychains() {
     mkdir -p "$ACCEPT/keys"
     security create-keychain -p "$KC_PASS" "$EMPTY_KC"
@@ -320,7 +337,11 @@ test_identity_release() {
     sed -i '' "s/^identity = \"auto\"/identity = \"$sha1\"/" icm.toml
     sips --rotate 90 "$DEMO/assets/icon.png" --out "$ACCEPT/icon.png" >/dev/null
     cp "$ACCEPT/icon.png" "$DEMO/assets/icon.png"
+    # The step's subshell puts the list back however it ends.
+    trap restore_search_list EXIT
+    join_search_list "$TEST_KC"
     ICM_KEYCHAIN=$TEST_KC icm release macos --json -q >"$ACCEPT/release-test-id.json" || true
+    restore_search_list
     jqe '.exit == 9 and .errors[0].id == "macos.sign.no_developer_id" and .release.uploadable == false' "$ACCEPT/release-test-id.json"
     for id in macos.sign.verify macos.hardened_runtime macos.min_os macos.bundle; do
         check_event "$ACCEPT/release-test-id.json" ".id == \"$id\" and .status == \"pass\""
@@ -421,8 +442,10 @@ appimage_ready() {
     chmod +x "$appimage"
     rm -f "$ACCEPT/appimage.out" "$ACCEPT/appimage.err"
     if command -v xvfb-run >/dev/null; then
+        # Ubuntu 22.04's xvfb-run runs the app with `2>&1`: its stderr, where
+        # the ICM_EVENT lines go, comes out on stdout. Both go to one file.
         APPIMAGE_EXTRACT_AND_RUN=1 ICM_EVENTS=1 setsid --wait xvfb-run -a "$appimage" \
-            >"$ACCEPT/appimage.out" 2>"$ACCEPT/appimage.err" &
+            >"$ACCEPT/appimage.err" 2>&1 &
     else
         APPIMAGE_EXTRACT_AND_RUN=1 ICM_EVENTS=1 setsid --wait "$appimage" \
             >"$ACCEPT/appimage.out" 2>"$ACCEPT/appimage.err" &
