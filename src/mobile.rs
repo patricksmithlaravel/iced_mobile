@@ -467,9 +467,11 @@
 //!   text or a password; Gboard offers them only then.
 //! - If the user hides the keyboard while a field keeps the focus, a tap on
 //!   a field brings it back, also on a `text_editor`, which otherwise
-//!   ignores the tap. A tap elsewhere leaves it hidden. The window getting
-//!   the focus back (after the notification shade, a system dialog or
-//!   another app) brings it back too: the shell is not told that the user
+//!   ignores the tap. A tap elsewhere leaves it hidden. Focusing a field
+//!   from code (`operation::focus`) brings it back too, also the field that
+//!   has the focus (a `text_editor` an Edit button focuses again), and so
+//!   does the window getting the focus back (after the notification shade,
+//!   a system dialog or another app): the shell is not told that the user
 //!   hid it.
 //!
 //! When the input connection cannot be installed (before Android 8, or

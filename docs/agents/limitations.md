@@ -135,9 +135,11 @@ this file in the commit that fixes or finds a limitation.
     typed since it last started over, never the field's other text or a
     password; Gboard offers them only then.
   - On Android, a keyboard the user hid while a field keeps the focus
-    comes back at a tap on a field, and also whenever the window gets the
-    focus back (after the notification shade, a system dialog or another
-    app): nothing tells the app that the user hid it.
+    comes back at a tap on a field, when the app focuses a field from code
+    (`operation::focus`, also on the field that has the focus, such as a
+    `text_editor` an Edit button focuses again), and also whenever the
+    window gets the focus back (after the notification shade, a system
+    dialog or another app): nothing tells the app that the user hid it.
   - Password fields (`.secure(true)`) are marked secure to the Android
     keyboard with the input connection above: it shows its password layout
     without suggestions and is asked not to learn what is typed, and what

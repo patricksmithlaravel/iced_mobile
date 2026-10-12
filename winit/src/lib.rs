@@ -2506,7 +2506,8 @@ fn run_action<'a, P, C>(
             // Android (NativeActivity): what the keyboard sent before the
             // operation comes first, and the operation waits when that gives
             // the field edits. One that moves the focus or the caret while
-            // the keyboard types ends what it typed (see `ime`), so the one
+            // the keyboard types ends what it typed, and one that focuses a
+            // widget shows a keyboard the user hid (see `ime`), so the one
             // on the window that has the keyboard is watched.
             #[cfg(all(
                 target_os = "android",

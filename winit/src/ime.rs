@@ -17,9 +17,9 @@
 //!   shell's side of a session (`Shell`, `enable`, `disable`, `operate`,
 //!   `operated`, and the operations it defers).
 //! - [`Watch`]: the widget operations that move the focus, or the caret of a
-//!   field that has it ([`FocusedInputs`]), while the keyboard types, found
-//!   out as they run, and [`Replay`], which makes the caret moves a watch
-//!   held back.
+//!   field that has it ([`FocusedInputs`]), or focus a widget, while the
+//!   keyboard is shown, found out as they run, and [`Replay`], which makes
+//!   the caret moves a watch held back.
 //!
 //! Only with the `android-native-activity` feature: GameActivity has an
 //! input connection of its own. Elsewhere nothing here is compiled but the
@@ -451,6 +451,10 @@ pub(crate) struct Moved {
     /// into the field: they run once the field has what it sent (see
     /// [`Watch`]).
     pub(crate) held: Vec<Held>,
+    /// A widget was focused, whether it had the focus or not: the
+    /// application asks for the keyboard there, which shows again if the
+    /// user hid it.
+    pub(crate) focused: bool,
 }
 
 /// A caret move a [`Watch`] held back: the call, and the widget it was
@@ -481,7 +485,8 @@ pub(crate) enum Held {
 /// engine follows the caret only through what it types, so a focus or a
 /// caret the application moves itself ends what it typed. The caret of a
 /// text input without the focus is not the keyboard's: its moves are made
-/// at once and end nothing.
+/// at once and end nothing. A widget focused, also the one that has the
+/// focus, asks for the keyboard to show.
 ///
 /// A `hold`ing watch is used while the keyboard has typed into the field,
 /// so that what it sent before the caret moves, a composition and what
@@ -640,6 +645,8 @@ impl Focusable for WatchFocus<'_> {
     }
 
     fn focus(&mut self) {
+        self.moved.focused = true;
+
         if !self.state.is_focused() {
             self.moved.focus = true;
         } else if let Some(id) = self.held {
@@ -1010,9 +1017,14 @@ mod tests {
             ] {
                 let mut inputs = fields(focused);
 
+                // A widget focused asks for the keyboard; unfocusing does
+                // not.
                 assert_eq!(
                     run_with(operation, &mut inputs, true, Some(hold)),
-                    focus_moved(),
+                    Moved {
+                        focused: moved.is_some(),
+                        ..focus_moved()
+                    },
                     "{focused:?}"
                 );
 
@@ -1025,10 +1037,16 @@ mod tests {
 
     #[test]
     fn a_watch_finds_caret_moves() {
-        for (operation, _held) in caret_moves() {
+        for (operation, held) in caret_moves() {
             let mut inputs = fields(Some(1));
 
-            assert_eq!(run(operation, &mut inputs), caret_moved());
+            assert_eq!(
+                run(operation, &mut inputs),
+                Moved {
+                    focused: matches!(held, Held::Focus(_)),
+                    ..caret_moved()
+                }
+            );
             assert!(
                 inputs[1].1.cursor != 1 || inputs[1].1.selection.is_some(),
                 "the operation still runs"
@@ -1048,7 +1066,10 @@ mod tests {
 
             assert_eq!(
                 run_with(operation, &mut inputs, true, Some(true)),
-                held([expected.clone()])
+                Moved {
+                    focused: matches!(expected, Held::Focus(_)),
+                    ..held([expected.clone()])
+                }
             );
             assert_eq!(
                 (inputs[1].1.cursor, inputs[1].1.selection),
@@ -1115,9 +1136,39 @@ mod tests {
                 focus: true,
                 caret: true,
                 held: Vec::new(),
+                focused: false,
             }
         );
         assert_eq!(inputs[1].1.cursor, 2);
+    }
+
+    #[test]
+    fn focusing_the_focused_widget_asks_for_the_keyboard() {
+        // An Edit button that focuses the field again, which the user hid
+        // the keyboard of: the focus stays, and the keyboard is to show.
+        for (hold, moved) in [
+            (false, caret_moved()),
+            (true, held([Held::Focus(Id::new("b"))])),
+        ] {
+            let mut inputs = fields(Some(1));
+
+            let found = run_with(
+                Box::new(focusable::focus(Id::new("b"))),
+                &mut inputs,
+                true,
+                Some(hold),
+            );
+
+            assert_eq!(
+                found,
+                Moved {
+                    focused: true,
+                    ..moved
+                },
+                "{hold}"
+            );
+            assert!(inputs[1].1.focused, "{hold}");
+        }
     }
 
     #[test]

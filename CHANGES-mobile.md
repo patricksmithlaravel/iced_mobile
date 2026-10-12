@@ -299,11 +299,12 @@ Text input on Android, and secure fields on Android and iOS:
   hardware keyboard's keys reach the app as before, also with input methods that compose hardware
   keys.
 - **Android:** tapping a field brings back the keyboard the user hid, also a `text_editor` focused
-  from code, which otherwise ignores the tap. A tap elsewhere leaves it hidden. The window getting
-  the focus back (after the notification shade, a system dialog or another app) brings it back
-  too, since nothing tells the shell that the user hid it. Before, the field had to lose the focus
-  once, as it still has with GameActivity, before Android 8 and when the input connection cannot be
-  installed.
+  from code, which otherwise ignores the tap. A tap elsewhere leaves it hidden. Focusing a field
+  from code (`operation::focus`) brings it back too, also the field that has the focus (a
+  `text_editor` an Edit button focuses again), and so does the window getting the focus back
+  (after the notification shade, a system dialog or another app), since nothing tells the shell
+  that the user hid it. Before, the field had to lose the focus once, as it still has with
+  GameActivity, before Android 8 and when the input connection cannot be installed.
 - Password fields (`.secure(true)`) are marked secure to the system keyboard on Android with the
   input connection above, and on iOS: the Android keyboard shows its password layout without
   suggestions. On Android the input type is `TYPE_TEXT_VARIATION_PASSWORD` with

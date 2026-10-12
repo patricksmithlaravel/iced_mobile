@@ -43,10 +43,11 @@
 //!   field edits, the operation waits: the event loop replays an
 //!   `AboutToWait`, which hands the field the edits and builds the views
 //!   again, then runs it, and the operations made meanwhile after it
-//!   ([`schedule`], [`deferred`]). The operation then runs through a
-//!   [`Watch`](super::Watch), which records what it moves of the focus and
-//!   of the carets of the fields that have it, and [`operated`] ends the
-//!   session: a focus moved to another widget is handled as [`disable`]
+//!   ([`schedule`], [`deferred`]). While the keyboard is shown, the
+//!   operation then runs through a [`Watch`](super::Watch), which records
+//!   what it moves of the focus and of the carets of the fields that have
+//!   it, and [`operated`] ends the session when the engine follows the
+//!   caret: a focus moved to another widget is handled as [`disable`]
 //!   handles it, and a caret moved in the field as a tap is. The caret of a
 //!   field without the focus moves at once and ends nothing.
 //!   While the keyboard has typed into the field, the watch holds the caret
@@ -54,7 +55,9 @@
 //!   field where it was typed, a composition and what arrives while the
 //!   operation runs alike, and they are made once the field has it,
 //!   deferred the same way; a `select_all` then selects the word too,
-//!   instead of the word replacing the selection.
+//!   instead of the word replacing the selection. A widget the operation
+//!   focuses, also the one that has the focus, shows the keyboard again at
+//!   the next redraw, as a tap on it does.
 //! - From the first `show` to the next `hide`, the queue holds the window, so
 //!   that a native call can wake the event loop: it pushes its message and
 //!   requests a redraw (winit's Android loop ignores a bare wake). Native
@@ -203,7 +206,8 @@ pub(crate) fn touched(
 
     let touched = presses.into_iter().any(|press| focused.contains(press));
 
-    SESSION.with_borrow_mut(|session| session.touched = touched);
+    // A widget focused from code before keeps its request.
+    SESSION.with_borrow_mut(|session| session.touched |= touched);
 
     touched
 }
@@ -215,6 +219,9 @@ pub(crate) struct Typing {
     /// The window: the operation runs on its interface through a
     /// [`Watch`](super::Watch).
     pub(crate) window: window::Id,
+    /// Whether a focus or a caret the operation moves in the field ends
+    /// what the keyboard typed ([`Feed::follows`]).
+    pub(crate) follows: bool,
     /// Whether the watch holds caret moves back: the keyboard has typed
     /// into the field ([`Feed::holds`]).
     pub(crate) hold: bool,
@@ -222,10 +229,9 @@ pub(crate) struct Typing {
 
 /// Before a widget operation runs (see the module's documentation): what
 /// the keyboard sent before it is applied first. Returns the operation, and
-/// how to run it when the keyboard has typed or composes in a field, or the
-/// engine knows the text before its origin; none when it waits for the
-/// field to take edits first, until the event loop takes it from
-/// [`deferred`].
+/// how to run it while the keyboard is shown for a field; none when it
+/// waits for the field to take edits first, until the event loop takes it
+/// from [`deferred`].
 pub(crate) fn operate<P, C>(
     operation: Box<dyn Operation>,
     windows: &mut WindowManager<P, C>,
@@ -272,8 +278,9 @@ where
     }
 
     let typing = SESSION.with_borrow(|session| {
-        (session.is_shown() && session.feed.follows()).then(|| Typing {
+        session.is_shown().then(|| Typing {
             window,
+            follows: session.feed.follows(),
             hold: session.feed.holds(),
         })
     });
@@ -282,9 +289,10 @@ where
 }
 
 /// A widget operation ran on the window `typing` names, watched: ends the
-/// keyboard's session if it moved the focus or the caret, and defers the
-/// caret moves it held back until the field has what the keyboard sent
-/// (see the module's documentation).
+/// keyboard's session if it moved the focus or the caret while the engine
+/// follows it, defers the caret moves it held back until the field has
+/// what the keyboard sent, and shows the keyboard again at the next redraw
+/// if it focused a widget (see the module's documentation).
 pub(crate) fn operated<P, C>(
     typing: Typing,
     moved: super::Moved,
@@ -295,23 +303,37 @@ pub(crate) fn operated<P, C>(
     C: Compositor<Renderer = P::Renderer>,
     P::Theme: theme::Base,
 {
-    if moved.focus {
-        SESSION.with_borrow_mut(Session::abandon);
+    // Otherwise the engine is idle and knows nothing before its origin,
+    // which moves with the caret, and the focus moves on with it.
+    if typing.follows {
+        if moved.focus {
+            SESSION.with_borrow_mut(Session::abandon);
 
-        events.push((
-            typing.window,
-            core::Event::InputMethod(input_method::Event::Closed),
-        ));
-    } else if moved.caret || !moved.held.is_empty() {
-        // It stops after an Enter, Tab or Escape: the key left the engine
-        // idle, so the rest acts at the caret wherever it is.
-        let (edits, _waits) = SESSION.with_borrow_mut(Session::finish);
+            events.push((
+                typing.window,
+                core::Event::InputMethod(input_method::Event::Closed),
+            ));
+        } else if moved.caret || !moved.held.is_empty() {
+            // It stops after an Enter, Tab or Escape: the key left the
+            // engine idle, so the rest acts at the caret wherever it is.
+            let (edits, _waits) = SESSION.with_borrow_mut(Session::finish);
 
-        let _ = deliver(edits, windows, events);
+            let _ = deliver(edits, windows, events);
+        }
     }
 
     if !moved.held.is_empty() {
         defer(Box::new(super::Replay::new(moved.held)));
+    }
+
+    // The application asks for the keyboard there: one the user hid shows
+    // again, as at a tap on the field.
+    if moved.focused {
+        SESSION.with_borrow_mut(|session| session.touched = true);
+
+        if let Some(window) = windows.get_mut(typing.window) {
+            window.raw.request_redraw();
+        }
     }
 }
 
@@ -478,8 +500,9 @@ struct Session {
     /// The purpose the keyboard was last shown for, while a field asks for
     /// it.
     shown: Option<i32>,
-    /// A press landed on the focused field (see [`touched`]): the next
-    /// redraw that still asks for the keyboard shows it again.
+    /// A press landed on the focused field (see [`touched`]), or an
+    /// operation focused a widget ([`operated`]): the next redraw that still
+    /// asks for the keyboard shows it again.
     touched: bool,
     /// The window whose field lost the keyboard, which gets
     /// `input_method::Event::Closed`.
