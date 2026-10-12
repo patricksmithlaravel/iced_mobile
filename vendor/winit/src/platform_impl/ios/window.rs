@@ -383,8 +383,9 @@ impl Inner {
         }
     }
 
-    pub fn set_ime_purpose(&self, _purpose: ImePurpose) {
-        warn!("`Window::set_ime_purpose` is ignored on iOS")
+    /// Set the text input traits of the [WinitView], which UIKit reads to set up the keyboard.
+    pub fn set_ime_purpose(&self, purpose: ImePurpose) {
+        self.view.set_ime_purpose(purpose);
     }
 
     pub fn focus_window(&self) {

@@ -1289,7 +1289,10 @@ impl Window {
     ///
     /// ## Platform-specific
     ///
-    /// - **iOS / Android / Web / Windows / X11 / macOS / Orbital:** Unsupported.
+    /// - **iOS:** Sets the text input traits the soft keyboard is set up with.
+    ///   [`ImePurpose::Password`] turns on secure text entry, and it and [`ImePurpose::Terminal`]
+    ///   turn off autocorrection, spell checking, auto-capitalization and smart punctuation.
+    /// - **Android / Web / Windows / X11 / macOS / Orbital:** Unsupported.
     #[inline]
     pub fn set_ime_purpose(&self, purpose: ImePurpose) {
         let _span = tracing::debug_span!(
@@ -1823,7 +1826,7 @@ pub enum WindowLevel {
 ///
 /// ## Platform-specific
 ///
-/// - **iOS / Android / Web / Windows / X11 / macOS / Orbital:** Unsupported.
+/// - **Android / Web / Windows / X11 / macOS / Orbital:** Unsupported.
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
 #[non_exhaustive]
 pub enum ImePurpose {
