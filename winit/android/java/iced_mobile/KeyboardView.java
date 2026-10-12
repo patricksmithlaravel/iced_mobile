@@ -293,9 +293,11 @@ final class KeyboardView extends View {
         finishComposing();
         Keyboard.key(generation, keyCode);
 
-        // The app's caret moved where the mirror cannot follow: the text
-        // starts again there.
-        if (moves(keyCode) && !isEmpty()) {
+        // The app's caret moved, or its field may have been submitted or
+        // left, where the mirror cannot follow: the text starts again at the
+        // app's caret, with the same generation, so what the keyboard types
+        // next counts.
+        if (startsOver(keyCode) && !isEmpty()) {
             rebase();
         }
     }
@@ -448,8 +450,11 @@ final class KeyboardView extends View {
         return Math.max(start, end);
     }
 
-    /** Whether the key moves the app's caret. */
-    private static boolean moves(int keyCode) {
+    /**
+     * Whether the mirror starts over after the key: it moves the app's
+     * caret, or may submit or leave the field.
+     */
+    private static boolean startsOver(int keyCode) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_UP:
             case KeyEvent.KEYCODE_DPAD_DOWN:
@@ -457,6 +462,10 @@ final class KeyboardView extends View {
             case KeyEvent.KEYCODE_DPAD_RIGHT:
             case KeyEvent.KEYCODE_MOVE_HOME:
             case KeyEvent.KEYCODE_MOVE_END:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+            case KeyEvent.KEYCODE_TAB:
+            case KeyEvent.KEYCODE_ESCAPE:
                 return true;
             default:
                 return false;

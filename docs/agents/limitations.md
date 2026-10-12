@@ -139,9 +139,11 @@ this file in the commit that fixes or finds a limitation.
   - On Android, the keyboard's Enter (its key, its action button, or a
     commit of a lone line break) reaches the app as the Enter key, after the
     text typed before it, and submits a `text_input`; its Tab (its key, or a
-    commit of a lone tab) is the Tab key. A line break or tab inside longer
-    committed text (a suggestion, a paste from the keyboard's clipboard) is
-    dropped.
+    commit of a lone tab) is the Tab key. The app handles Enter, Tab and
+    Escape, and builds its view again, before the text the keyboard typed
+    after them reaches the field, so a field cleared on submit gets that
+    text alone. A line break or tab inside longer committed text (a
+    suggestion, a paste from the keyboard's clipboard) is dropped.
   - On iOS, Return and Tab count only when UIKit inserts them alone, as
     the Return and Tab keys do (`"\r\n"` is one Return). A line break or
     tab inside longer inserted text (dictation, a keyboard suggestion, a

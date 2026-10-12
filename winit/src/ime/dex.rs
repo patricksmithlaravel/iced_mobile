@@ -96,8 +96,13 @@
 //! - `KEYCODE_ESCAPE` (111).
 //! - `KEYCODE_DPAD_UP` (19), `KEYCODE_DPAD_DOWN` (20), `KEYCODE_DPAD_LEFT`
 //!   (21), `KEYCODE_DPAD_RIGHT` (22), `KEYCODE_MOVE_HOME` (122) and
-//!   `KEYCODE_MOVE_END` (123). The app's caret moves where the mirror cannot
-//!   follow, so when the mirror was not empty a rebase follows.
+//!   `KEYCODE_MOVE_END` (123).
+//!
+//! After an Enter, Tab or Escape key, or a caret-moving one, the app's
+//! caret moves, or its field may be submitted or left, where the mirror
+//! cannot follow, so when the mirror was not empty a rebase follows at
+//! once, with no new generation: what the keyboard sends after the key
+//! counts.
 //!
 //! Other keys with a character, unless pressed with Ctrl or Meta and
 //! unless a dead key, are typed into the mirror at the cursor after any
@@ -110,7 +115,7 @@
 //! - every report for a secure field, so no password is kept in Java and
 //!   its keyboard sees an empty field;
 //! - a report whose text exceeds 4096 UTF-16 units;
-//! - a caret-moving key, as above;
+//! - an Enter, Tab, Escape or caret-moving key, as above;
 //! - [`FORGET`];
 //! - a change of purpose while the mirror was not empty, after the
 //!   composition was finished: the next field's keyboard does not see the

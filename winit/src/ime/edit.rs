@@ -98,9 +98,9 @@ pub(crate) enum Message {
     /// Escape, an arrow, Home or End. `code` is Android's key code.
     Key { generation: i32, code: i32 },
     /// The Java side emptied the mirror without a reset (a secure field
-    /// after each report, a mirror grown past its cap, a caret-moving key,
-    /// or [`Request::Forget`]): the app's caret becomes the session's
-    /// origin.
+    /// after each report, a mirror grown past its cap, a key that moves the
+    /// app's caret or may submit the field, or [`Request::Forget`]): the
+    /// app's caret becomes the session's origin.
     Rebase { generation: i32 },
 }
 
@@ -110,10 +110,12 @@ pub(crate) enum Message {
 pub(crate) enum Request {
     /// Nothing.
     None,
-    /// Calls [`Engine::reset`] and hands the new generation to the Java side
-    /// (`Keyboard.reset`): after an Enter, Tab or Escape key, the field may
-    /// have been submitted or the focus moved.
-    Reset,
+    /// Gives the field the edits so far, and lets the application handle
+    /// them and build its view again, before the next message is applied:
+    /// after an Enter, Tab or Escape key, the field may have been submitted
+    /// (and cleared) or the focus moved, and the text the keyboard typed
+    /// after the key belongs to what the field is then.
+    Yield,
     /// Asks the Java side to rebase at the engine's generation
     /// (`Keyboard.forget`), with no new generation: the session's text
     /// starts with a character that joins the cluster before the origin in
@@ -213,11 +215,12 @@ impl Engine {
     ///
     /// An Enter, Tab or Escape key from the keyboard first commits a shown
     /// preedit, so a field submitted by Enter has the word being composed,
-    /// and requests a reset. An arrow, Home or End key commits it too, and
-    /// requests nothing: the Java side rebases right after it when the mirror
-    /// held text, and an empty mirror leaves the engine idle, so either way
-    /// the origin follows the app's caret. A message of another generation
-    /// predates a reset the caller asked for: it is dropped.
+    /// and yields. An arrow, Home or End key commits it too. After any of
+    /// them the Java side rebases when the mirror held text, and an empty
+    /// mirror leaves the engine idle, so either way the origin follows the
+    /// app's caret, with no new generation: what the keyboard sends after
+    /// the key counts. A message of another generation predates a reset the
+    /// caller made: it is dropped.
     pub(crate) fn apply(
         &mut self,
         message: Message,
@@ -264,10 +267,10 @@ impl Engine {
         }
     }
 
-    /// Native-initiated reset (a tap, a hardware key, or a
-    /// [`Request::Reset`]): commits a shown composition the way Android
-    /// does (Preedit cleared, then Commit of the composing text), forgets
-    /// the text, and returns the new generation to give the keyboard.
+    /// Native-initiated reset (a tap, a hardware key, a caret moved from
+    /// code): commits a shown composition the way Android does (Preedit
+    /// cleared, then Commit of the composing text), forgets the text, and
+    /// returns the new generation to give the keyboard.
     pub(crate) fn reset(&mut self, edits: &mut Vec<Edit>) -> i32 {
         self.commit_preedit(edits);
 
@@ -415,20 +418,22 @@ impl Engine {
             | Key::Up
             | Key::Down
             | Key::Home
-            | Key::End => {
+            | Key::End
+            | Key::Enter
+            | Key::Tab
+            | Key::Escape => {
                 // The rebase that follows a non-empty mirror, or the empty
-                // one, makes the moved caret the origin: no new generation,
-                // so the keys and text the keyboard sends meanwhile count.
+                // one, makes the app's caret after the key the origin: no
+                // new generation, so the keys and text the keyboard sends
+                // meanwhile count.
                 self.commit_preedit(edits);
                 edits.push(Edit::Key(key));
 
-                Request::None
-            }
-            Key::Enter | Key::Tab | Key::Escape => {
-                self.commit_preedit(edits);
-                edits.push(Edit::Key(key));
-
-                Request::Reset
+                if matches!(key, Key::Enter | Key::Tab | Key::Escape) {
+                    Request::Yield
+                } else {
+                    Request::None
+                }
             }
         }
     }
@@ -786,8 +791,9 @@ mod tests {
             .collect()
     }
 
-    /// Whether a key moves the app's caret (`KeyboardView.moves`).
-    fn moves(code: i32) -> bool {
+    /// Whether the mirror starts over after a key: it moves the app's caret
+    /// or may submit the field (`KeyboardView.startsOver`).
+    fn starts_over(code: i32) -> bool {
         matches!(
             code,
             KEYCODE_DPAD_UP
@@ -796,6 +802,10 @@ mod tests {
                 | KEYCODE_DPAD_RIGHT
                 | KEYCODE_MOVE_HOME
                 | KEYCODE_MOVE_END
+                | KEYCODE_ENTER
+                | KEYCODE_NUMPAD_ENTER
+                | KEYCODE_TAB
+                | KEYCODE_ESCAPE
         )
     }
 
@@ -1080,13 +1090,14 @@ mod tests {
 
         /// `KeyboardView.forward`: the composition is finished and reported
         /// (even inside a batch edit), then the key goes to the app, and a
-        /// caret-moving key rebases a mirror that holds text.
+        /// key that moves the caret or may submit the field rebases a mirror
+        /// that holds text.
         fn forward(&mut self, code: i32) {
             self.composing = None;
             self.send_report();
             self.key(code);
 
-            if moves(code) && !self.units.is_empty() {
+            if starts_over(code) && !self.units.is_empty() {
                 self.rebase();
             }
         }
@@ -1362,10 +1373,11 @@ mod tests {
         revisions: usize,
         /// Messages dropped for their generation.
         dropped: usize,
-        /// Backspace and Delete keys, keys that asked for a reset, and
-        /// keys that moved the caret.
+        /// Backspace and Delete keys, Enter, Tab and Escape keys (after
+        /// which the application takes its turn), and keys that moved the
+        /// caret.
         deletions: usize,
-        resets: usize,
+        submits: usize,
         moves: usize,
         /// Taps and hardware keys that reset, rebases, and requests to
         /// forget the text.
@@ -1384,7 +1396,7 @@ mod tests {
             self.revisions += other.revisions;
             self.dropped += other.dropped;
             self.deletions += other.deletions;
-            self.resets += other.resets;
+            self.submits += other.submits;
             self.moves += other.moves;
             self.interruptions += other.interruptions;
             self.rebases += other.rebases;
@@ -1401,7 +1413,7 @@ mod tests {
                 ("revisions", self.revisions),
                 ("dropped", self.dropped),
                 ("deletions", self.deletions),
-                ("resets", self.resets),
+                ("submits", self.submits),
                 ("moves", self.moves),
                 ("interruptions", self.interruptions),
                 ("rebases", self.rebases),
@@ -1494,8 +1506,8 @@ mod tests {
                 } => {
                     assert_ne!(
                         request,
-                        Request::Reset,
-                        "{label}: a report asked for a reset"
+                        Request::Yield,
+                        "{label}: a report yielded"
                     );
                     self.last = Expected::read(&text, selection, composing);
                     self.check();
@@ -1537,11 +1549,25 @@ mod tests {
                         self.seen.deletions += 1;
                     }
                     KEYCODE_ENTER | KEYCODE_NUMPAD_ENTER | KEYCODE_TAB
-                    | KEYCODE_ESCAPE => {
+                    | KEYCODE_ESCAPE | KEYCODE_DPAD_UP | KEYCODE_DPAD_DOWN
+                    | KEYCODE_DPAD_LEFT | KEYCODE_DPAD_RIGHT
+                    | KEYCODE_MOVE_HOME | KEYCODE_MOVE_END => {
+                        let submits = matches!(
+                            code,
+                            KEYCODE_ENTER
+                                | KEYCODE_NUMPAD_ENTER
+                                | KEYCODE_TAB
+                                | KEYCODE_ESCAPE
+                        );
+
                         assert_eq!(
                             request,
-                            Request::Reset,
-                            "{label}: key {code} did not ask for a reset"
+                            if submits {
+                                Request::Yield
+                            } else {
+                                Request::None
+                            },
+                            "{label}: key {code}"
                         );
                         assert_eq!(
                             edits.last(),
@@ -1552,38 +1578,17 @@ mod tests {
                         // the key, and the key edits no text.
                         self.check_finished();
 
-                        let mut more = Vec::new();
-                        let generation = self.engine.reset(&mut more);
-                        assert_eq!(
-                            more,
-                            [],
-                            "{label}: the reset after a key gave edits"
-                        );
-
-                        self.posted.push_back(Posted::Reset(generation));
+                        // The app's caret after the key is the origin: at
+                        // once when the mirror was empty (the engine is
+                        // idle), else at the rebase that follows. Nothing
+                        // the keyboard sends meanwhile is dropped.
                         self.restart();
-                        self.seen.resets += 1;
-                    }
-                    KEYCODE_DPAD_UP | KEYCODE_DPAD_DOWN | KEYCODE_DPAD_LEFT
-                    | KEYCODE_DPAD_RIGHT | KEYCODE_MOVE_HOME
-                    | KEYCODE_MOVE_END => {
-                        assert_eq!(
-                            request,
-                            Request::None,
-                            "{label}: key {code} asked for {request:?}"
-                        );
-                        assert_eq!(
-                            edits.last(),
-                            Some(&Edit::Key(Key::from_code(code).unwrap())),
-                            "{label}"
-                        );
-                        self.check_finished();
 
-                        // The moved caret is the origin: at once when the
-                        // mirror was empty (the engine is idle), else at the
-                        // rebase that follows.
-                        self.restart();
-                        self.seen.moves += 1;
+                        if submits {
+                            self.seen.submits += 1;
+                        } else {
+                            self.seen.moves += 1;
+                        }
                     }
                     _ => {
                         assert!(
@@ -2118,7 +2123,7 @@ mod tests {
             let mut engine = Engine::new();
             let request = if matches!(key, Key::Enter | Key::Tab | Key::Escape)
             {
-                Request::Reset
+                Request::Yield
             } else {
                 Request::None
             };
@@ -2227,9 +2232,10 @@ mod tests {
     }
 
     #[test]
-    fn a_key_that_resets_commits_the_composition_first() {
+    fn a_key_that_yields_commits_the_composition_first() {
         let mut engine = Engine::new();
         let _ = edits(&mut engine, state(0, "hello", (5, 5), (0, 5)));
+        assert!(engine.is_composing());
 
         assert_eq!(
             apply(
@@ -2241,14 +2247,16 @@ mod tests {
             ),
             (
                 vec![clear(), commit("hello"), Edit::Key(Key::Enter)],
-                Request::Reset
+                Request::Yield
             )
         );
+        assert!(!engine.is_composing());
 
-        let mut edits = Vec::new();
-        assert_eq!(engine.reset(&mut edits), 1);
-        assert_eq!(edits, []);
+        // The rebase that follows makes the caret the origin, in the same
+        // generation.
+        assert_eq!(edits(&mut engine, Message::Rebase { generation: 0 }), []);
         assert!(engine.is_idle());
+        assert_eq!(engine.generation(), 0);
     }
 
     #[test]
@@ -2722,15 +2730,14 @@ mod tests {
             let mut harness = Harness::new("hello", "");
 
             let _ = harness.run(|m| m.set_composing_text("wor", 1));
-            // The composition is committed first, and the key asks for a
-            // reset; nothing stays in the mirror.
+            // The composition is committed first, and the mirror starts
+            // over after the key; nothing stays in it.
             assert_eq!(
                 harness.run(|m| m.commit_text(text, 1)),
                 [clear(), commit("wor"), Edit::Key(key)],
                 "{text:?}"
             );
-            assert_eq!(harness.posted, [Posted::Reset(1)], "{text:?}");
-            harness.settle();
+            assert_eq!(harness.posted, [], "{text:?}");
             assert!(harness.mirror.units.is_empty(), "{text:?}");
 
             // The next Backspace deletes in the field.
@@ -2758,13 +2765,88 @@ mod tests {
             [clear(), commit("hi"), Edit::Key(Key::Enter)]
         );
         assert_eq!(harness.value(), "hi");
-        assert_eq!(harness.posted, [Posted::Reset(1)]);
+        assert_eq!(harness.posted, []);
 
-        // A message sent before the keyboard ran the reset is dropped.
-        assert_eq!(harness.run(|m| m.commit_text("lost", 1)), []);
-        harness.settle();
+        // The mirror starts over at once, in the same generation.
         assert_eq!(harness.run(|m| m.commit_text("!", 1)), [commit("!")]);
         assert_eq!(harness.value(), "hi!");
+        assert_eq!(
+            harness.mirror.units,
+            "!".encode_utf16().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn text_typed_right_after_enter_tab_or_escape_counts() {
+        for code in [
+            KEYCODE_ENTER,
+            KEYCODE_NUMPAD_ENTER,
+            KEYCODE_TAB,
+            KEYCODE_ESCAPE,
+        ] {
+            // The keyboard sends the key, then text, all before the event
+            // loop turns: nothing is dropped, and each piece of text lands
+            // after the key.
+            let mut harness = Harness::new("", "");
+
+            let _ = harness.run(|m| m.set_composing_text("line", 1));
+            harness.mirror.send_key(code);
+            harness.mirror.set_composing_text("de", 1);
+            harness.mirror.commit_text("def", 1);
+
+            let mut requests = Vec::new();
+
+            while let Some(message) = harness.mirror.out.pop_front() {
+                let mut edits = Vec::new();
+                requests.push(harness.engine.apply(message, &mut edits));
+                harness.app.apply(&edits);
+                harness.log.extend(edits);
+            }
+
+            assert_eq!(harness.value(), "linedef", "{code}");
+
+            let key = Key::from_code(code).unwrap();
+
+            assert_eq!(
+                harness.take(),
+                [
+                    clear(),
+                    commit("line"),
+                    Edit::Key(key),
+                    preedit("de", 2),
+                    clear(),
+                    commit("def"),
+                ],
+                "{code}"
+            );
+            // The native side gives the field the key before the text after
+            // it.
+            assert_eq!(
+                requests,
+                [
+                    Request::None,
+                    Request::Yield,
+                    Request::None,
+                    Request::None,
+                    Request::None
+                ],
+                "{code}"
+            );
+            assert_eq!(harness.engine.generation(), 0);
+        }
+
+        // AOSP's keyboard and others commit a username, Tab, then a
+        // password in one go.
+        let mut harness = Harness::new("", "");
+        harness.mirror.commit_text("sam", 1);
+        harness.mirror.commit_text("\t", 1);
+        harness.mirror.commit_text("pw", 1);
+        harness.drain();
+        assert_eq!(harness.value(), "sampw");
+        assert_eq!(
+            harness.mirror.units,
+            "pw".encode_utf16().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2953,9 +3035,9 @@ mod tests {
         let mut harness = Harness::new("", "");
 
         let _ = harness.run(|m| m.commit_text("a", 1));
-        // Tab from the keyboard asks for a reset; the keyboard types on
-        // before it runs.
-        harness.mirror.send_key(KEYCODE_TAB);
+        // A tap resets; the keyboard, which saw its text before the tap,
+        // types on before the reset runs.
+        harness.tap(1);
         harness.mirror.commit_text("b", 1);
         harness.drain();
         assert_eq!(harness.value(), "a");

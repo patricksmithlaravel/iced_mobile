@@ -56,13 +56,16 @@
 //!   calls never call into Java and never panic across the boundary.
 //! - [`Shell::drain`], when the event loop is about to wait, applies the
 //!   queued messages to the engine in order and gives the edits to the
-//!   window whose field asks for the keyboard (none: they are dropped). When
-//!   a message asks for a reset (an Enter, Tab or Escape key), the engine is
-//!   reset before the next message is applied, and the Java side adopts the
-//!   new generation; the messages it sent before that are dropped as stale.
-//!   When it asks to forget the text (the session's text starts with a
-//!   character that joins the text before it), the Java side is asked to
-//!   rebase, with no new generation.
+//!   window whose field asks for the keyboard (none: they are dropped).
+//!   After an Enter, Tab or Escape key it stops, and the event loop replays
+//!   an `AboutToWait` for the rest: the application handles the key (a
+//!   submit that clears the field, a focus it moves) and builds its view
+//!   again before the text the keyboard typed after the key reaches the
+//!   field. The Java side rebases its mirror right after such a key, as
+//!   after an arrow, Home or End, with no new generation, so none of that
+//!   text is dropped. When a message asks to forget the text (the session's
+//!   text starts with a character that joins the text before it), the Java
+//!   side is asked to rebase, with no new generation.
 //! - [`Shell::interrupt`], before a touch starts, a mouse button is pressed,
 //!   a hardware key other than a modifier is pressed or the window loses
 //!   the focus reaches the application: the queued messages are applied
@@ -237,8 +240,11 @@ where
     let edits = SESSION.with_borrow_mut(|session| {
         let mut edits = Vec::new();
 
+        // After an Enter, Tab or Escape the rest waits: the edits make the
+        // operation wait too, and the event loop's next `AboutToWait`
+        // applies it.
         if session.is_shown() {
-            session.apply_queue(&mut edits);
+            let _ = session.apply_queue(&mut edits);
         }
 
         edits
@@ -388,25 +394,34 @@ impl Shell {
     /// When the event loop is about to wait: applies what the keyboard sent
     /// since it last turned, and gives the edits to the window whose field
     /// asks for the keyboard. Called before the loop's idle check.
+    ///
+    /// True when it stopped after an Enter, Tab or Escape key with messages
+    /// left: the event loop then handles the edits, and builds the views
+    /// again, and replays an `AboutToWait`, which calls this again for the
+    /// rest.
+    #[must_use]
     pub(crate) fn drain<P, C>(
         &mut self,
         windows: &mut WindowManager<P, C>,
         events: &mut Vec<(window::Id, core::Event)>,
-    ) where
+    ) -> bool
+    where
         P: Program,
         C: Compositor<Renderer = P::Renderer>,
         P::Theme: theme::Base,
     {
-        let edits = SESSION.with_borrow_mut(|session| {
+        let (edits, more) = SESSION.with_borrow_mut(|session| {
             let mut edits = Vec::new();
-            session.apply_queue(&mut edits);
+            let more = session.apply_queue(&mut edits);
 
-            edits
+            (edits, more)
         });
 
         closed(windows, events);
 
         let _ = deliver(edits, windows, events);
+
+        more
     }
 }
 
@@ -516,7 +531,7 @@ impl Session {
         }
     }
 
-    /// The user or the application moves the caret: applies what the
+    /// The user or the application moves the caret: applies all the
     /// keyboard sent, then, unless the engine is idle, resets it, which
     /// commits a composition at the field's caret, and has the Java side
     /// forget its text. Returns the edits for the field.
@@ -527,7 +542,9 @@ impl Session {
             return edits;
         }
 
-        self.apply_queue(&mut edits);
+        // All of it comes before the event or the operation, so it does not
+        // stop after an Enter, Tab or Escape.
+        while self.apply_queue(&mut edits) {}
 
         if !self.engine.is_idle() {
             let generation = self.engine.reset(&mut edits);
@@ -594,17 +611,26 @@ impl Session {
     }
 
     /// Applies the queued messages in order, and does what each requests
-    /// before the next is applied.
-    fn apply_queue(&mut self, edits: &mut Vec<Edit>) {
+    /// before the next is applied. Stops after a message that yields (an
+    /// Enter, Tab or Escape key), leaving the rest queued ahead of what the
+    /// keyboard sends meanwhile: true when it left any.
+    fn apply_queue(&mut self, edits: &mut Vec<Edit>) -> bool {
         // The lock is let go of before anything calls into Java.
-        let messages = std::mem::take(&mut queue().messages);
+        let mut messages = std::mem::take(&mut queue().messages);
 
-        for message in messages {
+        while let Some(message) = messages.pop_front() {
             match self.engine.apply(message, edits) {
                 Request::None => {}
-                Request::Reset => {
-                    let generation = self.engine.reset(edits);
-                    self.call(dex::RESET, &[JValue::Int(generation)]);
+                Request::Yield => {
+                    if messages.is_empty() {
+                        break;
+                    }
+
+                    let mut queue = queue();
+                    messages.append(&mut queue.messages);
+                    queue.messages = messages;
+
+                    return true;
                 }
                 Request::Forget => {
                     let generation = self.engine.generation();
@@ -612,6 +638,8 @@ impl Session {
                 }
             }
         }
+
+        false
     }
 
     /// Calls `method` of the installed Java side. A failure is logged; the

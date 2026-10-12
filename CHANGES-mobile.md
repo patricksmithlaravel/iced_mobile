@@ -263,8 +263,10 @@ Text input on Android, and secure fields on Android and iOS:
   fields; the docs said before that only text not sent as keys could be lost there.
 - **Android:** the keyboard's Enter, from its key, its action button or a commit of a lone line
   break, reaches the app as the Enter key after the text typed before it, and submits a
-  `text_input`; its Tab, from its key or a commit of a lone tab, is the Tab key. Line breaks and
-  tabs inside longer committed text are dropped. Backspace and Delete reach the field's text
+  `text_input`; its Tab, from its key or a commit of a lone tab, is the Tab key. The app handles
+  Enter, Tab and Escape, and builds its view again, before the text typed after them, and none of
+  that text is dropped, however soon it follows. Line breaks and tabs inside longer committed text
+  are dropped. Backspace and Delete reach the field's text
   before and after what the keyboard typed, also from keyboards that delete with
   `deleteSurroundingText` (AOSP's keyboard and its forks), and so do the arrow, Home and End keys,
   without dropping keys sent in quick succession. The keyboard's other keys no longer reach the

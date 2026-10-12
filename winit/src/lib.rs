@@ -1693,12 +1693,18 @@ async fn run_instance<P>(
                             .poll(&mut window_manager, &mut control_sender);
 
                         // Android (NativeActivity): what the keyboard typed
-                        // since the event loop last turned.
+                        // since the event loop last turned. After its Enter,
+                        // Tab or Escape the application takes its turn, and
+                        // the views are built again, before the rest.
                         #[cfg(all(
                             target_os = "android",
                             feature = "android-native-activity"
                         ))]
-                        keyboard.drain(&mut window_manager, &mut events);
+                        if keyboard.drain(&mut window_manager, &mut events) {
+                            replay.push_back(Event::EventLoopAwakened(
+                                event::Event::AboutToWait,
+                            ));
+                        }
 
                         if events.is_empty()
                             && messages.is_empty()
