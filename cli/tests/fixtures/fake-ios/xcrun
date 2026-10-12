@@ -298,6 +298,11 @@ devicectl)
         printf 'ICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3,"title":"%s"},"backend":"wgpu","account":{"token":"%s"}}\n' "$tok_json" "$tok_json"
         exec sleep "30.$$"
         ;;
+      silent)
+        # No ICM_EVENT line: the app is ready by the process probe alone.
+        echo $$ > "$S/device-app.pid"
+        exec sleep "30.$$"
+        ;;
       *)
         echo $$ > "$S/device-app.pid"
         printf 'ICM_EVENT {"v":1,"kind":"start","protocol":1,"pid":4242}\nICM_EVENT {"v":1,"kind":"ready","ms":5,"window":{"size":[402,874],"physical":[1206,2622],"scale":3},"backend":"wgpu"}\n'

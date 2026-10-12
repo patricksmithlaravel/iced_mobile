@@ -1182,6 +1182,85 @@ fn a_stored_command_for_another_pid_is_not_run() {
     device.list_processes_as_the_app_runs();
 }
 
+/// An app that reports no `start` event (`ICM_EVENT`) is ready by the process
+/// probe, and `run` recorded no pid for it. The record had no terminate
+/// command, so `stop` asked the device about nothing, ran nothing and removed
+/// the record while the app could still be running on the phone. The run now
+/// takes the pid the device lists for the installed app, so `stop` asks the
+/// device about that pid and terminates it, as it does for an app that
+/// reported `start`.
+#[test]
+fn a_probe_ready_app_is_terminated_by_the_pid_the_device_lists() {
+    let mut device = Device::new();
+    device.set("ICM_FAKE_SCENARIO", "silent");
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(run["process"]["ready"]["source"], "probe", "{run}");
+    assert_eq!(run["process"]["pid"], 4242, "{run}");
+    let session = device.session();
+    assert_eq!(session["app_pid"], 4242, "{session}");
+    assert_eq!(
+        session["stop"],
+        json!([[
+            "xcrun",
+            "devicectl",
+            "device",
+            "process",
+            "terminate",
+            "--device",
+            UDID,
+            "--pid",
+            "4242"
+        ]]),
+        "{session}"
+    );
+
+    let before = device.devicectl_calls().len();
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    let calls = device.devicectl_calls()[before..].to_vec();
+    assert_asked_then_terminated(&calls, 4242, "the probe-ready app");
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
+    assert!(!device.session_path().exists());
+}
+
+/// The probe matches the app by its bundle and binary names alone, so a
+/// same-named copy in another container can ready the app. That copy's pid is
+/// not the installed app's, so the run records no pid for it, and no terminate
+/// command: a command for the copy's pid would end a process that is not the
+/// app. `stop` then asks the device about nothing and terminates nothing.
+#[test]
+fn a_probe_ready_copy_in_another_container_is_not_recorded_as_the_app() {
+    let other =
+        "file:///private/var/containers/Bundle/Application/OTHER-UUID/Fixture.app/release-app";
+    let mut device = Device::new();
+    device.set("ICM_FAKE_SCENARIO", "silent");
+    device.list_processes(&[process(4242, other)]);
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(run["process"]["ready"]["source"], "probe", "{run}");
+    let session = device.session();
+    assert_eq!(session["app_pid"], Value::Null, "{session}");
+    assert_eq!(
+        session["stop"].as_array().map_or(0, Vec::len),
+        0,
+        "{session}"
+    );
+
+    let before = device.devicectl_calls().len();
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(
+        device.devicectl_calls().len(),
+        before,
+        "{}",
+        device.log("xcrun.log")
+    );
+    assert!(!device.terminated(), "{}", device.log("xcrun.log"));
+}
+
 #[test]
 fn a_panic_on_the_device_is_reported() {
     let mut device = Device::new();

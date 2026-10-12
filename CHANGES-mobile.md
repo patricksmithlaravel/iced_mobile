@@ -58,6 +58,14 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   removed, and the summary says nothing was running (it said `stopped 1 session(s)`). The console
   icm ends still counts, as before (`tests/ios_device.rs`:
   `a_record_that_ended_nothing_is_not_counted_as_stopped`).
+- `icm run ios-device` of an app that reports no `start` event (`ICM_EVENT`), so the process
+  probe found it, now records the pid the device lists for the installed app, and `icm stop
+  ios-device` terminates that pid after the same device check as for an app that reported
+  `start`. Before, such a record had no pid and no terminate command, so `stop` removed it
+  without asking the device and sent no terminate command. A run that finds no single listed
+  process for the installed app still records no pid (`tests/ios_device.rs`:
+  `a_probe_ready_app_is_terminated_by_the_pid_the_device_lists`,
+  `a_probe_ready_copy_in_another_container_is_not_recorded_as_the_app`). Not seen on a phone.
 - `icm logs desktop` of a running app whose environment could not be read back in full no longer
   prints the secrets it inherited. A read of the process that returned its arguments and no
   variables (macOS does for a platform binary), or another environment than the app's (the app

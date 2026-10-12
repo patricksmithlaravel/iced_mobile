@@ -813,6 +813,42 @@ fn wait_ready(
     }
 }
 
+/// The pid the device lists for the installed app, for a run whose app
+/// reported no `start` event (the process probe found it, or only `ready`
+/// came). It is the one listed process whose executable is `<install>/<bin>`,
+/// the path `stop` compares before it terminates the pid
+/// ([`app_process`]), so the pid is one `stop` can confirm. None when the
+/// listing cannot be had, names no such process, or names more than one: the
+/// record then names no pid, and `stop` keeps it.
+fn listed_app_pid(
+    ctx: &Ctx,
+    xcode: &Xcode,
+    device: &Device,
+    install: Option<&str>,
+    binary: &str,
+) -> Option<i64> {
+    let install = install?;
+    let text = devicectl_json(
+        ctx,
+        xcode,
+        &["device", "info", "processes", "--device", &device.udid],
+        "processes",
+    )
+    .ok()?;
+    let mut pids = devicectl::running_processes(&text)
+        .ok()?
+        .into_iter()
+        .filter(|process| {
+            process.executable.as_deref().is_some_and(|path| {
+                devicectl::match_installed_executable(path, install, binary)
+                    == devicectl::Match::Same
+            })
+        })
+        .map(|process| process.pid);
+    let pid = pids.next()?;
+    pids.next().is_none().then_some(pid)
+}
+
 /// Parses `--env K=V` values.
 fn app_env(values: &[String]) -> Result<Vec<(String, String)>> {
     values
@@ -1221,6 +1257,13 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
             return Err(error);
         }
     };
+    // An app that reported no `start` event has no pid from it: the record
+    // then takes the pid the device lists for the installed app, so `stop`
+    // can ask the device about that pid and terminate it.
+    let app_pid = app_pid.or_else(|| {
+        listed_app_pid(ctx, &xcode, &device, install_url.as_deref(), &built.bin)
+            .map(|pid| pid as i32)
+    });
     let (source, ms, scale) = match &ready {
         Ready::Event(event, elapsed) => (
             "icm_event",
