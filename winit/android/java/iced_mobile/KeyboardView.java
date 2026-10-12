@@ -2,6 +2,7 @@ package iced_mobile;
 
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.os.Build;
 import android.text.Editable;
 import android.text.Selection;
 import android.text.SpannableStringBuilder;
@@ -9,6 +10,7 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.WindowInsets;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -30,6 +32,12 @@ final class KeyboardView extends View {
     /** The most UTF-16 units the mirror keeps when nothing is composing. */
     static final int CAP = 4096;
 
+    /** How long after a show the view looks whether the keyboard is up. */
+    private static final long RECHECK_MS = 500;
+
+    /** How many times it then shows the keyboard again at most. */
+    private static final int RECHECKS = 3;
+
     private final InputMethodManager manager;
     private final SpannableStringBuilder mirror = new SpannableStringBuilder();
 
@@ -47,6 +55,35 @@ final class KeyboardView extends View {
 
     /** The connection the keyboard got last, the one it edits through. */
     private KeyboardConnection connection;
+
+    /** How many more times {@link #recheck} may show the keyboard. */
+    private int rechecks;
+
+    /**
+     * Shows the keyboard again while a field wants it, the window has the
+     * focus and it is not up. The system can accept a show it then cancels
+     * or drops, around a restart and the window getting the focus (on the
+     * way back from the background), and nothing tells the view.
+     */
+    private final Runnable recheck = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                if (!installed || !wanted || !isFocused() || !hasWindowFocus()
+                        || isKeyboardUp()) {
+                    return;
+                }
+
+                manager.showSoftInput(KeyboardView.this, 0);
+
+                if (--rechecks > 0) {
+                    postDelayed(this, RECHECK_MS);
+                }
+            } catch (RuntimeException error) {
+                Keyboard.warn("showing the keyboard", error);
+            }
+        }
+    };
 
     private int purpose = Keyboard.NORMAL;
     private int generation;
@@ -166,7 +203,8 @@ final class KeyboardView extends View {
 
     /**
      * Shows the keyboard once the messages already queued ran: the input
-     * method manager then has started input for the view.
+     * method manager then has started input for the view. Then looks a few
+     * times whether it is up, and shows it again if not ({@link #recheck}).
      */
     private void showLater() {
         post(new Runnable() {
@@ -181,6 +219,23 @@ final class KeyboardView extends View {
                 }
             }
         });
+
+        // Before Android 11 the view cannot tell whether the keyboard is
+        // up: it shows it once more.
+        rechecks = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                ? RECHECKS
+                : 1;
+        removeCallbacks(recheck);
+        postDelayed(recheck, RECHECK_MS);
+    }
+
+    /**
+     * Whether the keyboard is up (Android 11 and later); false before, when
+     * the view cannot tell.
+     */
+    private boolean isKeyboardUp() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                && KeyboardInsets.isUp(this);
     }
 
     void show(int purpose) {
@@ -225,9 +280,14 @@ final class KeyboardView extends View {
             restart();
         }
 
-        if (!manager.showSoftInput(this, 0)) {
-            showLater();
-        }
+        // At once, then again once the messages already queued ran, and
+        // while it is not up (recheck): the system can accept a show that
+        // comes right after the input restarted or the window got the focus
+        // and still drop it. When the window got the focus back while no
+        // field wanted the keyboard (back from the background), nothing else
+        // would show it.
+        manager.showSoftInput(this, 0);
+        showLater();
     }
 
     /**
@@ -506,6 +566,18 @@ final class KeyboardView extends View {
                 return true;
             default:
                 return false;
+        }
+    }
+
+    /**
+     * The keyboard's window insets (Android 11), in a class of their own so
+     * that older Android never loads what they name.
+     */
+    private static final class KeyboardInsets {
+        static boolean isUp(View view) {
+            WindowInsets insets = view.getRootWindowInsets();
+
+            return insets != null && insets.isVisible(WindowInsets.Type.ime());
         }
     }
 }
