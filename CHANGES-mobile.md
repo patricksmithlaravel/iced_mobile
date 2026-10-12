@@ -267,12 +267,14 @@ Text input on Android, and secure fields on Android and iOS:
   field as an input method's commit, as from a desktop input method: `text_input` hands it to
   `on_input`, never to `on_paste`, and `text_editor` gets it as `Edit::Paste`, never as
   `Edit::Insert`, so an editor that drops `Edit::Paste` takes no typing from the keyboard. Its
-  deletions and caret moves come as Backspace, Delete and arrow keys, one per cluster, pressed and
-  released. The caret moves inside the text it typed go in the order of the text, also in a
-  right-to-left line of a `text_editor` (below). Subscriptions (`keyboard::listen`, `event::listen`)
-  see what the field does not capture, every release among them, and when a modifier is held on a
-  hardware keyboard, or for Select all (Ctrl+A), a `ModifiersChanged` before the key and one after
-  it that puts the window's back.
+  deletions and caret moves come as Delete, Backspace and arrow keys, one per cluster, pressed and
+  released: what it deletes in the text it typed goes with Delete from the start of the change,
+  which takes a whole cluster in a `text_editor` too, where Backspace deletes one character. The
+  caret moves inside the text it typed go in the order of the text, also in a right-to-left line of
+  a `text_editor` (below). Subscriptions (`keyboard::listen`, `event::listen`) see what the field
+  does not capture, every release among them, and when a modifier is held on a hardware keyboard, or
+  for Select all (Ctrl+A), a `ModifiersChanged` before the key and one after it that puts the
+  window's back.
   Whatever the field, the keyboard is told it edits single-line text with no action
   (`IME_ACTION_NONE`), so its action key is a plain Enter, never Done, Next, Search or Send, and the
   keyboard's view is left out of Android's autofill (`IMPORTANT_FOR_AUTOFILL_NO`), so autofill (a

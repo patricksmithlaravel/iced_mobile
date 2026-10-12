@@ -12,13 +12,19 @@
 //! empty (a reset or a rebase). In the app, the mirror's committed text (its
 //! text without the composing part) follows the origin, and the engine keeps
 //! the app's caret inside that text, counted in grapheme clusters, which is
-//! what `text_input` moves and deletes by. `text_editor`'s Backspace may
-//! delete by character instead, so a combining sequence the keyboard revises
-//! can come out wrong there. The engine moves that caret one cluster at a
-//! time in the order of the text ([`Key::Previous`] and [`Key::Next`], not
-//! the keyboard's arrows): `text_editor`'s arrows move on screen, backwards
-//! in a right-to-left line, so these reach it as moves of their own (see
-//! `events` in the parent module).
+//! what `text_input` moves and deletes by. The engine moves that caret one
+//! cluster at a time in the order of the text ([`Key::Previous`] and
+//! [`Key::Next`], not the keyboard's arrows): `text_editor`'s arrows move on
+//! screen, backwards in a right-to-left line, so these reach it as moves of
+//! their own (see `events` in the parent module). It deletes the clusters
+//! the keyboard changed with Delete, from the start of the change, which
+//! takes one cluster in both widgets. `text_editor`'s Backspace deletes one
+//! character: it would leave the rest of a cluster the keyboard changed in
+//! part (an emoji's skin tone, a flag's second half, a vowel sign), and the
+//! commit of what the keyboard left of it would double that rest. A
+//! Backspace reaches the field only for the keyboard's own Backspace with
+//! nothing before its cursor, which deletes in the field's text before the
+//! origin what the field's Backspace deletes.
 //!
 //! The app segments its whole value into clusters, so a character that joins
 //! the cluster before it right after the origin joins the app's text before
@@ -46,9 +52,9 @@
 //! virama typed right before a consonant of the field make one conjunct
 //! with it. The engine still counts the virama's cluster as its own, so a
 //! revision of it (the keyboard's Backspace on the virama, or another
-//! consonant after it) Backspaces the whole conjunct out of the app, the
-//! field's consonant with it, and text committed there lands after the
-//! conjunct, where `text_input` puts its caret. The engine cannot see the
+//! consonant after it) deletes the whole conjunct from the app, the field's
+//! consonant with it, and text committed there lands after the conjunct,
+//! where `text_input` puts its caret. The engine cannot see the
 //! text after the session's. `docs/agents/limitations.md` lists both.
 //!
 //! Line breaks and tabs are never part of the text the engine compares or
@@ -389,7 +395,6 @@ impl Engine {
         let removed = old.len() - prefix - suffix;
         let inserted = new[prefix..new.len() - suffix].concat();
         let inserted_len = new.len() - suffix - prefix;
-        let changed_end = old.len() - suffix;
 
         // Where the app's caret rests, rounded down to a cluster.
         let target = new
@@ -409,9 +414,13 @@ impl Engine {
                 self.clear_preedit(edits);
             }
 
-            self.move_to(changed_end, edits);
-            edits.extend(iter::repeat_n(Edit::Key(Key::Backspace), removed));
-            self.caret = prefix;
+            // The old clusters go from the start of the change, one Delete
+            // each: `text_input` and `text_editor` both delete a whole
+            // cluster forward, where `text_editor`'s Backspace deletes one
+            // character and would leave the rest of a cluster the keyboard
+            // changed in part (an emoji's skin tone, a flag's second half).
+            self.move_to(prefix, edits);
+            edits.extend(iter::repeat_n(Edit::Key(Key::Delete), removed));
 
             if inserted_len > 0 {
                 edits.push(Edit::Commit(inserted));
@@ -771,6 +780,12 @@ mod tests {
         vec![Edit::Key(key); count]
     }
 
+    /// What deletes the `count` clusters right before the app's caret: the
+    /// caret goes back over them, then a Delete takes each.
+    fn deleted(count: usize) -> Vec<Edit> {
+        [keys(Key::Previous, count), keys(Key::Delete, count)].concat()
+    }
+
     // The app's side: a field like iced's `text_input`.
 
     /// A single-line field that edits its value the way iced's `text_input`
@@ -785,6 +800,10 @@ mod tests {
         /// All of the value is selected (Select all), which the next text,
         /// Backspace or Delete replaces and a move ends.
         selected: bool,
+        /// A line of a `text_editor`: its Backspace deletes one character,
+        /// as cosmic-text's does, where `text_input`'s deletes a cluster.
+        /// Its Delete and moves go by cluster too.
+        editor: bool,
         /// A right-to-left line of a `text_editor`: its arrows move on
         /// screen, so Left goes on in the order of the text and Right back,
         /// while the engine's own moves go in that order.
@@ -807,6 +826,7 @@ mod tests {
                 caret,
                 preedit: None,
                 selected: false,
+                editor: false,
                 rtl: false,
                 low: caret,
             }
@@ -856,12 +876,7 @@ mod tests {
                 }
 
                 match edit {
-                    Edit::Key(Key::Backspace) => {
-                        if self.caret > 0 {
-                            self.caret -= 1;
-                            let _ = self.value.remove(self.caret);
-                        }
-                    }
+                    Edit::Key(Key::Backspace) => self.backspace(),
                     Edit::Key(Key::Delete) => {
                         if self.caret < self.value.len() {
                             let _ = self.value.remove(self.caret);
@@ -903,6 +918,27 @@ mod tests {
                 self.low = self.low.min(self.caret);
                 self.tail = self.tail.min(self.value.len() - self.caret);
             }
+        }
+
+        /// Backspace: the cluster before the caret goes, or in a
+        /// `text_editor` only its last character, the rest of it staying a
+        /// cluster before the caret.
+        fn backspace(&mut self) {
+            if self.caret == 0 {
+                return;
+            }
+
+            if self.editor {
+                let cluster = &mut self.value[self.caret - 1];
+                let _ = cluster.pop();
+
+                if !cluster.is_empty() {
+                    return;
+                }
+            }
+
+            self.caret -= 1;
+            let _ = self.value.remove(self.caret);
         }
 
         /// The caret back one cluster, in the order of the text.
@@ -1591,7 +1627,7 @@ mod tests {
     #[derive(Debug, Default, Clone, Copy)]
     struct Seen {
         /// Reports applied, with a composition, with U+FFFD in the text,
-        /// and that replaced text (a Backspace and a commit).
+        /// and that replaced text (a Delete and a commit).
         reports: usize,
         compositions: usize,
         replacements: usize,
@@ -1679,9 +1715,16 @@ mod tests {
             }
         }
 
+        /// The field is a line of a `text_editor` (see [`Field::editor`]).
+        fn editor(mut self) -> Self {
+            self.app.editor = true;
+            self
+        }
+
         /// The field is a right-to-left line of a `text_editor` (see
         /// [`Field::rtl`]).
         fn right_to_left(mut self) -> Self {
+            self.app.editor = true;
             self.app.rtl = true;
             self
         }
@@ -1770,14 +1813,28 @@ mod tests {
                     self.seen.replacements +=
                         usize::from(text.contains('\u{FFFD}'));
                     self.seen.revisions += usize::from(
-                        has(|edit| *edit == Edit::Key(Key::Backspace))
+                        has(|edit| *edit == Edit::Key(Key::Delete))
                             && has(|edit| matches!(edit, Edit::Commit(_))),
                     );
                 }
                 Message::Key { code, .. } => match code {
                     KEYCODE_DEL => {
+                        // The field's own Backspace, before the origin: a
+                        // cluster, or a `text_editor`'s last character.
                         assert_eq!(request, Request::None, "{label}");
-                        let _ = self.before.pop();
+
+                        if let Some(last) = self.before.last_mut() {
+                            if self.app.editor {
+                                let _ = last.pop();
+                            } else {
+                                last.clear();
+                            }
+
+                            if last.is_empty() {
+                                let _ = self.before.pop();
+                            }
+                        }
+
                         self.check();
                         self.seen.deletions += 1;
                     }
@@ -2186,27 +2243,29 @@ mod tests {
         // is replaced.
         assert_eq!(
             edits(&mut engine, state(0, "e\u{301}", (2, 2), (-1, -1))),
-            [Edit::Key(Key::Backspace), commit("e\u{301}")]
+            [deleted(1), vec![commit("e\u{301}")]].concat()
         );
 
         let mut engine = Engine::new();
         let _ = edits(&mut engine, state(0, "👍", (2, 2), (-1, -1)));
         assert_eq!(
             edits(&mut engine, state(0, "👍🏽", (4, 4), (-1, -1))),
-            [Edit::Key(Key::Backspace), commit("👍🏽")]
+            [deleted(1), vec![commit("👍🏽")]].concat()
         );
 
-        // A change in the middle: the caret goes to its end, Backspace
-        // removes it, the new text is committed, the caret goes to the
-        // target.
+        // A change in the middle: the caret goes to its start, Delete
+        // removes it a cluster at a time, the new text is committed, the
+        // caret goes to the target.
         let mut engine = Engine::new();
         let _ = edits(&mut engine, state(0, "abcd", (4, 4), (-1, -1)));
         assert_eq!(
             edits(&mut engine, state(0, "aXYd", (4, 4), (-1, -1))),
             [
                 Edit::Key(Key::Previous),
-                Edit::Key(Key::Backspace),
-                Edit::Key(Key::Backspace),
+                Edit::Key(Key::Previous),
+                Edit::Key(Key::Previous),
+                Edit::Key(Key::Delete),
+                Edit::Key(Key::Delete),
                 commit("XY"),
                 Edit::Key(Key::Next),
             ]
@@ -2224,14 +2283,14 @@ mod tests {
         );
         assert_eq!(
             edits(&mut engine, state(0, "a", (1, 1), (-1, -1))),
-            keys(Key::Backspace, 2)
+            deleted(2)
         );
 
         let mut engine = Engine::new();
         let _ = edits(&mut engine, state(0, "abab", (4, 4), (-1, -1)));
         assert_eq!(
             edits(&mut engine, state(0, "ab", (2, 2), (-1, -1))),
-            keys(Key::Backspace, 2)
+            deleted(2)
         );
     }
 
@@ -2325,7 +2384,7 @@ mod tests {
         // A deletion before the composition leaves the preedit shown.
         assert_eq!(
             edits(&mut engine, state(0, "helloworld", (10, 10), (5, 10))),
-            [Edit::Key(Key::Backspace)]
+            deleted(1)
         );
     }
 
@@ -2350,7 +2409,7 @@ mod tests {
         );
         assert_eq!(
             edits(&mut engine, state(0, "", (0, 0), (-1, -1))),
-            [Edit::Key(Key::Backspace)]
+            deleted(1)
         );
 
         // A shown preedit is cleared.
@@ -2602,7 +2661,7 @@ mod tests {
         );
         assert_eq!(
             edits(&mut engine, state(0, "ab", (1, 1), (-1, -1))),
-            [Edit::Key(Key::Backspace)]
+            deleted(1)
         );
     }
 
@@ -2675,8 +2734,10 @@ mod tests {
             edits,
             [
                 Edit::Key(Key::Previous),
-                Edit::Key(Key::Backspace),
-                Edit::Key(Key::Backspace),
+                Edit::Key(Key::Previous),
+                Edit::Key(Key::Previous),
+                Edit::Key(Key::Delete),
+                Edit::Key(Key::Delete),
                 commit("he"),
                 Edit::Key(Key::Next),
             ]
@@ -2716,6 +2777,188 @@ mod tests {
             [Edit::Key(Key::Right)]
         );
         assert_eq!(harness.app.caret, harness.app.value.len() - 1);
+    }
+
+    #[test]
+    fn the_keyboards_deletions_take_whole_clusters_in_a_text_editor() {
+        // A `text_editor`'s Backspace deletes one character. The keyboard
+        // deletes one code point of a cluster (its Backspace key, AOSP's
+        // LatinIME) or a whole one (Gboard on an emoji): the engine moves to
+        // the start of what changed and deletes forward, which takes a whole
+        // cluster in `text_editor` too, then commits what is left of it.
+        for (typed, left) in [
+            ("ok👍🏽", "ok👍"),
+            ("oke\u{301}", "oke"),
+            ("ok🇩🇪", "ok🇩"),
+            ("okकि", "okक"),
+            ("ok1\u{FE0F}\u{20E3}", "ok1\u{FE0F}"),
+        ] {
+            let mut harness = Harness::new("", "").editor();
+            let _ = harness.run(|m| m.commit_text(typed, 1));
+
+            assert_eq!(
+                harness.run(|m| m.send_key(KEYCODE_DEL)),
+                [
+                    Edit::Key(Key::Previous),
+                    Edit::Key(Key::Delete),
+                    commit(&left[2..]),
+                ],
+                "{typed}"
+            );
+            assert_eq!(harness.value(), left);
+
+            let _ = harness.run(|m| m.commit_text("x", 1));
+            assert_eq!(harness.value(), format!("{left}x"));
+        }
+
+        // A whole emoji, then a letter: the field follows the keyboard, and
+        // what it types next goes where its cursor is.
+        let mut harness = Harness::new("", "").editor();
+        let _ = harness.run(|m| m.commit_text("ok👍🏽", 1));
+
+        assert_eq!(
+            harness.run(|m| m.delete_surrounding_text(4, 0)),
+            [Edit::Key(Key::Previous), Edit::Key(Key::Delete)]
+        );
+        assert_eq!(harness.value(), "ok");
+
+        let _ = harness.run(|m| m.delete_surrounding_text(1, 0));
+        let _ = harness.run(|m| m.commit_text("x", 1));
+        assert_eq!(harness.value(), "ox");
+
+        // A heart and its variation selector, one unit each.
+        let _ = harness.run(|m| m.commit_text("❤\u{FE0F}", 1));
+        let _ = harness.run(|m| m.delete_surrounding_text(1, 0));
+        assert_eq!(harness.value(), "ox❤");
+        let _ = harness.run(|m| m.delete_surrounding_text(1, 0));
+        assert_eq!(harness.value(), "ox");
+
+        // The keyboard's Backspace with nothing typed before its cursor is
+        // the field's own, which takes one character there, as a hardware
+        // keyboard's does.
+        let mut harness = Harness::new("ok👍🏽", "").editor();
+        assert_eq!(
+            harness.run(|m| m.send_key(KEYCODE_DEL)),
+            [Edit::Key(Key::Backspace)]
+        );
+        assert_eq!(harness.value(), "ok👍");
+    }
+
+    /// iced's own text editor over cosmic-text, the one a `text_editor`
+    /// edits, which the keyboard types into from the start of its only line.
+    /// Its Backspace deletes one character, its Delete and moves a cluster.
+    struct TextEditor {
+        mirror: Mirror,
+        engine: Engine,
+        editor: crate::graphics::text::Editor,
+    }
+
+    impl TextEditor {
+        fn new() -> Self {
+            use crate::core::text::Editor as _;
+
+            Self {
+                mirror: Mirror::new(false, 4096),
+                engine: Engine::new(),
+                editor: crate::graphics::text::Editor::with_text(""),
+            }
+        }
+
+        /// Runs `op` on the keyboard's side and gives the edits to the
+        /// editor as `text_editor` binds them: in a left-to-right line, where
+        /// its arrows move in the order of the text as `Motion::Previous`
+        /// and `Motion::Next` do on Android.
+        fn run(&mut self, op: impl FnOnce(&mut Mirror)) {
+            use crate::core::text::Editor as _;
+            use crate::core::text::editor::{Action, Edit as Change, Motion};
+
+            op(&mut self.mirror);
+
+            while let Some(message) = self.mirror.out.pop_front() {
+                let mut edits = Vec::new();
+
+                assert_eq!(
+                    self.engine.apply(message, &mut edits),
+                    Request::None
+                );
+
+                for edit in edits {
+                    let action = match edit {
+                        Edit::Key(Key::Backspace) => {
+                            Action::Edit(Change::Backspace)
+                        }
+                        Edit::Key(Key::Delete) => Action::Edit(Change::Delete),
+                        Edit::Key(Key::Previous | Key::Left) => {
+                            Action::Move(Motion::Left)
+                        }
+                        Edit::Key(Key::Next | Key::Right) => {
+                            Action::Move(Motion::Right)
+                        }
+                        Edit::Commit(text) => Action::Edit(Change::Paste(
+                            std::sync::Arc::new(text),
+                        )),
+                        Edit::Preedit(..) => continue,
+                        Edit::Key(key) => {
+                            panic!("{key:?} is not expected here")
+                        }
+                    };
+
+                    self.editor.perform(action);
+                }
+            }
+        }
+
+        fn text(&self) -> String {
+            use crate::core::text::Editor as _;
+
+            self.editor
+                .line(0)
+                .map(|line| line.text.into_owned())
+                .unwrap_or_default()
+        }
+    }
+
+    #[test]
+    fn a_real_text_editor_follows_the_keyboards_deletions() {
+        for (typed, delete, left) in [
+            ("ok👍🏽", 1, "ok👍"),
+            ("ok👍🏽", 2, "ok👍"),
+            ("ok👍🏽", 4, "ok"),
+            ("oke\u{301}", 1, "oke"),
+            ("ok🇩🇪", 2, "ok🇩"),
+            ("okकि", 1, "okक"),
+            ("ok❤\u{FE0F}", 2, "ok"),
+            ("ok1\u{FE0F}\u{20E3}", 1, "ok1\u{FE0F}"),
+            ("ok👨\u{200D}👩\u{200D}👧", 2, "ok👨\u{200D}👩\u{200D}"),
+        ] {
+            let mut editor = TextEditor::new();
+
+            editor.run(|m| m.commit_text(typed, 1));
+            assert_eq!(editor.text(), typed);
+
+            // The Backspace key deletes a code point; deleteSurroundingText
+            // deletes UTF-16 units.
+            if delete == 1 {
+                editor.run(|m| m.send_key(KEYCODE_DEL));
+            } else {
+                editor.run(|m| m.delete_surrounding_text(delete, 0));
+            }
+            assert_eq!(editor.text(), left, "{typed} less {delete}");
+
+            // A letter goes in where the keyboard's cursor is, and so does
+            // its next deletion.
+            editor.run(|m| m.commit_text("x", 1));
+            assert_eq!(editor.text(), format!("{left}x"));
+
+            editor.run(|m| m.delete_surrounding_text(1, 0));
+            editor.run(|m| m.send_key(KEYCODE_DEL));
+            editor.run(|m| m.commit_text("y", 1));
+            assert_eq!(
+                editor.text(),
+                String::from_utf16_lossy(&editor.mirror.units),
+                "{typed}"
+            );
+        }
     }
 
     #[test]
@@ -2854,8 +3097,8 @@ mod tests {
         assert_eq!(field.value, ["का", "म", " "]);
 
         // The Java side forgets the text, so the keyboard cannot take the
-        // word back into a composition: that would Backspace "का" out of
-        // the field, which the engine cannot put back.
+        // word back into a composition: that would delete "का" from the
+        // field, which the engine cannot put back.
         mirror.forget(0);
         assert!(mirror.units.is_empty());
         assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
@@ -3309,7 +3552,7 @@ mod tests {
             while harness.value().len() > expected.len() {
                 assert_eq!(
                     harness.run(|m| m.send_key(KEYCODE_DEL)),
-                    [Edit::Key(Key::Backspace)]
+                    deleted(1)
                 );
             }
             assert_eq!(harness.value(), expected);
@@ -3322,11 +3565,13 @@ mod tests {
             harness.run(|m| m.commit_text("a\r\nb\t", 1)),
             [commit("ab")]
         );
-        for expected in ["xa", "x", ""] {
-            assert_eq!(
-                harness.run(|m| m.delete_surrounding_text(1, 0)),
-                [Edit::Key(Key::Backspace)]
-            );
+        for (expected, edits) in [
+            ("xa", deleted(1)),
+            ("x", deleted(1)),
+            // The mirror is empty: the field's own Backspace.
+            ("", vec![Edit::Key(Key::Backspace)]),
+        ] {
+            assert_eq!(harness.run(|m| m.delete_surrounding_text(1, 0)), edits);
             assert_eq!(harness.value(), expected);
         }
 
@@ -3489,10 +3734,7 @@ mod tests {
         assert_eq!(harness.run(|m| m.paste("")), []);
 
         // The mirror holds the pasted text, which Backspace deletes.
-        assert_eq!(
-            harness.run(|m| m.send_key(KEYCODE_DEL)),
-            [Edit::Key(Key::Backspace)]
-        );
+        assert_eq!(harness.run(|m| m.send_key(KEYCODE_DEL)), deleted(1));
         assert_eq!(harness.value(), "xworldnex!");
     }
 
@@ -3512,7 +3754,7 @@ mod tests {
         // Cut deletes it in the field too.
         assert_eq!(harness.mirror.copy(true).as_deref(), Some("el"));
         harness.drain();
-        assert_eq!(harness.take(), keys(Key::Backspace, 2));
+        assert_eq!(harness.take(), deleted(2));
         assert_eq!(harness.value(), "> hlo");
 
         // Nothing selected: nothing to take.
@@ -3634,7 +3876,7 @@ mod tests {
         assert_eq!(harness.mirror.composing_text(), "pwq");
         assert_eq!(
             harness.run(|m| m.set_composing_text("pwx", 1)),
-            [Edit::Key(Key::Backspace), commit("x")]
+            [deleted(1), vec![commit("x")]].concat()
         );
 
         assert_eq!(harness.run(Mirror::finish_composing_text), []);
@@ -3672,7 +3914,7 @@ mod tests {
         let _ = harness.run(|m| m.commit_text("p", 1));
         assert_eq!(
             harness.run(|m| m.delete_surrounding_text(1, 0)),
-            [Edit::Key(Key::Backspace)]
+            deleted(1)
         );
         assert_eq!(harness.mirror.units, []);
         assert_eq!(harness.value(), "helworld");
@@ -3701,10 +3943,7 @@ mod tests {
         // The mirror lost the text before the rebase: Backspace deletes
         // what it has, then becomes a key that still deletes in the app.
         let _ = harness.run(|m| m.send_char('j'));
-        assert_eq!(
-            harness.run(|m| m.send_key(KEYCODE_DEL)),
-            [Edit::Key(Key::Backspace)]
-        );
+        assert_eq!(harness.run(|m| m.send_key(KEYCODE_DEL)), deleted(1));
         for _ in 0..2 {
             let _ = harness.run(|m| m.send_key(KEYCODE_DEL));
         }
@@ -4082,6 +4321,7 @@ mod tests {
             String::new()
         };
         let mut harness = Harness::with(&before, &after, secure, cap);
+        harness.app.editor = rtl;
         harness.app.rtl = rtl;
 
         for step in 0..steps {
@@ -4152,7 +4392,9 @@ mod tests {
     #[test]
     fn random_keyboards_keep_a_right_to_left_editor_in_step() {
         // A right-to-left line of a `text_editor`, whose arrows move on
-        // screen: the engine's own moves go in the order of the text.
+        // screen and whose Backspace deletes one character: the engine's
+        // own moves go in the order of the text, and its own deletions take
+        // whole clusters.
         let mut seen = Seen::default();
 
         for seed in 2000..2060 {

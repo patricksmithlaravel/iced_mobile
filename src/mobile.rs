@@ -451,8 +451,8 @@
 //!   `Edit::Insert` (iOS sends typed text as keys, which are
 //!   `Edit::Insert`). An editor that drops `Edit::Paste` to forbid pasting
 //!   takes no typing from the Android keyboard. Its deletions and caret
-//!   moves come as Backspace, Delete and arrow keys, one per cluster
-//!   (`Edit::Backspace`, `Edit::Delete` and `Action::Move` in a
+//!   moves come as Delete, Backspace and arrow keys, one per cluster
+//!   (`Edit::Delete`, `Edit::Backspace` and `Action::Move` in a
 //!   `text_editor`). The caret moves inside the text it typed go in the
 //!   order of the text: they are ArrowLeft and ArrowRight with no physical
 //!   key (`Physical::Unidentified(NativeCode::Unidentified)`), which a
@@ -464,14 +464,18 @@
 //! - Those keys are window events, pressed and released, like a hardware
 //!   keyboard's: `keyboard::listen()` and `event::listen` see what the
 //!   field does not capture, such as every release (an autocorrection can
-//!   be several ArrowLeft, Backspace and ArrowRight releases). When a
+//!   be several ArrowLeft, Delete and ArrowRight releases). When a
 //!   modifier is held on a hardware keyboard, and for Select all (Ctrl+A),
 //!   a key comes between two `ModifiersChanged`: the first sets the key's
 //!   modifiers, the second puts the window's back.
 //! - The keyboard's edits reach the field as the clusters `text_input`
-//!   moves and deletes by. `text_editor`'s Backspace can delete by
-//!   character instead, so a combining sequence the keyboard revises can
-//!   come out wrong there.
+//!   moves and deletes by. What it deletes in the text it typed goes with
+//!   Delete from the start of the change, which takes a whole cluster in a
+//!   `text_editor` too, where Backspace deletes one character. Its
+//!   Backspace and Delete keys with nothing of that text to delete are the
+//!   field's own: in a `text_editor` its Backspace then takes one character
+//!   of the field's text, such as an emoji's skin tone, as a hardware
+//!   keyboard's does.
 //! - An application that moves the focus or the caret from code
 //!   (`operation::focus`, `focus_next`, `focus_previous`,
 //!   `move_cursor_to`, `select_all`, or `focusable::unfocus` run with

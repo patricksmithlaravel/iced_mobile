@@ -638,8 +638,10 @@ mod tests {
             [
                 Edit::Key(Key::Previous),
                 Edit::Key(Key::Previous),
-                Edit::Key(Key::Backspace),
-                Edit::Key(Key::Backspace),
+                Edit::Key(Key::Previous),
+                Edit::Key(Key::Previous),
+                Edit::Key(Key::Delete),
+                Edit::Key(Key::Delete),
                 commit("or"),
                 Edit::Key(Key::Next),
                 Edit::Key(Key::Next),

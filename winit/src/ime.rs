@@ -93,10 +93,10 @@ use crate::core::{
 /// their physical key and move as a hardware keyboard's do.
 ///
 /// The keys are the engine's, which keep the field in step with the
-/// keyboard's text: a Backspace deletes one cluster and an arrow moves over
+/// keyboard's text: a Delete deletes one cluster and an arrow moves over
 /// one. So they are pressed with no modifier, whatever the hardware
-/// keyboard holds, where Ctrl would make a Backspace delete a word and
-/// Shift an arrow select. Select all is the text widgets' own shortcut,
+/// keyboard holds, where Ctrl would make a Delete or a Backspace delete a
+/// word and Shift an arrow select. Select all is the text widgets' own shortcut,
 /// Ctrl+A: the A key pressed and released with `Modifiers::COMMAND` alone.
 /// When those are not the window's modifiers, the press and the release
 /// come between two `ModifiersChanged`, since `text_input` reads the
@@ -1715,7 +1715,7 @@ mod tests {
     #[test]
     fn keys_come_without_the_hardware_keyboards_modifiers() {
         // A Ctrl or Shift held on a hardware keyboard would make the
-        // engine's Backspace delete a word, or its arrows select: the keys
+        // engine's Delete delete a word, or its arrows select: the keys
         // come with none, between two `ModifiersChanged` for `text_input`,
         // the second giving back the window's.
         for held in [

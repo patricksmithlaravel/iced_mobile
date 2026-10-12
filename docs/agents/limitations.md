@@ -50,20 +50,24 @@ this file in the commit that fixes or finds a limitation.
     `on_paste`, and `text_editor` gets it as `Edit::Paste`, never as
     `Edit::Insert` (iOS sends typed text as keys, which are
     `Edit::Insert`). An editor that drops `Edit::Paste` to forbid pasting
-    takes no typing from the Android keyboard. Its deletions and caret
-    moves come as Backspace, Delete and arrow keys, one per cluster. The
-    caret moves inside the text it typed are ArrowLeft and ArrowRight with
-    no physical key (`Physical::Unidentified(NativeCode::Unidentified)`),
-    which a `text_editor` takes as `Motion::Previous` and `Motion::Next`, in
-    the order of the text, so a right-to-left line gets them right; a
+    takes no typing from the Android keyboard. Its deletions and caret moves
+    come as Delete, Backspace and arrow keys, one per cluster: what it
+    deletes in the text it typed goes with Delete from the start of the
+    change, which takes a whole cluster in a `text_editor` too, and its
+    Backspace and Delete keys with nothing of that text to delete are the
+    field's own keys. The caret moves inside the text it typed are ArrowLeft
+    and ArrowRight with no physical key
+    (`Physical::Unidentified(NativeCode::Unidentified)`), which a
+    `text_editor` takes as `Motion::Previous` and `Motion::Next`, in the
+    order of the text, so a right-to-left line gets them right; a
     `key_binding` that maps the arrows itself should hand those two to
     `Binding::from_key_press`. The keys are pressed and released like a
     hardware keyboard's: `keyboard::listen()` and `event::listen` see what
-    the field does not capture, such as every release (an autocorrection
-    can be several ArrowLeft, Backspace and ArrowRight releases). When a
-    modifier is held on a hardware keyboard, and for Select all (Ctrl+A), a
-    key comes between two `ModifiersChanged`: the first sets the key's
-    modifiers, the second puts the window's back.
+    the field does not capture, such as every release (an autocorrection can
+    be several ArrowLeft, Delete and ArrowRight releases). When a modifier
+    is held on a hardware keyboard, and for Select all (Ctrl+A), a key comes
+    between two `ModifiersChanged`: the first sets the key's modifiers, the
+    second puts the window's back.
   - When the input connection cannot be installed (before Android 8, or
     after a failure, with one warning in the log), the keyboard reaches the
     app through key events only: no composition, suggestions or swipe
@@ -127,9 +131,13 @@ this file in the commit that fixes or finds a limitation.
     user tapped joins the character before it, and Backspace then deletes
     both, or the whole conjunct once a consonant follows a virama
     (`text_input` may also put its caret one character further when that
-    happens in the middle of the text). `text_editor`'s Backspace can delete
-    by character instead, so a combining sequence the Android keyboard
-    revises can come out wrong there.
+    happens in the middle of the text). `text_editor`'s Backspace deletes
+    by character: the Android keyboard's Backspace reaches it as that key
+    only where the keyboard has typed nothing before its cursor (right
+    after a tap, the focus or its Enter), and then takes one character of
+    the field's text there, such as an emoji's skin tone, as a hardware
+    keyboard's Backspace does. What the keyboard deletes or revises in the
+    text it typed goes by cluster in both.
   - In Indic scripts a consonant and virama make one conjunct with the
     consonant after them (स् before त gives स्त), also when the Android
     keyboard typed one side of the virama and the field held the other,
