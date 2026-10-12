@@ -46,8 +46,11 @@ jobs:
       # What the job writes outside the checkout lives in the runner's
       # temporary directory: the demo app (outside the fork's workspace),
       # icm's cache and host.toml, and Android's per-user files with the
-      # managed AVD. A job's `env` cannot name runner.temp, and
-      # upload-artifact refuses a path through `..`.
+      # managed AVD. Shell steps read these from GITHUB_ENV. An expression
+      # cannot: `env.DEMO` is empty, since only the shell sees GITHUB_ENV
+      # writes, so the expressions name ${{ runner.temp }}/demo themselves.
+      # A job's `env` cannot name runner.temp either, and upload-artifact
+      # refuses a path through `..`.
       - name: Paths
         run: |
           {
@@ -106,28 +109,28 @@ jobs:
       # It also installs the Rust toolchain the template pins. When a step
       # fails, it prints the files its result names as evidence.
       - name: Doctor
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: |
           icm doctor android --fix --yes --json -q | tee "$RUNNER_TEMP/doctor.json"
           jq -e '.exit == 0' "$RUNNER_TEMP/doctor.json" ||
             { "$GITHUB_WORKSPACE/.github/ci/evidence.sh" "$RUNNER_TEMP/doctor.json"; exit 1; }
 
       - name: Run on the managed emulator (x86_64 image)
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: |
           icm run android --timeout 30m --json -q | tee "$RUNNER_TEMP/run.json"
           jq -e '.ok and .process.ready.source == "icm_event"' "$RUNNER_TEMP/run.json" ||
             { "$GITHUB_WORKSPACE/.github/ci/evidence.sh" "$RUNNER_TEMP/run.json"; exit 1; }
 
       - name: Lifecycle suite
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: |
           icm test --on android --lifecycle --timeout 15m --json -q | tee "$RUNNER_TEMP/lifecycle.json"
           jq -e '.ok and .lifecycle.failed == 0' "$RUNNER_TEMP/lifecycle.json" ||
             { "$GITHUB_WORKSPACE/.github/ci/evidence.sh" "$RUNNER_TEMP/lifecycle.json"; exit 1; }
 
       - name: Unsigned release with a universal APK
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: |
           # Not the template's placeholder icon: a plain 1024 px square.
           python3 - <<'EOF'
@@ -147,7 +150,7 @@ jobs:
       # A throwaway upload key: its password is random and lives only in
       # this step's environment.
       - name: Signed release with a throwaway upload key
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: |
           ICM_TEST_STOREPASS="$(openssl rand -hex 16)"
           export ICM_TEST_STOREPASS
@@ -168,7 +171,7 @@ jobs:
 
       - name: Stop everything
         if: always()
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: icm stop --all --shutdown --json -q || true
 
       # Every path is absolute and free of `..`, which upload-artifact
@@ -180,10 +183,10 @@ jobs:
           name: icm-android
           path: |
             ${{ runner.temp }}/*.json
-            ${{ env.DEMO }}/target/icm/latest/
-            ${{ env.DEMO }}/target/icm/runs/*/*.png
-            ${{ env.DEMO }}/target/icm/runs/*/*.log
-            ${{ env.DEMO }}/target/icm/runs/*/steps/*.log
-            ${{ env.DEMO }}/target/icm/dist/latest/android/UPLOAD.md
-            ${{ env.DEMO }}/target/icm/dist/latest/android/artifacts.json
+            ${{ runner.temp }}/demo/target/icm/latest/
+            ${{ runner.temp }}/demo/target/icm/runs/*/*.png
+            ${{ runner.temp }}/demo/target/icm/runs/*/*.log
+            ${{ runner.temp }}/demo/target/icm/runs/*/steps/*.log
+            ${{ runner.temp }}/demo/target/icm/dist/latest/android/UPLOAD.md
+            ${{ runner.temp }}/demo/target/icm/dist/latest/android/artifacts.json
           if-no-files-found: ignore
