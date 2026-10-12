@@ -524,7 +524,12 @@
 //!   has the focus (a `text_editor` an Edit button focuses again), and so
 //!   does the window getting the focus back (after the notification shade,
 //!   a system dialog or another app): the shell is not told that the user
-//!   hid it.
+//!   hid it. A keyboard hidden right after it came up stays hidden. Only
+//!   when it was still up as the window got the focus back, or as the
+//!   focus moved between a password field and another kind of field, can
+//!   hiding it within half a second bring it back once (Android 11 and
+//!   later): the shell cannot tell that hide from a show the system
+//!   dropped, which it shows again.
 //!
 //! When the input connection cannot be installed (before Android 8, or
 //! after a failure, with one warning in the log), the keyboard reaches the

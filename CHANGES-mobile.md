@@ -343,9 +343,12 @@ Text input on Android, and secure fields on Android and iOS:
   from code (`operation::focus`) brings it back too, also the field that has the focus (a
   `text_editor` an Edit button focuses again), and so does the window getting the focus back
   (after the notification shade, a system dialog or another app), since nothing tells the shell
-  that the user hid it. Before, the field had to lose the focus once, as it still has with
-  GameActivity, before Android 8 and when the input connection cannot be installed (unless only the
-  keyboard's view could not be added).
+  that the user hid it. From Android 11 the shell also shows the keyboard again when the system
+  drops a show, which it can around a restart of the input or the window getting the focus, until
+  it sees the keyboard come up; a keyboard the user hides right after it came up stays hidden.
+  Before, the field had to lose the focus once, as it still has with GameActivity, before Android 8
+  and when the input connection cannot be installed (unless only the keyboard's view could not be
+  added).
 - Password fields (`.secure(true)`) are marked secure to the system keyboard on Android with the
   input connection above, and on iOS: the Android keyboard shows its password layout without
   suggestions. On Android the input type is `TYPE_TEXT_VARIATION_PASSWORD` with

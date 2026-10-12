@@ -32,10 +32,16 @@ final class KeyboardView extends View {
     /** The most UTF-16 units the mirror keeps when nothing is composing. */
     static final int CAP = 4096;
 
-    /** How long after a show the view looks whether the keyboard is up. */
-    private static final long RECHECK_MS = 500;
+    /** How often the view looks whether the keyboard is up after a show. */
+    private static final long LOOK_MS = 100;
 
-    /** How many times it then shows the keyboard again at most. */
+    /**
+     * How many looks, half a second, before it shows the keyboard again if
+     * the show did not arrive.
+     */
+    private static final int LOOKS = 5;
+
+    /** How many times it shows the keyboard again at most. */
     private static final int RECHECKS = 3;
 
     private final InputMethodManager manager;
@@ -59,25 +65,59 @@ final class KeyboardView extends View {
     /** How many more times {@link #recheck} may show the keyboard. */
     private int rechecks;
 
+    /** How many more looks before {@link #recheck} shows it again. */
+    private int looks;
+
     /**
-     * Shows the keyboard again while a field wants it, the window has the
-     * focus and it is not up. The system can accept a show it then cancels
+     * The keyboard was down at the show or at a look since: once it is seen
+     * up, the show arrived.
+     */
+    private boolean armed;
+
+    /**
+     * Looks whether a show arrived (Android 11 and later), and shows the
+     * keyboard again if not. The system can accept a show it then cancels
      * or drops, around a restart and the window getting the focus (on the
      * way back from the background), and nothing tells the view.
+     *
+     * <p>It stops as soon as it sees the keyboard come up after it was down,
+     * and when it stayed up: the show arrived, or there was nothing to show,
+     * and a hide from then on is the user's, which must stand. Otherwise,
+     * while a field wants the keyboard and the view and the window have the
+     * focus, it shows it again every half second, a few times at most.
      */
     private final Runnable recheck = new Runnable() {
         @Override
         public void run() {
             try {
-                if (!installed || !wanted || !isFocused() || !hasWindowFocus()
-                        || isKeyboardUp()) {
+                if (!installed || !wanted || !isFocused()
+                        || !hasWindowFocus()) {
+                    return;
+                }
+
+                boolean up = isKeyboardUp();
+
+                if (up && armed) {
+                    return;
+                }
+
+                armed |= !up;
+
+                if (--looks > 0) {
+                    postDelayed(this, LOOK_MS);
+                    return;
+                }
+
+                // Up the whole time: nothing to show.
+                if (up) {
                     return;
                 }
 
                 manager.showSoftInput(KeyboardView.this, 0);
 
                 if (--rechecks > 0) {
-                    postDelayed(this, RECHECK_MS);
+                    looks = LOOKS;
+                    postDelayed(this, LOOK_MS);
                 }
             } catch (RuntimeException error) {
                 Keyboard.warn("showing the keyboard", error);
@@ -203,8 +243,11 @@ final class KeyboardView extends View {
 
     /**
      * Shows the keyboard once the messages already queued ran: the input
-     * method manager then has started input for the view. Then looks a few
-     * times whether it is up, and shows it again if not ({@link #recheck}).
+     * method manager then has started input for the view. Then, from
+     * Android 11, looks whether the show arrives, and shows it again if not
+     * ({@link #recheck}). Before Android 11 the view cannot tell whether the
+     * keyboard is up, and does not show it again: that could bring back a
+     * keyboard the user hid.
      */
     private void showLater() {
         post(new Runnable() {
@@ -220,13 +263,19 @@ final class KeyboardView extends View {
             }
         });
 
-        // Before Android 11 the view cannot tell whether the keyboard is
-        // up: it shows it once more.
-        rechecks = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-                ? RECHECKS
-                : 1;
         removeCallbacks(recheck);
-        postDelayed(recheck, RECHECK_MS);
+
+        if (canTell()) {
+            rechecks = RECHECKS;
+            looks = LOOKS;
+            armed = !isKeyboardUp();
+            postDelayed(recheck, LOOK_MS);
+        }
+    }
+
+    /** Whether the view can tell that the keyboard is up: Android 11. */
+    private static boolean canTell() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R;
     }
 
     /**
@@ -234,8 +283,7 @@ final class KeyboardView extends View {
      * the view cannot tell.
      */
     private boolean isKeyboardUp() {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-                && KeyboardInsets.isUp(this);
+        return canTell() && KeyboardInsets.isUp(this);
     }
 
     void show(int purpose) {
@@ -249,6 +297,10 @@ final class KeyboardView extends View {
 
         boolean focused = isFocused();
         boolean changed = purpose != this.purpose;
+
+        // Nothing restarts and the keyboard is up already (a tap on the
+        // field while it shows): nothing to look after.
+        boolean settled = focused && wanted && !changed && isKeyboardUp();
 
         if (focused && wanted && changed) {
             // Another purpose, maybe another field: a composition is
@@ -281,13 +333,18 @@ final class KeyboardView extends View {
         }
 
         // At once, then again once the messages already queued ran, and
-        // while it is not up (recheck): the system can accept a show that
+        // until it is seen up (recheck): the system can accept a show that
         // comes right after the input restarted or the window got the focus
         // and still drop it. When the window got the focus back while no
         // field wanted the keyboard (back from the background), nothing else
         // would show it.
         manager.showSoftInput(this, 0);
-        showLater();
+
+        if (settled) {
+            removeCallbacks(recheck);
+        } else {
+            showLater();
+        }
     }
 
     /**

@@ -191,7 +191,13 @@ this file in the commit that fixes or finds a limitation.
     (`operation::focus`, also on the field that has the focus, such as a
     `text_editor` an Edit button focuses again), and also whenever the
     window gets the focus back (after the notification shade, a system
-    dialog or another app): nothing tells the app that the user hid it.
+    dialog or another app): nothing tells the app that the user hid it. A
+    keyboard hidden right after it came up stays hidden. Only when it was
+    still up as the window got the focus back, or as the focus moved
+    between a password field and another kind of field, can hiding it
+    within half a second bring it back once (Android 11 and later): the
+    shell cannot tell that hide from a show the system dropped, which it
+    shows again.
   - Password fields (`.secure(true)`) are marked secure to the Android
     keyboard with the input connection above: it shows its password layout
     without suggestions and is asked not to learn what is typed, and what
