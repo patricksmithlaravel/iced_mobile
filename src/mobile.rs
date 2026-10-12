@@ -408,13 +408,13 @@
 //!   starts over when the field gets the focus; at a tap, a hardware key
 //!   other than a modifier, or the window losing the focus; after its own
 //!   Enter, Tab, Escape, arrow, Home or End keys (moving the cursor with the
-//!   space bar sends arrows); after a caret move from code or a change
-//!   between a password field and another field; once its text passes 4096
-//!   UTF-16 units; when what it typed starts with a character that joins
-//!   the one before it (a combining mark, vowel sign or virama typed first,
-//!   or a consonant right after a virama it typed before it started over);
-//!   and, in a password field, after every edit. The field asks the
-//!   keyboard for no automatic capitals.
+//!   space bar sends arrows) and its Select all; after a caret move from
+//!   code or a change between a password field and another field; once its
+//!   text passes 4096 UTF-16 units; when what it typed starts with a
+//!   character that joins the one before it (a combining mark, vowel sign
+//!   or virama typed first, or a consonant right after a virama it typed
+//!   before it started over); and, in a password field, after every edit.
+//!   The field asks the keyboard for no automatic capitals.
 //! - The keyboard keeps its own copy of the text it typed and takes it that
 //!   the field has all of it. An `on_input` that refuses that text or
 //!   changes its length (a length limit, digits only, formatting that adds
@@ -835,9 +835,8 @@
 //!   selection handles, and the copy, cut and paste shortcuts of text
 //!   fields fire only from a hardware keyboard on Android, where the
 //!   keyboard's own Select all and Paste work too, and its Cut and Copy
-//!   only on what it typed. The
-//!   [clipboard](#clipboard) itself works: offer Copy and Paste buttons
-//!   where they matter.
+//!   only on what it typed. The [clipboard](#clipboard) itself works: offer
+//!   Copy and Paste buttons where they matter.
 //! - **Text input on Android** ([Text input](#text-input)). The keyboard
 //!   sees only the text it typed since it last started over (the focus, a
 //!   tap, its own Enter, Tab, Escape or arrow keys, and more); a word being
@@ -847,22 +846,23 @@
 //!   goes to the field that had the focus; and a combining mark, vowel sign
 //!   or virama typed right after the place the user tapped joins the
 //!   character before it, which `text_input` then deletes with it, as it
-//!   does on the desktop. In the middle of the text,
-//!   a consonant and virama the keyboard types right before a consonant of
-//!   the field make one conjunct with it, which the keyboard's next
-//!   Backspace or consonant there replaces whole, the field's consonant
-//!   with it; likewise a consonant it types right after a virama the field
-//!   holds where it started over (a tap right after a half-typed conjunct),
-//!   which its next change there replaces with the whole conjunct. An
-//!   `on_input` that refuses the keyboard's text or changes its
-//!   length, or a change of the field's value from code while the keyboard
-//!   types, puts the keyboard out of step until it starts over, which
-//!   typing does not do. The keyboard's Ctrl and Meta shortcuts and its
-//!   Shift with the arrows do not reach fields. When the input connection
-//!   cannot be installed (Android before 8, or a failure), the keyboard
-//!   sends key events only, password fields are not marked secure and a
-//!   tap does not bring a hidden keyboard back. With GameActivity, what the
-//!   keyboard commits does not reach fields at all.
+//!   does on the desktop. In the middle of the text, a consonant and virama
+//!   the keyboard types right before a consonant of the field make one
+//!   conjunct with it, which the keyboard's next Backspace or consonant
+//!   there replaces whole, the field's consonant with it; likewise a
+//!   consonant it types right after a virama the field holds where it
+//!   started over (a tap right after a half-typed conjunct), which its next
+//!   change there replaces with the whole conjunct. An `on_input` that
+//!   refuses the keyboard's text or changes its length, or a change of the
+//!   field's value from code while the keyboard types, puts the keyboard out
+//!   of step until it starts over, which typing does not do. The keyboard's
+//!   Ctrl and Meta shortcuts do not reach fields, and its keys come without
+//!   modifiers, its own Shift or one held on a hardware keyboard, so its
+//!   arrows never select. When the input connection cannot be installed
+//!   (Android before 8, or a failure), the keyboard sends key events only,
+//!   password fields are not marked secure and a tap does not bring a
+//!   hidden keyboard back. With GameActivity, what the keyboard commits does
+//!   not reach fields at all.
 //! - **Text input on iOS** ([Text input](#text-input)). The keyboard shows
 //!   no predictions, capitalises nothing by itself and does not compose
 //!   CJK: the app's view takes key input only. Right after a secure field

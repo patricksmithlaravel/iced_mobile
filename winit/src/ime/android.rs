@@ -19,10 +19,11 @@
 //! - [`enable`] runs at every redraw while a field asks for the keyboard. It
 //!   calls `show(purpose)` when no field asked before, when the purpose
 //!   changed, and once after a tap on the focused field ([`touched`], after
-//!   the application handled it), which brings back a keyboard the user
-//!   hid. When no field asked before, what the keyboard sent since the
-//!   last field belongs to no field: it is dropped, and the engine and the
-//!   Java side are reset if it held anything.
+//!   the application handled it) or a widget operation that focused a
+//!   widget ([`operated`]), which brings back a keyboard the user hid. When
+//!   no field asked before, what the keyboard sent since the last field
+//!   belongs to no field: it is dropped, and the engine and the Java side
+//!   are reset if it held anything.
 //! - [`disable`] runs when no field asks any more. The field has lost the
 //!   focus, so what the keyboard typed and composes there is dropped, as
 //!   desktop input methods drop a composition then: the queue is emptied,

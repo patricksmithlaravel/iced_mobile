@@ -127,7 +127,7 @@
 //! - every report for a secure field, so no password is kept in Java and
 //!   its keyboard sees an empty field;
 //! - a report whose text exceeds 4096 UTF-16 units;
-//! - an Enter, Tab, Escape or caret-moving key, as above;
+//! - an Enter, Tab, Escape or caret-moving key, or Select all, as above;
 //! - [`FORGET`];
 //! - a change of purpose while the mirror was not empty, after the
 //!   composition was finished: the next field's keyboard does not see the

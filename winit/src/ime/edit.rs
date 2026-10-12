@@ -24,11 +24,12 @@
 //! otherwise take back, and lose, the app's text it joined). The engine
 //! knows the text before the origin only where the keyboard typed it before
 //! a rebase moved the origin past it (a request to forget, a password
-//! field's, the cap's), and keeps the end of it. There, a character that
-//! joins only certain clusters is found too: a consonant after a virama,
-//! which Indic scripts join into a conjunct (Unicode's GB9c), or a regional
-//! indicator after an unpaired one. Elsewhere (the focus, a tap, the
-//! keyboard's Enter, Tab, Escape or arrows, its Backspace into the field's
+//! field's, the cap's, a change of purpose), and keeps the end of it.
+//! There, a character that joins only certain clusters is found too: a
+//! consonant after a virama, which Indic scripts join into a conjunct
+//! (Unicode's GB9c), or a regional indicator after an unpaired one.
+//! Elsewhere (the focus, a tap, a caret moved from code, the keyboard's
+//! Enter, Tab, Escape, arrows or Select all, its Backspace into the field's
 //! text) the text before the origin is taken to end in an ordinary letter,
 //! which only a character that joins any cluster joins (a combining mark, a
 //! vowel sign or virama, a zero width joiner, an emoji modifier): a field
@@ -111,8 +112,8 @@ pub(crate) enum Message {
     Key { generation: i32, code: i32 },
     /// The Java side emptied the mirror without a reset (a secure field
     /// after each report, a mirror grown past its cap, a key that moves the
-    /// app's caret or may submit the field, or [`Request::Forget`]): the
-    /// app's caret becomes the session's origin.
+    /// app's caret or may submit the field, a change of purpose, or
+    /// [`Request::Forget`]): the app's caret becomes the session's origin.
     Rebase { generation: i32 },
 }
 
@@ -1970,7 +1971,7 @@ mod tests {
                     break;
                 }
 
-                // A key among these may post another reset.
+                // A report among these may post a request to forget.
                 self.drain();
             }
         }
@@ -3977,7 +3978,7 @@ mod tests {
             }
 
             // The event loop often runs right away, and the UI thread soon
-            // runs a posted reset.
+            // runs a posted reset or request to forget.
             if rng.chance(50) {
                 harness.drain();
             }

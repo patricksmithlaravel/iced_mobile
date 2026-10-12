@@ -103,8 +103,8 @@ public final class Keyboard {
 
     /**
      * Forgets the keyboard's text, which stays in the field, with no new
-     * generation (a rebase), once nothing composes; nothing if a reset ran
-     * since the shell had {@code generation}.
+     * generation (a rebase), once nothing composes and no batch edit is
+     * open; nothing if a reset ran since the shell had {@code generation}.
      */
     public void forget(int generation) {
         post(FORGET, generation);

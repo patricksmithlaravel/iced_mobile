@@ -25,11 +25,12 @@ this file in the commit that fixes or finds a limitation.
   no selection handles, and the Ctrl shortcuts of text fields fire only from
   a hardware keyboard on Android (iOS hardware keyboards send no modifier
   keys); the Android keyboard's own Select all and Paste work, its Cut and
-  Copy only on what it typed (see Text input). The clipboard itself works: `iced::clipboard::read` and `write` use
-  the system's, so give fields that need it Copy and Paste buttons. Read
-  only when the user asks to paste: Android 10 and later give `None` to an
-  app without the input focus, and iOS 16 and later ask the user ("Allow
-  Paste") before an app reads what another app copied.
+  Copy only on what it typed (see Text input). The clipboard itself works:
+  `iced::clipboard::read` and `write` use the system's, so give fields that
+  need it Copy and Paste buttons. Read only when the user asks to paste:
+  Android 10 and later give `None` to an app without the input focus, and
+  iOS 16 and later ask the user ("Allow Paste") before an app reads what
+  another app copied.
 - **Text input differs from the desktop** (iOS, Android).
   - On Android (NativeActivity, the default, Android 8 and later) the
     keyboard composes, suggests, autocorrects and swipe-types, and accented
@@ -64,9 +65,9 @@ this file in the commit that fixes or finds a limitation.
     what was there before. It starts over when the field gets the focus;
     at a tap, a hardware key other than a modifier, or the window losing
     the focus; after its own Enter, Tab, Escape, arrow, Home or End keys
-    (moving the cursor with the space bar sends arrows); after a caret
-    move from code or a change between a password field and another
-    field; once its text passes 4096 UTF-16 units; when what it typed
+    (moving the cursor with the space bar sends arrows) and its Select all;
+    after a caret move from code or a change between a password field and
+    another field; once its text passes 4096 UTF-16 units; when what it typed
     starts with a character that joins the one before it (a combining mark,
     vowel sign or virama typed first, or a consonant right after a virama
     it typed before it started over); and, in a password field, after every
@@ -198,8 +199,9 @@ this file in the commit that fixes or finds a limitation.
   when the user taps a `text_input`, and both then take what is typed, so
   a password typed into a secure field shows in clear in the editor. The
   keyboard is still set up for the password field, so it neither suggests
-  nor learns the password. Move the focus away from the editor from code (`operation::focus` on another widget
-  unfocuses the rest), for example from a Done button. Links in
+  nor learns the password. Move the focus away from the editor from code
+  (`operation::focus` on another widget unfocuses the rest), for example
+  from a Done button. Links in
   `rich_text` and `markdown` cannot be tapped, and `pick_list` and
   `combo_box` menus select on touch-down, so a long menu cannot be
   scrolled. Use `text_input`, buttons for links, and short menus.

@@ -308,8 +308,10 @@ stop only the platforms they drive and leave the other platforms' devices alone
   states `lifecycle()` delivers. The Android keyboard's text (NativeActivity) goes through
   `winit/src/ime/`: the Java view in `winit/android/java/iced_mobile/` (built into
   `winit/android/classes.dex` by `winit/android/build-dex.sh`) reports its text, `ime/android.rs`
-  queues it and calls the view, `ime/edit.rs` turns it into the field's edits, `winit/src/ime.rs`
-  into iced events, and `ime/dex.rs` holds the contract between them; `winit/src/window.rs` shows
+  queues it and calls the view, `ime/feed.rs` applies the queue in order and gives the app its turn
+  after the keyboard's Enter, Tab or Escape, `ime/edit.rs` turns it into the field's edits,
+  `winit/src/ime.rs` turns those into iced events and watches the widget operations that move the
+  focus or the caret, and `ime/dex.rs` holds the contract between them; `winit/src/window.rs` shows
   and hides the keyboard through it, and `winit/src/lib.rs` hands it taps, hardware keys and widget
   operations. On iOS, secure and terminal fields set the vendored winit view's text input traits
   (`vendor/winit/src/platform_impl/ios/view.rs`, patch 0003).
