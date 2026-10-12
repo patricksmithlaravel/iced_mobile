@@ -621,9 +621,8 @@
 //! limitations). A field the application makes secure while the keyboard
 //! composes gets its composition as typed text at the next redraw. On
 //! Android and iOS the window never draws a secure field's preedit. On iOS
-//! the view answers
-//! `isSecureTextEntry` for it: on the iOS
-//! 27.0 Simulator the keyboard then has no emoji or dictation key, and it
+//! the view answers `isSecureTextEntry` for it: on the iOS 27.0 Simulator
+//! the keyboard then has no emoji or dictation key, and it
 //! switches to and from that keyboard as the focus moves between the secure
 //! field and another (a physical iPhone has not been tried). When the focus
 //! moves straight from a secure field to another field, with the keyboard

@@ -7,7 +7,7 @@ stops at iced 0.14.0.
 
 ## Unreleased
 
-Fixes from the re-verification of `v0.14.1-mobile.2`.
+The changes since `v0.14.1-mobile.2`, among them the fixes from its re-verification.
 
 - `icm run desktop` no longer writes a value the app inherited from icm's environment to the app's
   live files. The app's stdout and stderr go through a log collector (`icm __session desktop`, a
@@ -299,14 +299,16 @@ Text input on Android, and secure fields on Android and iOS:
   focus to gets it. None of that text is dropped while a field has the focus, however soon it
   follows; when the key leaves no field with the focus (Escape unfocuses a `text_input` or a
   `text_editor`, an `on_submit` may remove the field), what the keyboard sent right after it is
-  dropped. A key the app handles
-  from a subscription (`keyboard::listen`, how an app takes Tab) or a task comes after that text,
-  which then goes to the field that had the focus. Line breaks and tabs inside longer committed text
-  are dropped. Backspace and Delete reach the field's text
-  before and after what the keyboard typed, also from keyboards that delete with
-  `deleteSurroundingText` (AOSP's keyboard and its forks), and so do the arrow, Home and End keys,
-  without dropping keys sent in quick succession. The keyboard's other keys no longer reach the
-  app, as they did as key events before: its Ctrl and Meta shortcuts (Ctrl+C, X, V and A on
+  dropped. A key the app handles from a subscription (`keyboard::listen`, how an app takes Tab) or a
+  task comes after that text, which then goes to the field that had the focus. Since such a message
+  may still move the focus, a word the keyboard composes after an Enter, Tab or Escape, its own or a
+  hardware keyboard's, shows in no field, the one that has the focus included, until a tap on that
+  field or a focus move from code after the key; what it commits reaches the field that has the
+  focus at once. Line breaks and tabs inside longer committed text are dropped. Backspace and Delete
+  reach the field's text before and after what the keyboard typed, also from keyboards that delete
+  with `deleteSurroundingText` (AOSP's keyboard and its forks), and so do the arrow, Home and End
+  keys, without dropping keys sent in quick succession. The keyboard's other keys no longer reach
+  the app, as they did as key events before: its Ctrl and Meta shortcuts (Ctrl+C, X, V and A on
   keyboards that have a Ctrl key), Page Up and Down, function keys and Insert are dropped, and its
   keys come without modifiers, its own Shift or one held on a hardware keyboard: its arrows, Home
   and End move the caret without selecting, and a Ctrl held on a hardware keyboard does not make
@@ -373,43 +375,40 @@ Text input on Android, and secure fields on Android and iOS:
 - Password fields (`.secure(true)`) are marked secure to the system keyboard on Android with the
   input connection above, and on iOS: the Android keyboard shows its password layout without
   suggestions. On Android the input type is `TYPE_TEXT_VARIATION_PASSWORD` with
-  `IME_FLAG_NO_PERSONALIZED_LEARNING`, and what a keyboard composes there reaches the field as typed
-  text, never as a preedit drawn in clear. So does a composition that reaches a password field from
-  another purpose: the letters typed right after the Enter whose `on_submit` focuses the password
-  field, which the keyboard composed for the field it left, reach no field as a preedit until a tap
-  on the field or a focus move from code has let the redraw that tells the shell the field's purpose
-  decide, which commits them as typed text in a password field. After an Enter, Tab or Escape, from
-  the keyboard or from hardware, a redraw decides only once a focus move from code or a tap on the
-  field has come after the key, since a subscription may still move the focus, so a composition typed
-  then shows in no field, the one that has the focus included, until a tap or a focus move. A tap
-  that focuses a password field holds its compositions back the same way until that redraw, and a
-  preedit the field was given before the tap is cleared when the composition is committed as typed
-  text. A field made secure while the keyboard composes gets its composition as typed text at that
-  redraw, and what the keyboard composes before it is set up for the password field is read as typed
-  text too. On an edit of a password field, a `text_input` builds its paragraph from the bullets:
-  the paragraph logs the text it is built from at trace level, which used to be the password. On
-  Android and iOS the window never draws a password field's preedit (the desktop and the web draw it
-  as upstream does). On iOS the vendored winit implements `Window::set_ime_purpose`
-  (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers `isSecureTextEntry` and
-  turns off autocorrection, spell checking, auto-capitalisation and smart punctuation for a
-  password, the terminal purpose turns off the same without secure entry, and a changed purpose
-  reloads the keyboard that is shown. `iced_winit` gives the view a field's purpose before it makes
-  the view the first responder, so a keyboard shown while none was up is set up for its field at
-  once, with no reload. On the iOS 27.0 Simulator the password keyboard has no emoji or dictation
-  key, and the keyboard switches to and from it as the focus moves between a password field and
-  another; a physical iPhone has not been tried. When the focus moves straight from a password field
-  to another field, with the keyboard up, the keyboard there can label its numbers key ".?123"
-  instead of "123" until its numbers are shown once or it is hidden and shown again; it types as
-  usual. The iOS keyboard shows no suggestions in any field anyway. Before, the keyboard was not
-  told that a field held a password. A `text_editor` focused from code now gives up its focus when
-  the user taps outside it, on Android and iOS, as a `text_input` does: before, it kept the focus
-  when the user tapped a password field, so what the keyboard typed, the password included, went to
-  the editor in clear. Until that tap, the keyboard is set up for the password field, and on
-  Android and iOS, `InputMethod::merge` makes the merged request secure when any of the requests is.
-  A hardware Enter, Tab or Escape that waited behind a keyboard key's turn holds a focus the turn
-  moved until a tap, as the keyboard's own key does. A tap on the focused field while the keyboard
-  is hidden decides the field's purpose too, so a composition after it is not held back until a
-  second tap.
+  `IME_FLAG_NO_PERSONALIZED_LEARNING`, and what a keyboard composes for a password field reaches it
+  as typed text, never as a preedit drawn in clear, also when the keyboard composed it as the last
+  field's keyboard. The shell learns a field's purpose only at a redraw, so what the keyboard
+  composes after the focus moves (the Enter whose `on_submit` focuses the password field, a tap, a
+  focus move from code) shows in no field until a redraw has decided the purpose of the field that
+  has the focus, and in a password field that redraw commits it as typed text. After an Enter, Tab
+  or Escape the redraw decides only once a tap on the field or a focus move from code has come after
+  the key (above). A field the app makes secure while the keyboard composes gets its composition as
+  typed text at the next redraw, and what the keyboard composes before it is set up for the password
+  field is read as typed text too. On Android and iOS the window never draws a password field's
+  preedit (the desktop and the web draw it as upstream does). What the keyboard commits is not held
+  back: a password it commits in the same burst as a Tab the app takes in a subscription reaches the
+  field that had the focus, in clear (`docs/agents/limitations.md`). On an edit of a password field,
+  a `text_input` builds its paragraph from the bullets: the paragraph logs the text it is built from
+  at trace level, which in v0.14.1-mobile.2 was the password. On iOS the vendored winit implements
+  `Window::set_ime_purpose` (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers
+  `isSecureTextEntry` and turns off autocorrection, spell checking, auto-capitalisation and smart
+  punctuation for a password, the terminal purpose turns off the same without secure entry, and a
+  changed purpose reloads the keyboard that is shown. `iced_winit` gives the view a field's purpose
+  before it makes the view the first responder, so a keyboard shown while none was up is set up for
+  its field at once, with no reload. On the iOS 27.0 Simulator the password keyboard has no emoji or
+  dictation key, and the keyboard switches to and from it as the focus moves between a password
+  field and another; a physical iPhone has not been tried. When the focus moves straight from a
+  password field to another field, with the keyboard up, the keyboard there can label its numbers
+  key ".?123" instead of "123" until its numbers are shown once or it is hidden and shown again; it
+  types as usual. The iOS keyboard shows no suggestions in any field anyway. Before, the keyboard
+  was not told that a field held a password.
+- On Android and iOS, a `text_editor` focused from code gives up its focus when the user taps
+  outside it, as a `text_input` does. Before, only a mouse press outside it took the focus, and a
+  touch is the only press there, so it kept the focus when the user tapped another field and took
+  the keyboard's text alongside it, a password included, which it showed in clear. While both still
+  ask for the keyboard, `InputMethod::merge` makes the merged request secure there when any of them
+  is, so the keyboard is set up for the password field. A tap still cannot focus a
+  `text_editor`, and the desktop and the web keep upstream's rule.
 - On Android and iOS, `text_editor` draws no placeholder while it shows a preedit, as `text_input`
   does, so a word the Android keyboard composes into an empty editor is not drawn over its
   placeholder (iOS sends no preedit). The desktop and the web draw it as upstream does.
