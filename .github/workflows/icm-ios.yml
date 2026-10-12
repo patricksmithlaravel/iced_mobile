@@ -87,11 +87,16 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+      # The runner is throwaway: the test keychain may join its search list
+      # for the signed release, which codesign needs on macOS 26
+      # (cli/tests/accept/lib.sh, join_search_list). The list is put back
+      # and checked.
       - name: cli/tests/accept/phase2.sh
         env:
           ACCEPT: ${{ runner.temp }}/accept
           ICM_KEYCHAIN: ${{ runner.temp }}/no-signing.keychain-db
           ICM_PROVISIONING_PROFILES: ${{ runner.temp }}/no-profiles
+          ICM_ACCEPT_KEYCHAIN_SEARCH: "1"
         run: |
           mkdir -p "$ICM_PROVISIONING_PROFILES"
           cli/tests/accept/phase2.sh
