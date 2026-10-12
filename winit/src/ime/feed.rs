@@ -48,6 +48,31 @@
 //! which `text_input` ignores) or from a task reaches it after the event
 //! loop turned again, and the text the keyboard sent right after the key is
 //! in the field that had the focus by then.
+//!
+//! # Password fields
+//!
+//! The shell learns the purpose of the field that asks for the keyboard
+//! only when the window redraws, and [`Feed::secure`] then tells the
+//! engine whether it is a password field, which never shows a composition
+//! ([`Engine::secure`]). The rest that the resume applies reaches the field
+//! the application focused in its turn before that redraw, and so may what
+//! the keyboard sends after an operation moved the focus
+//! ([`Feed::refocused`]): that field may be a password field (an
+//! `on_submit` that focuses it), and the keyboard composed for the field
+//! that had the focus. Until the redraw, the field gets what the keyboard
+//! commits but no preedit: the engine holds the composition back, and the
+//! redraw commits it as typed text in a password field, or gives it to
+//! another field as its preedit, which the next drain, operation or
+//! interruption hands the field before anything else. A composition after
+//! the keyboard's Enter, Tab or Escape so shows a redraw later than
+//! without the turn.
+//!
+//! A field that becomes a password field while the engine shows a
+//! composition in it (the application made it secure) gets the
+//! composition committed as typed text at that redraw too, and the window
+//! draws no preedit over a password field. From then on the engine reads
+//! what the keyboard composes as typed text, also the reports it sends
+//! before it learns the purpose.
 use super::edit::{Edit, Engine, Message, Request};
 
 use std::collections::VecDeque;
@@ -92,6 +117,17 @@ enum Turn {
 pub(crate) struct Feed {
     engine: Engine,
     turn: Turn,
+    /// Edits the field has not had yet, which come before any other: a
+    /// composition committed when the field became a password field, or
+    /// shown once the shell learnt that it is none ([`Feed::secure`]).
+    pending: Vec<Edit>,
+    /// The focus may have moved to a field whose purpose the shell learns
+    /// only at the next redraw: the application took its turn after a key
+    /// that yields, or an operation moved the focus ([`Feed::refocused`]).
+    /// Until that redraw ([`Feed::secure`]) the field gets no preedit: the
+    /// engine still shows the keyboard's composition, and the redraw gives
+    /// it to the field, or commits it as typed text in a password field.
+    unknown: bool,
 }
 
 impl Feed {
@@ -100,7 +136,48 @@ impl Feed {
         Self {
             engine: Engine::new(),
             turn: Turn::None,
+            pending: Vec::new(),
+            unknown: false,
         }
+    }
+
+    /// At a redraw, the purpose the field that asks for the keyboard has:
+    /// whether it is a password field. One never shows a composition
+    /// ([`Engine::secure`]): a preedit the engine shows when the field
+    /// becomes one is committed as typed text. After a turn or a focus
+    /// moved, the composition held back from the field until now is shown
+    /// in it, unless it was so committed. The next drain, operation or
+    /// interruption gives the field these edits before anything else. True
+    /// when there are any: the event loop is to turn for them.
+    pub(crate) fn secure(
+        &mut self,
+        secure: bool,
+        calls: &mut Vec<Call>,
+    ) -> bool {
+        let mut edits = Vec::new();
+
+        if self.engine.secure(secure, &mut edits) == Request::Forget {
+            calls.push(Call::Forget(self.engine.generation()));
+        }
+
+        if std::mem::take(&mut self.unknown) {
+            // The field shows no preedit: none to clear, and the one the
+            // engine shows still, if any, is the field's now.
+            edits.retain(|edit| !matches!(edit, Edit::Preedit(..)));
+            edits.extend(self.engine.preedit());
+        }
+
+        let given = !edits.is_empty();
+        self.pending.append(&mut edits);
+
+        given
+    }
+
+    /// An operation moved the focus while the keyboard is shown: the field
+    /// that has it now gets no preedit until the next redraw tells the
+    /// shell its purpose ([`Feed::secure`]).
+    pub(crate) fn refocused(&mut self) {
+        self.unknown = true;
     }
 
     /// When the event loop is about to wait: applies the queue and pushes
@@ -108,13 +185,16 @@ impl Feed {
     /// [`Feed::resume`] behind what it replays already: the application's
     /// turn starts, after a key this applied or one applied before.
     ///
-    /// During the turn it applies nothing.
+    /// During the turn it applies nothing. The edits the field has not had
+    /// yet ([`Feed::secure`]) come first, whatever the turn.
     pub(crate) fn drain(
         &mut self,
         queue: &mut impl Queue,
         edits: &mut Vec<Edit>,
         calls: &mut Vec<Call>,
     ) -> bool {
+        edits.append(&mut self.pending);
+
         match self.turn {
             Turn::Due => {
                 // This `AboutToWait` hands the application the key.
@@ -125,19 +205,25 @@ impl Feed {
             Turn::None => {}
         }
 
-        if self.apply(queue, edits, calls) {
+        let from = edits.len();
+        let turn = self.apply(queue, edits, calls);
+        self.hold(edits, from);
+
+        if turn {
             self.turn = Turn::Taken;
-            return true;
         }
 
-        false
+        turn
     }
 
     /// The application's turn ended: the next drain applies the rest of the
-    /// queue. A turn that is due stays so.
+    /// queue, which reaches the field that has the focus now, with no
+    /// preedit until the next redraw ([`Feed::secure`]). A turn that is due
+    /// stays so.
     pub(crate) fn resume(&mut self) {
         if self.turn == Turn::Taken {
             self.turn = Turn::None;
+            self.unknown = true;
         }
     }
 
@@ -152,10 +238,15 @@ impl Feed {
         edits: &mut Vec<Edit>,
         calls: &mut Vec<Call>,
     ) -> bool {
+        edits.append(&mut self.pending);
+
+        let from = edits.len();
+
         if self.turn == Turn::None && self.apply(queue, edits, calls) {
             self.turn = Turn::Due;
         }
 
+        self.hold(edits, from);
         self.turn == Turn::Due
     }
 
@@ -176,30 +267,39 @@ impl Feed {
         edits: &mut Vec<Edit>,
         calls: &mut Vec<Call>,
     ) -> bool {
+        edits.append(&mut self.pending);
+
         if self.turn == Turn::Due {
             return true;
         }
 
-        // A tap handled again after the application's turn goes on.
-        self.turn = Turn::None;
-
-        if self.apply(queue, edits, calls) {
-            self.turn = Turn::Due;
-            return true;
+        // A tap handled again after the application's turn goes on, in the
+        // field that has the focus now.
+        if self.turn == Turn::Taken {
+            self.turn = Turn::None;
+            self.unknown = true;
         }
 
-        if let Some(generation) = self.engine.interrupt(edits) {
+        let from = edits.len();
+        let waits = self.apply(queue, edits, calls);
+
+        if waits {
+            self.turn = Turn::Due;
+        } else if let Some(generation) = self.engine.interrupt(edits) {
             calls.push(Call::Reset(generation));
         }
 
-        false
+        self.hold(edits, from);
+        waits
     }
 
     /// The field lost the keyboard: what is queued is dropped with what the
-    /// engine knows. Returns the generation for `Keyboard.reset`, when the
-    /// Java side may hold text ([`Engine::abandon`]).
+    /// engine knows and the edits the field has not had. Returns the
+    /// generation for `Keyboard.reset`, when the Java side may hold text
+    /// ([`Engine::abandon`]).
     pub(crate) fn abandon(&mut self, queue: &mut impl Queue) -> Option<i32> {
         let mut dropped = queue.take();
+        self.pending.clear();
 
         self.engine.abandon(dropped.make_contiguous())
     }
@@ -224,6 +324,21 @@ impl Feed {
     /// wherever it is.
     pub(crate) fn holds(&self) -> bool {
         !self.engine.is_idle()
+    }
+
+    /// Holds back the preedits among `edits[from..]` while the purpose of
+    /// the field is unknown ([`Feed::unknown`]): the engine still shows
+    /// them, and the next redraw gives the field the last one.
+    fn hold(&self, edits: &mut Vec<Edit>, from: usize) {
+        if self.unknown {
+            let applied = edits.split_off(from);
+
+            edits.extend(
+                applied
+                    .into_iter()
+                    .filter(|edit| !matches!(edit, Edit::Preedit(..))),
+            );
+        }
     }
 
     /// Applies the queued messages in order; stops after a key that yields
@@ -260,7 +375,7 @@ impl Feed {
 mod tests {
     use super::*;
 
-    use crate::ime::edit::{KEYCODE_ENTER, KEYCODE_TAB, Key};
+    use crate::ime::edit::{KEYCODE_ENTER, KEYCODE_ESCAPE, KEYCODE_TAB, Key};
 
     impl Queue for VecDeque<Message> {
         fn take(&mut self) -> VecDeque<Message> {
@@ -368,6 +483,12 @@ mod tests {
         submitted: Vec<String>,
         /// The application clears the field it submits.
         clears: bool,
+        /// Which fields are password fields (`.secure(true)`).
+        secure: [bool; 2],
+        /// The preedits the window drew over a field, and the field.
+        drawn: Vec<(usize, String)>,
+        /// Every preedit a field got, and the field.
+        got: Vec<(usize, String)>,
     }
 
     impl Form {
@@ -378,7 +499,13 @@ mod tests {
 
                 match edit {
                     Edit::Commit(text) => field.push_str(text),
-                    Edit::Preedit(text, _) => self.preedit.clone_from(text),
+                    Edit::Preedit(text, _) => {
+                        self.preedit.clone_from(text);
+
+                        if !text.is_empty() {
+                            self.got.push((self.focus, text.clone()));
+                        }
+                    }
                     Edit::Key(Key::Backspace) => {
                         let _ = field.pop();
                     }
@@ -400,57 +527,388 @@ mod tests {
             self.focus = (self.focus + 1) % self.fields.len();
             self.preedit.clear();
         }
+
+        /// The window redraws: the focused field asks for the keyboard with
+        /// its purpose, which the feed learns (`android::enable`), and the
+        /// window draws the preedit over it as Android's does
+        /// (`window::overlay`). Whether the feed committed a composition
+        /// for the field, which the event loop turns for.
+        fn redraw(&mut self, feed: &mut Feed) -> bool {
+            use crate::core::input_method::{Preedit, Purpose};
+
+            let secure = self.secure[self.focus];
+            let mut calls = Vec::new();
+            let committed = feed.secure(secure, &mut calls);
+            assert_eq!(calls, []);
+
+            let purpose = if secure {
+                Purpose::Secure
+            } else {
+                Purpose::Normal
+            };
+
+            let preedit = Preedit {
+                content: self.preedit.clone(),
+                selection: None,
+                text_size: None,
+            };
+
+            if let Some(drawn) =
+                crate::window::overlay(purpose, Some(&preedit), true)
+            {
+                self.drawn.push((self.focus, drawn.content.clone()));
+            }
+
+            committed
+        }
     }
 
     #[test]
     fn the_field_focused_at_enter_gets_what_is_typed_after_it() {
-        for composes in [false, true] {
-            // A login form whose `on_submit` returns `focus_next`: the user
-            // types the username, Enter and the password's first letter
-            // before the event loop turns.
-            let mut feed = Feed::new();
-            let mut form = Form::default();
-            let mut queue = VecDeque::from([
-                state("sam", false),
-                key(KEYCODE_ENTER),
-                rebase(),
-                state("p", composes),
-            ]);
+        for (code, pressed) in [
+            (KEYCODE_ENTER, Key::Enter),
+            (KEYCODE_TAB, Key::Tab),
+            (KEYCODE_ESCAPE, Key::Escape),
+        ] {
+            for secure in [false, true] {
+                for composes in [false, true] {
+                    let label = format!("{code} {secure} {composes}");
 
-            // The drain stops after Enter and starts the turn.
-            let fed = drain(&mut feed, &mut queue);
-            assert!(fed.answer, "a resume is replayed");
-            assert_eq!(fed.edits, [commit("sam"), Edit::Key(Key::Enter)]);
-            form.handle(&fed.edits);
-            assert_eq!(form.submitted, ["sam"]);
+                    // A login form whose `on_submit` (or the widget that
+                    // takes Tab or Escape) moves the focus to the next
+                    // field: the user types the username, the key and the
+                    // password's first letter before the event loop turns.
+                    let mut feed = Feed::new();
+                    let mut form = Form {
+                        secure: [false, secure],
+                        ..Form::default()
+                    };
+                    let mut queue = VecDeque::from([
+                        state("sam", false),
+                        key(code),
+                        rebase(),
+                        state("p", composes),
+                    ]);
+                    assert!(!form.redraw(&mut feed));
 
-            // Another letter arrives while the application handles it.
-            queue.push_back(state("pw", composes));
+                    // The drain stops after the key and starts the turn.
+                    let fed = drain(&mut feed, &mut queue);
+                    assert!(fed.answer, "{label}: a resume is replayed");
+                    assert_eq!(
+                        fed.edits,
+                        [commit("sam"), Edit::Key(pressed)],
+                        "{label}"
+                    );
+                    form.handle(&fed.edits);
+                    assert_eq!(
+                        form.submitted,
+                        if code == KEYCODE_ENTER {
+                            vec!["sam"]
+                        } else {
+                            vec![]
+                        },
+                        "{label}"
+                    );
 
-            // `update` answers with `focus_next`, which runs at once, before
-            // the rest, and ends nothing: the key left the engine idle.
-            let fed = operate(&mut feed, &mut queue);
-            assert!(
-                !fed.answer && fed.edits.is_empty() && fed.calls.is_empty()
-            );
-            assert!(!feed.follows() && !feed.holds());
-            form.focus_next();
+                    // Another letter arrives while the application handles
+                    // it.
+                    queue.push_back(state("pw", composes));
 
-            // An `AboutToWait` before the resume applies nothing.
-            let fed = drain(&mut feed, &mut queue);
-            assert!(!fed.answer && fed.edits.is_empty());
-            assert!(feed.takes_turn());
+                    // `update` answers with `focus_next`, which runs at
+                    // once, before the rest, and ends nothing: the key left
+                    // the engine idle.
+                    let fed = operate(&mut feed, &mut queue);
+                    assert!(
+                        !fed.answer
+                            && fed.edits.is_empty()
+                            && fed.calls.is_empty(),
+                        "{label}"
+                    );
+                    assert!(!feed.follows() && !feed.holds(), "{label}");
+                    form.focus_next();
 
-            // The resume: the rest goes to the password field.
-            feed.resume();
-            let fed = drain(&mut feed, &mut queue);
-            assert!(!fed.answer && fed.calls.is_empty());
-            form.handle(&fed.edits);
+                    // An `AboutToWait` before the resume applies nothing.
+                    let fed = drain(&mut feed, &mut queue);
+                    assert!(!fed.answer && fed.edits.is_empty(), "{label}");
+                    assert!(feed.takes_turn(), "{label}");
 
-            assert!(queue.is_empty());
-            assert_eq!(form.fields, ["sam", if composes { "" } else { "pw" }]);
-            assert_eq!(form.preedit, if composes { "pw" } else { "" });
+                    // The resume: the rest goes to the second field, before
+                    // the redraw that tells the shell its purpose. What the
+                    // keyboard commits reaches it; what it composes, for
+                    // the first field's purpose, is held back.
+                    feed.resume();
+                    let fed = drain(&mut feed, &mut queue);
+                    assert!(!fed.answer && fed.calls.is_empty(), "{label}");
+                    assert_eq!(
+                        fed.edits,
+                        if composes {
+                            vec![]
+                        } else {
+                            vec![commit("p"), commit("w")]
+                        },
+                        "{label}"
+                    );
+                    form.handle(&fed.edits);
+                    assert!(queue.is_empty(), "{label}");
+
+                    // The redraw tells the shell the field's purpose: the
+                    // composition is the password field's typed text, or
+                    // the normal field's preedit, which the next
+                    // `AboutToWait` gives the field first.
+                    assert_eq!(form.redraw(&mut feed), composes, "{label}");
+
+                    if secure {
+                        // The keyboard learns the purpose: it finishes the
+                        // composition, reports its text with nothing
+                        // composing and rebases (`KeyboardView.show`), which
+                        // changes nothing.
+                        queue.extend([state("pw", false), rebase()]);
+                    }
+
+                    let fed = drain(&mut feed, &mut queue);
+                    assert!(!fed.answer && fed.calls.is_empty(), "{label}");
+                    assert_eq!(
+                        fed.edits,
+                        match (composes, secure) {
+                            (false, _) => vec![],
+                            (true, false) => vec![preedit("pw")],
+                            (true, true) => vec![commit("pw")],
+                        },
+                        "{label}"
+                    );
+                    form.handle(&fed.edits);
+                    assert!(!form.redraw(&mut feed), "{label}");
+
+                    // A normal field shows the composition; a password field
+                    // has it as typed text, never as its preedit.
+                    let shown = composes && !secure;
+                    assert_eq!(
+                        form.got,
+                        if shown {
+                            vec![(1, "pw".to_owned())]
+                        } else {
+                            vec![]
+                        },
+                        "{label}"
+                    );
+                    assert_eq!(
+                        form.fields,
+                        ["sam", if shown { "" } else { "pw" }],
+                        "{label}"
+                    );
+                    assert_eq!(
+                        form.preedit,
+                        if shown { "pw" } else { "" },
+                        "{label}"
+                    );
+                    assert_eq!(
+                        form.drawn,
+                        if shown {
+                            vec![(1, "pw".to_owned())]
+                        } else {
+                            vec![]
+                        },
+                        "{label}"
+                    );
+                }
+            }
         }
+    }
+
+    #[test]
+    fn a_password_field_reads_what_the_keyboard_composed_before_it_learnt_so() {
+        // A login form whose `on_submit` focuses the password field: the
+        // keyboard goes on composing for the username's purpose until it
+        // runs the `show` the redraw posts.
+        let mut feed = Feed::new();
+        let mut form = Form {
+            secure: [false, true],
+            ..Form::default()
+        };
+        let mut queue = VecDeque::from([
+            state("sam", false),
+            key(KEYCODE_ENTER),
+            rebase(),
+            state("pw", true),
+        ]);
+        let _ = form.redraw(&mut feed);
+
+        let fed = drain(&mut feed, &mut queue);
+        form.handle(&fed.edits);
+        let _ = operate(&mut feed, &mut queue);
+        form.focus_next();
+        feed.resume();
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, []);
+
+        // The redraw commits "pw"; the keyboard composes "pwd" meanwhile.
+        assert!(form.redraw(&mut feed));
+        queue.push_back(state("pwd", true));
+
+        // The field gets "pw", then "d" as typed text: no preedit.
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [commit("pw"), commit("d")]);
+        form.handle(&fed.edits);
+
+        // A revision too, worked out as typed text.
+        queue.push_back(state("pwe", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(
+            fed.edits,
+            [
+                Edit::Key(Key::Previous),
+                Edit::Key(Key::Delete),
+                commit("e")
+            ]
+        );
+
+        // The keyboard learns the purpose: its report changes nothing, and
+        // its rebase ends the session's text where it is. The keyboard's
+        // next letter is the password's.
+        queue.extend([state("pwe", false), rebase(), state("x", false)]);
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [commit("x")]);
+        assert!(fed.calls.is_empty());
+        assert_eq!(form.drawn, []);
+        assert_eq!(form.got, []);
+    }
+
+    #[test]
+    fn a_focus_moved_from_code_holds_compositions_back_until_the_redraw() {
+        for secure in [false, true] {
+            // A task focuses the second field while the keyboard is idle,
+            // and the keyboard composes before the window redraws.
+            let mut feed = Feed::new();
+            let mut form = Form {
+                secure: [false, secure],
+                ..Form::default()
+            };
+            let mut queue = VecDeque::new();
+            assert!(!form.redraw(&mut feed));
+
+            let fed = operate(&mut feed, &mut queue);
+            assert!(!fed.answer && fed.edits.is_empty(), "{secure}");
+            assert!(!feed.follows(), "{secure}");
+            form.focus_next();
+            feed.refocused();
+
+            queue.extend([state("p", true), state("pw", true)]);
+            let fed = drain(&mut feed, &mut queue);
+            assert_eq!(fed.edits, [], "{secure}");
+
+            // The redraw: typed text for a password field, a preedit for
+            // another.
+            assert!(form.redraw(&mut feed), "{secure}");
+            let fed = drain(&mut feed, &mut queue);
+            assert_eq!(
+                fed.edits,
+                if secure {
+                    [commit("pw")]
+                } else {
+                    [preedit("pw")]
+                },
+                "{secure}"
+            );
+            form.handle(&fed.edits);
+            assert!(!form.redraw(&mut feed), "{secure}");
+
+            assert_eq!(
+                (form.fields[1].as_str(), form.preedit.as_str()),
+                if secure { ("pw", "") } else { ("", "pw") },
+                "{secure}"
+            );
+            assert_eq!(
+                form.drawn,
+                if secure {
+                    vec![]
+                } else {
+                    vec![(1, "pw".to_owned())]
+                },
+                "{secure}"
+            );
+            assert_eq!(form.got, form.drawn, "{secure}");
+
+            // Once the shell knows the purpose, compositions go on as
+            // before: typed text, or the preedit at once.
+            queue.push_back(state("pwd", true));
+            let fed = drain(&mut feed, &mut queue);
+            assert_eq!(
+                fed.edits,
+                if secure {
+                    [commit("d")]
+                } else {
+                    [preedit("pwd")]
+                },
+                "{secure}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_composition_that_waits_for_the_field_comes_before_any_other_edit() {
+        // The application made the field secure while the keyboard composed
+        // "pw": the redraw committed it, and a tap, or an operation, comes
+        // before the next `AboutToWait`.
+        for tap in [false, true] {
+            let mut feed = Feed::new();
+            let mut queue = VecDeque::from([state("pw", true)]);
+            let _ = drain(&mut feed, &mut queue);
+
+            let mut calls = Vec::new();
+            assert!(feed.secure(true, &mut calls));
+            assert_eq!(calls, []);
+
+            // Again at the next redraw: nothing more.
+            assert!(!feed.secure(true, &mut calls));
+
+            queue.push_back(state("pwd", true));
+
+            let fed = if tap {
+                finish(&mut feed, &mut queue)
+            } else {
+                operate(&mut feed, &mut queue)
+            };
+
+            assert!(!fed.answer, "{tap}");
+            assert_eq!(
+                fed.edits,
+                [clear(), commit("pw"), commit("d")],
+                "{tap}"
+            );
+            assert_eq!(
+                fed.calls,
+                if tap { vec![Call::Reset(1)] } else { vec![] },
+                "{tap}"
+            );
+
+            // Given once.
+            let fed = drain(&mut feed, &mut queue);
+            assert!(fed.edits.is_empty(), "{tap}");
+        }
+
+        // The field loses the keyboard first: it is dropped, with the rest.
+        let mut feed = Feed::new();
+        let mut queue = VecDeque::from([state("pw", true)]);
+        let _ = drain(&mut feed, &mut queue);
+        assert!(feed.secure(true, &mut Vec::new()));
+        assert_eq!(feed.abandon(&mut queue), Some(1));
+        assert!(drain(&mut feed, &mut queue).edits.is_empty());
+    }
+
+    #[test]
+    fn a_field_that_is_no_longer_a_password_field_shows_compositions_again() {
+        let mut feed = Feed::new();
+        let mut queue = VecDeque::from([state("ab", true)]);
+
+        // While the field is a password field, a composition is typed text.
+        assert!(!feed.secure(true, &mut Vec::new()));
+        assert_eq!(drain(&mut feed, &mut queue).edits, [commit("ab")]);
+
+        // The application shows the password: nothing to commit, and the
+        // keyboard's next composition is a preedit once it learnt so.
+        assert!(!feed.secure(false, &mut Vec::new()));
+        queue.extend([rebase(), state("c", true)]);
+        assert_eq!(drain(&mut feed, &mut queue).edits, [preedit("c")]);
     }
 
     #[test]
@@ -554,11 +1012,13 @@ mod tests {
         assert_eq!(form.submitted, ["hi"]);
 
         // The tap, handled again, applies the rest and commits the
-        // composition before it, then starts a generation.
+        // composition before it, then starts a generation. The field the
+        // turn left the focus in never shows the composition: no redraw has
+        // told the shell its purpose yet.
         assert!(feed.takes_turn());
         let fed = finish(&mut feed, &mut queue);
         assert!(!fed.answer);
-        assert_eq!(fed.edits, [preedit("x"), clear(), commit("x")]);
+        assert_eq!(fed.edits, [commit("x")]);
         assert_eq!(fed.calls, [Call::Reset(1)]);
         form.handle(&fed.edits);
         assert_eq!(form.fields[0], "x");

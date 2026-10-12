@@ -229,21 +229,26 @@ this file in the commit that fixes or finds a limitation.
     shows again.
   - Password fields (`.secure(true)`) are marked secure to the Android
     keyboard with the input connection above: it shows its password layout
-    without suggestions and is asked not to learn what is typed, and what
-    it composes there reaches the field as typed text, so it is never drawn
-    in clear. On iOS the view tells UIKit that the field is secure text
-    entry: on the iOS 27.0 Simulator the keyboard then has no emoji or
-    dictation key, and it switches to and from that keyboard as the focus
-    moves between a password field and another (a physical iPhone has not
-    been tried). When the focus moves straight from a password field to
-    another field, with the keyboard up, that field's keyboard can label
-    its numbers key ".?123" instead of "123" until its numbers are shown
-    once or it is hidden and shown again; it types as usual. A keyboard
-    shown while none was up is set up for its field at once, without that
-    label. The iOS keyboard shows no suggestions in any field anyway
-    (above). On both, a `text_editor` focused from code that also takes the
-    keyboard (see `text_editor` below) leaves the keyboard set up for the
-    password field.
+    without suggestions and is asked not to learn what is typed, and what it
+    composes there reaches the field as typed text, so it is never drawn in
+    clear. So does a composition that reaches a password field from another
+    purpose (the field an Enter or Tab moved the focus from, the field the
+    app focused from code, or a field the app makes secure while the
+    keyboard composes): the shell commits it as typed text at the redraw
+    that tells it the field's purpose, and a field the focus moves to gets
+    no preedit until then. On Android and iOS the window never draws a
+    password field's preedit. On iOS the view tells UIKit that the field is
+    secure text entry: on the iOS 27.0 Simulator the keyboard then has no
+    emoji or dictation key, and it switches to and from that keyboard as the
+    focus moves between a password field and another (a physical iPhone has
+    not been tried). When the focus moves straight from a password field to
+    another field, with the keyboard up, that field's keyboard can label its
+    numbers key ".?123" instead of "123" until its numbers are shown once or
+    it is hidden and shown again; it types as usual. A keyboard shown while
+    none was up is set up for its field at once, without that label. The iOS
+    keyboard shows no suggestions in any field anyway (above). On both, a
+    `text_editor` focused from code that also takes the keyboard (see
+    `text_editor` below) leaves the keyboard set up for the password field.
   - The keyboard covers fields in the lower half of the screen unless the
     root is padded with `SafeArea::padding` from `iced::mobile::safe_area()`,
     whose bottom rises with it, as the template's is. On Android it rises
@@ -259,16 +264,20 @@ this file in the commit that fixes or finds a limitation.
     `update` returns for them before the text the keyboard typed after them
     reaches a field, also when a tap or an operation comes in between: a
     field cleared on submit gets that text alone, and the field `on_submit`
-    moves the focus to (`focus_next`) gets it. A key the app handles later,
-    from a subscription (`keyboard::listen`, which is how an app takes Tab:
+    moves the focus to (`focus_next`) gets it. When that field is a password
+    field, the keyboard is set up for it only from the next redraw: it typed
+    that text as the last field's keyboard, which may suggest and learn
+    words, and what it composed of it reaches the password field as typed
+    text, never drawn in clear. A key the app handles later, from a
+    subscription (`keyboard::listen`, which is how an app takes Tab:
     `text_input` ignores it) or a task, comes after that text: what the
     keyboard sends in the same instant, such as a password a credential
     keyboard types right after a username and Tab, goes to the field that
     had the focus. When the key leaves no field with the focus (Escape
     unfocuses a `text_input` or a `text_editor`, an `on_submit` may remove
     the field or unfocus it), what the keyboard sent right after it is
-    dropped. A line break or tab inside longer committed text (a
-    suggestion, a paste from the keyboard's clipboard) is dropped.
+    dropped. A line break or tab inside longer committed text (a suggestion,
+    a paste from the keyboard's clipboard) is dropped.
   - On iOS, Return and Tab count only when UIKit inserts them alone, as
     the Return and Tab keys do (`"\r\n"` is one Return). A line break or
     tab inside longer inserted text (dictation, a keyboard suggestion, a

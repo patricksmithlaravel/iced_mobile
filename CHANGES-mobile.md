@@ -374,22 +374,29 @@ Text input on Android, and secure fields on Android and iOS:
   input connection above, and on iOS: the Android keyboard shows its password layout without
   suggestions. On Android the input type is `TYPE_TEXT_VARIATION_PASSWORD` with
   `IME_FLAG_NO_PERSONALIZED_LEARNING`, and what a keyboard composes there reaches the field as typed
-  text, never as a preedit drawn in clear. On iOS the vendored winit implements
-  `Window::set_ime_purpose` (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers
-  `isSecureTextEntry` and turns off autocorrection, spell checking, auto-capitalisation and smart
-  punctuation for a password, the terminal purpose turns off the same without secure entry, and a
-  changed purpose reloads the keyboard that is shown. `iced_winit` gives the view a field's
-  purpose before it makes the view the first responder, so a keyboard shown while none was up is
-  set up for its field at once, with no reload. On the iOS 27.0 Simulator the password
-  keyboard has no emoji or dictation key, and the keyboard switches to and from it as the focus
-  moves between a password field and another; a physical iPhone has not been tried. When the
-  focus moves straight from a password field to another field, with the keyboard up, the keyboard
-  there can label its numbers key ".?123" instead of "123" until its numbers are shown once or it
-  is hidden and shown again; it types as usual. The iOS keyboard shows no suggestions in any field
-  anyway. Before, the keyboard was not told that a field held a password. When a `text_editor`
-  focused from code also takes the keyboard next to a password field (a tap does not take its
-  focus), the keyboard is set up for the password field: on Android and iOS, `InputMethod::merge`
-  makes the merged request secure when any of the requests is.
+  text, never as a preedit drawn in clear. So does a composition that reaches a password field from
+  another purpose: the letters typed right after the Enter whose `on_submit` focuses the password
+  field, which the keyboard composed for the field it left, reach no field as a preedit until the
+  redraw that tells the shell the field's purpose, which commits them as typed text in a password
+  field; a field made secure while the keyboard composes gets its composition as typed text at that
+  redraw; and what the keyboard composes before it is set up for the password field is read as typed
+  text too. On Android and iOS the window never draws a password field's preedit (the desktop and
+  the web draw it as upstream does). On iOS the vendored winit implements `Window::set_ime_purpose`
+  (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers `isSecureTextEntry` and
+  turns off autocorrection, spell checking, auto-capitalisation and smart punctuation for a
+  password, the terminal purpose turns off the same without secure entry, and a changed purpose
+  reloads the keyboard that is shown. `iced_winit` gives the view a field's purpose before it makes
+  the view the first responder, so a keyboard shown while none was up is set up for its field at
+  once, with no reload. On the iOS 27.0 Simulator the password keyboard has no emoji or dictation
+  key, and the keyboard switches to and from it as the focus moves between a password field and
+  another; a physical iPhone has not been tried. When the focus moves straight from a password field
+  to another field, with the keyboard up, the keyboard there can label its numbers key ".?123"
+  instead of "123" until its numbers are shown once or it is hidden and shown again; it types as
+  usual. The iOS keyboard shows no suggestions in any field anyway. Before, the keyboard was not
+  told that a field held a password. When a `text_editor` focused from code also takes the keyboard
+  next to a password field (a tap does not take its focus), the keyboard is set up for the password
+  field: on Android and iOS, `InputMethod::merge` makes the merged request secure when any of the
+  requests is.
 - On Android and iOS, `text_editor` draws no placeholder while it shows a preedit, as `text_input`
   does, so a word the Android keyboard composes into an empty editor is not drawn over its
   placeholder (iOS sends no preedit). The desktop and the web draw it as upstream does.

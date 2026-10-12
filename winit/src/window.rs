@@ -230,22 +230,20 @@ where
             } => {
                 self.enable_ime(cursor, purpose);
 
-                if let Some(preedit) = preedit {
-                    if preedit.content.is_empty() {
-                        self.preedit = None;
-                    } else {
-                        let mut overlay =
-                            self.preedit.take().unwrap_or_else(Preedit::new);
+                if let Some(preedit) =
+                    overlay(purpose, preedit.as_ref(), MASKS_PREEDIT)
+                {
+                    let mut overlay =
+                        self.preedit.take().unwrap_or_else(Preedit::new);
 
-                        overlay.update(
-                            cursor,
-                            &preedit,
-                            self.state.background_color(),
-                            &self.renderer,
-                        );
+                    overlay.update(
+                        cursor,
+                        preedit,
+                        self.state.background_color(),
+                        &self.renderer,
+                    );
 
-                        self.preedit = Some(overlay);
-                    }
+                    self.preedit = Some(overlay);
                 } else {
                     self.preedit = None;
                 }
@@ -387,6 +385,31 @@ where
     > {
         self.raw.display_handle()
     }
+}
+
+/// Whether the window never draws a password field's preedit: on Android
+/// and iOS. Elsewhere it draws it as upstream does.
+const MASKS_PREEDIT: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// The preedit the window draws over the field that asks for the input
+/// method with `purpose`, at its caret: none when it is empty, and none for
+/// a password field ([`input_method::Purpose::Secure`]) when `masks`, since
+/// the overlay would draw its text in clear.
+///
+/// On Android the shell commits a password field's composition as typed
+/// text, which the field masks, at the turn of the event loop after the
+/// redraw that tells it the field's purpose (see `ime`): the overlay would
+/// otherwise show it for that frame. iOS sends no preedit.
+pub(crate) fn overlay(
+    purpose: input_method::Purpose,
+    preedit: Option<&input_method::Preedit>,
+    masks: bool,
+) -> Option<&input_method::Preedit> {
+    if masks && purpose == input_method::Purpose::Secure {
+        return None;
+    }
+
+    preedit.filter(|preedit| !preedit.content.is_empty())
 }
 
 struct Preedit<Renderer>
@@ -536,5 +559,51 @@ where
                 );
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use input_method::Purpose;
+
+    fn preedit(content: &str) -> input_method::Preedit {
+        input_method::Preedit {
+            content: content.to_owned(),
+            selection: Some(content.len()..content.len()),
+            text_size: None,
+        }
+    }
+
+    #[test]
+    fn android_and_ios_never_draw_a_password_fields_preedit() {
+        let word = preedit("pw");
+
+        for purpose in [Purpose::Normal, Purpose::Terminal] {
+            assert_eq!(overlay(purpose, Some(&word), true), Some(&word));
+        }
+
+        assert_eq!(overlay(Purpose::Secure, Some(&word), true), None);
+    }
+
+    #[test]
+    fn the_desktop_and_the_web_draw_every_preedit_as_upstream_does() {
+        let word = preedit("pw");
+
+        for purpose in [Purpose::Normal, Purpose::Secure, Purpose::Terminal] {
+            assert_eq!(overlay(purpose, Some(&word), false), Some(&word));
+        }
+    }
+
+    #[test]
+    fn an_empty_preedit_is_not_drawn() {
+        for masks in [false, true] {
+            for purpose in [Purpose::Normal, Purpose::Secure, Purpose::Terminal]
+            {
+                assert_eq!(overlay(purpose, Some(&preedit("")), masks), None);
+                assert_eq!(overlay(purpose, None, masks), None);
+            }
+        }
     }
 }

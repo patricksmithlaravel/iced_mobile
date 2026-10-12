@@ -23,7 +23,17 @@
 //!   widget ([`operated`]), which brings back a keyboard the user hid. When
 //!   no field asked before, what the keyboard sent since the last field
 //!   belongs to no field: it is dropped, and the engine and the Java side
-//!   are reset if it held anything.
+//!   are reset if it held anything. Before the `show`, it tells the engine
+//!   whether the field is a password field, which never shows a
+//!   composition (see `feed`): a composition the engine shows when the
+//!   field becomes one (the application made it secure while the keyboard
+//!   composed) is committed as typed text, with no new generation, and so
+//!   is one held back from the field since an Enter, Tab or Escape or an
+//!   operation moved the focus (an `on_submit` that focuses the password
+//!   field), which a field that is no password field gets as its preedit
+//!   now. The window then redraws, and the next drain, operation or
+//!   interrupt gives the field these edits before anything else. The
+//!   window draws no preedit over a password field.
 //! - [`disable`] runs when no field asks any more. The field has lost the
 //!   focus, so what the keyboard typed and composes there is dropped, as
 //!   desktop input methods drop a composition then: the queue is emptied,
@@ -58,7 +68,9 @@
 //!   deferred the same way; a `select_all` then selects the word too,
 //!   instead of the word replacing the selection. A widget the operation
 //!   focuses, also the one that has the focus, shows the keyboard again at
-//!   the next redraw, as a tap on it does.
+//!   the next redraw, as a tap on it does. A focus the operation moved
+//!   holds back the keyboard's compositions from the field until that
+//!   redraw tells the shell whether it is a password field.
 //! - From the first `show` to the next `hide`, the queue holds the window, so
 //!   that a native call can wake the event loop: it pushes its message and
 //!   requests a redraw (winit's Android loop ignores a bare wake). Native
@@ -71,7 +83,8 @@
 //!   field), builds its view again, and the widget operations its `update`
 //!   returns run (a focus moved to the next field), before the event loop
 //!   replays [`Shell::resume`] and an `AboutToWait` for the rest, which then
-//!   reaches the field the application left the focus in. The Java side
+//!   reaches the field the application left the focus in, with no preedit
+//!   until the next redraw tells the shell that field's purpose. The Java side
 //!   rebases its mirror right after such a key, as after an arrow, Home or
 //!   End, with no new generation, so none of that text is dropped. When a
 //!   message asks to forget the text (the session's text starts with a
@@ -326,6 +339,16 @@ pub(crate) fn operated<P, C>(
         }
     }
 
+    // The field that has the focus now may be a password field: it gets no
+    // preedit until a redraw tells the shell its purpose.
+    if moved.focus {
+        SESSION.with_borrow_mut(|session| session.feed.refocused());
+
+        if let Some(window) = windows.get_mut(typing.window) {
+            window.raw.request_redraw();
+        }
+    }
+
     if !moved.held.is_empty() {
         defer(Box::new(super::Replay::new(moved.held)));
     }
@@ -480,9 +503,16 @@ impl Shell {
     }
 
     /// The application's turn after an Enter, Tab or Escape key ended: the
-    /// next drain applies what the keyboard sent after it.
+    /// next drain applies what the keyboard sent after it, which reaches the
+    /// field the application left the focus in with no preedit until a
+    /// redraw tells the shell that field's purpose. The window redraws for
+    /// that, also when the key changed nothing.
     pub(crate) fn resume(&mut self) {
         SESSION.with_borrow_mut(|session| session.feed.resume());
+
+        if let Some(window) = &queue().window {
+            window.request_redraw();
+        }
     }
 }
 
@@ -555,6 +585,19 @@ impl Session {
 
             set_window(Some(window.clone()));
         }
+
+        // The shell learns the field's purpose here. A password field never
+        // shows a composition: one the keyboard composed under the last
+        // purpose is committed as typed text, and one held back since the
+        // focus moved shows in another field. The field gets that at the
+        // next turn of the event loop, before anything else.
+        let mut calls = Vec::new();
+
+        if self.feed.secure(purpose == dex::PURPOSE_SECURE, &mut calls) {
+            window.request_redraw();
+        }
+
+        self.perform(calls);
 
         if self.shown != Some(purpose) || touched {
             self.call(dex::SHOW, &[JValue::Int(purpose)]);
