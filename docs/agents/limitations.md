@@ -71,6 +71,14 @@ this file in the commit that fixes or finds a limitation.
     happens in the middle of the text). `text_editor`'s Backspace can delete
     by character instead, so a combining sequence the Android keyboard
     revises can come out wrong there.
+  - In the middle of the text, what the Android keyboard types can join the
+    field's text after it into one cluster, which the keyboard does not
+    know: in Indic scripts, a consonant and virama typed right before a
+    consonant of the field make one conjunct with it (स् before त gives
+    स्त). A Backspace or another consonant from the keyboard right after
+    that virama then replaces the whole conjunct, the field's consonant
+    with it, and the caret ends up after the conjunct. Typing at the end of
+    the text is not affected.
   - Password fields (`.secure(true)`) are marked secure to the system
     keyboard on Android and iOS: it shows no suggestions and learns nothing
     from them. On Android, what a keyboard composes there reaches the field

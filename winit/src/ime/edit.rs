@@ -25,6 +25,20 @@
 //! that join (it would otherwise take back, and lose, the character before
 //! the origin).
 //!
+//! The end of the session's text can join the app's text after it in the
+//! same way, and nothing handles that: in Indic scripts a consonant and
+//! virama typed right before a consonant of the field make one conjunct
+//! with it (Unicode's GB9c). The engine still counts the virama's cluster
+//! as its own, so a revision of it (the keyboard's Backspace on the virama,
+//! or another consonant after it) Backspaces the whole conjunct out of the
+//! app, the field's consonant with it, and text committed there lands
+//! after the conjunct, where `text_input` puts its caret. The engine cannot
+//! see the text after the session's, and a rebase whenever the text ends
+//! in a virama would only move the join to the start of the next session's
+//! text, which the engine cannot see either, and would break typing a
+//! conjunct at the end of the text, which works. `docs/agents/limitations.md`
+//! lists it.
+//!
 //! Line breaks and tabs are never part of the text the engine compares or
 //! commits: Enter and Tab reach the app as keys (the Java side turns a commit
 //! of only a line break into Enter and of only a tab into Tab, as iOS does),
@@ -549,7 +563,9 @@ fn byte_offset(text: &str, index: i32) -> usize {
 /// Characters that join only certain clusters (a regional indicator after
 /// another, a Hangul vowel jamo after a leading one, a consonant after a
 /// virama) are left out: text before the origin rarely ends in the first
-/// half of such a pair, while the second half is typed all the time.
+/// half of such a pair, while the second half is typed all the time. The
+/// end of the text is never checked against the app's text after it (see
+/// the module's documentation).
 fn joins(text: &str) -> bool {
     let Some(first) = text.chars().next() else {
         return false;
@@ -2489,6 +2505,33 @@ mod tests {
             (field.text().as_str(), field.preedit.clone()),
             ("काम", None)
         );
+    }
+
+    #[test]
+    fn a_conjunct_typed_at_the_end_of_the_text_is_revised_whole() {
+        // A virama asks for no rebase: the consonant after it joins the
+        // engine's own cluster, which every edit revises in the field. (In
+        // the middle of the text it would join the field's next consonant
+        // instead, which the engine cannot see: a known limitation.)
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("म", "");
+
+        for (typed, value) in [
+            ("स", ["म", "स"]),
+            ("\u{094D}", ["म", "स\u{094D}"]),
+            ("त", ["म", "स\u{094D}त"]),
+        ] {
+            mirror.commit_text(typed, 1);
+            assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+            assert_eq!(field.value, value);
+        }
+
+        for value in ["मस\u{094D}", "मस", "म"] {
+            mirror.send_key(KEYCODE_DEL);
+            assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+            assert_eq!(field.text(), value);
+        }
     }
 
     #[test]

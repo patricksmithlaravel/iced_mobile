@@ -769,10 +769,13 @@
 //!   tap; a word being composed is dropped when the application moves the
 //!   focus itself; and a combining mark or vowel sign typed right after the
 //!   place the user tapped joins the character before it, which
-//!   `text_input` then deletes with it, as it does on the desktop. An
-//!   `on_input` that refuses or shortens the keyboard's text puts the
-//!   keyboard out of step until the caret moves. GameActivity, and Android
-//!   before 8, get key events only.
+//!   `text_input` then deletes with it, as it does on the desktop. In the
+//!   middle of the text, a consonant and virama the keyboard types right
+//!   before a consonant of the field make one conjunct with it, which the
+//!   keyboard's next Backspace or consonant there replaces whole, the
+//!   field's consonant with it. An `on_input` that refuses or shortens the
+//!   keyboard's text puts the keyboard out of step until the caret moves.
+//!   GameActivity, and Android before 8, get key events only.
 //! - **`text_editor` ignores touch.** A tap neither focuses a `text_editor`
 //!   nor takes the focus from one, so one focused from code goes on taking
 //!   the keyboard's text alongside a `text_input` the user taps: move the
