@@ -149,8 +149,9 @@ pub enum Motion {
     /// right-to-left one, where [`Motion::Left`] moves left on screen.
     ///
     /// Android only: `text_editor` moves by this and [`Motion::Next`] for the
-    /// system keyboard's own caret moves, which go in the order of the text.
-    /// Elsewhere [`Motion`] has upstream's variants only.
+    /// caret moves the shell makes to apply the system keyboard's edits,
+    /// which go in the order of the text; the keyboard's arrow keys move on
+    /// screen. Elsewhere [`Motion`] has upstream's variants only.
     #[cfg(target_os = "android")]
     Previous,
     /// Move on one grapheme cluster in the order of the text, or to the start

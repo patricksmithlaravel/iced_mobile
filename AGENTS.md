@@ -313,8 +313,13 @@ stop only the platforms they drive and leave the other platforms' devices alone
   `winit/src/ime.rs` turns those into iced events and watches the widget operations that move the
   focus or the caret, and `ime/dex.rs` holds the contract between them; `winit/src/window.rs` shows
   and hides the keyboard through it, and `winit/src/lib.rs` hands it taps, hardware keys and widget
-  operations. On iOS, secure and terminal fields set the vendored winit view's text input traits
-  (`vendor/winit/src/platform_impl/ios/view.rs`, patch 0003).
+  operations. The caret moves of `ime/edit.rs` are arrows with no physical key, which `text_editor`
+  (`widget/src/text_editor.rs`) takes as `Motion::Previous` and `Motion::Next`, in the order of the
+  text; those two variants exist on Android only (`core/src/text/editor.rs`), so that `Motion`
+  stays upstream's elsewhere. On iOS, secure and terminal fields set the vendored winit view's text
+  input traits (`vendor/winit/src/platform_impl/ios/view.rs`, patch 0003), and
+  `winit/src/window.rs` gives the view a field's purpose before it allows the input method, which
+  makes the view the first responder.
 - **winit itself:** `vendor/winit/src/platform_impl/android/` and `.../ios/`.
 - **What icm does per platform:** `cli/src/android/`, `cli/src/platform/ios_sim/`, `cli/src/web/` and
   `cli/src/platform/desktop/`. Pipelines are in `docs/icm/DESIGN.md` §10, and the output contract is

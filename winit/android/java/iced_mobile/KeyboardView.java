@@ -333,11 +333,11 @@ final class KeyboardView extends View {
         }
 
         // At once, then again once the messages already queued ran, and
-        // until it is seen up (recheck): the system can accept a show that
-        // comes right after the input restarted or the window got the focus
-        // and still drop it. When the window got the focus back while no
-        // field wanted the keyboard (back from the background), nothing else
-        // would show it.
+        // from Android 11 until it is seen to arrive (recheck): the system
+        // can accept a show that comes right after the input restarted or
+        // the window got the focus and still drop it. When the window got
+        // the focus back while no field wanted the keyboard (back from the
+        // background), nothing else would show it.
         manager.showSoftInput(this, 0);
 
         if (settled) {

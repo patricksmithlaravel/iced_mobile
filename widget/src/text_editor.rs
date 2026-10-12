@@ -1417,10 +1417,10 @@ fn motion(key: key::Named) -> Option<Motion> {
 }
 
 /// Android: the motion of an arrow key with no physical key, which is how the
-/// shell presses the system keyboard's own caret moves, one grapheme cluster
-/// at a time in the order of the text: [`Motion::Previous`] and
-/// [`Motion::Next`], so they go the same way in a right-to-left line, where
-/// the arrows move on screen.
+/// shell presses the caret moves it makes to apply the system keyboard's
+/// edits, one grapheme cluster at a time in the order of the text:
+/// [`Motion::Previous`] and [`Motion::Next`], so they go the same way in a
+/// right-to-left line, where the arrows move on screen.
 #[cfg(target_os = "android")]
 fn text_order(motion: Motion, physical_key: key::Physical) -> Motion {
     if !is_text_order_move(physical_key) {

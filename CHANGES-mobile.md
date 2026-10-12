@@ -345,7 +345,9 @@ Text input on Android, and secure fields on Android and iOS:
   (after the notification shade, a system dialog or another app), since nothing tells the shell
   that the user hid it. From Android 11 the shell also shows the keyboard again when the system
   drops a show, which it can around a restart of the input or the window getting the focus, until
-  it sees the keyboard come up; a keyboard the user hides right after it came up stays hidden.
+  it sees the keyboard come up; a keyboard the user hides right after it came up stays hidden. Only
+  one that was still up as the window got the focus back, or as the focus moved between a password
+  field and another kind of field, can come back once when the user hides it within half a second.
   Before, the field had to lose the focus once, as it still has with GameActivity, before Android 8
   and when the input connection cannot be installed (unless only the keyboard's view could not be
   added).

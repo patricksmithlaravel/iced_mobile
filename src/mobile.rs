@@ -408,7 +408,8 @@
 //!   there before. Backspace and the arrow keys still reach that text. It
 //!   starts over when the field gets the focus; at a touch that starts, a
 //!   hardware key other than a modifier, or the window losing the focus;
-//!   after its own Enter, Tab, Escape, arrow, Home or End keys (moving the
+//!   after its own Enter, Tab, Escape, arrow (but for one that only ends a
+//!   selection the keyboard made, below), Home or End keys (moving the
 //!   cursor with the space bar sends arrows) and its Select all; after a
 //!   caret move from code or a change between a password field and another
 //!   field; once its text passes 4096 UTF-16 units; when what it typed
