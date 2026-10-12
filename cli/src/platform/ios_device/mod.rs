@@ -818,8 +818,12 @@ fn wait_ready(
 /// came). It is the one listed process whose executable is `<install>/<bin>`,
 /// the path `stop` compares before it terminates the pid
 /// ([`app_process`]), so the pid is one `stop` can confirm. None when the
-/// listing cannot be had, names no such process, or names more than one: the
-/// record then names no pid, and `stop` keeps it.
+/// listing cannot be had (`devicectl::running_processes` fails it for a
+/// process whose pid is not an integer and that may be the app, and for an
+/// unreadable answer), names no such process, or names more than one: the
+/// record then names no pid and no terminate command, and `stop` removes it
+/// without asking the device, as DESIGN.md's ios-device session says. A
+/// process of another program with a non-integer pid does not fail it.
 fn listed_app_pid(
     ctx: &Ctx,
     xcode: &Xcode,
@@ -835,7 +839,7 @@ fn listed_app_pid(
         "processes",
     )
     .ok()?;
-    let mut pids = devicectl::running_processes(&text)
+    let mut pids = devicectl::running_processes(&text, Some(install), binary)
         .ok()?
         .into_iter()
         .filter(|process| {
@@ -1018,7 +1022,7 @@ pub fn app_process(ctx: &Ctx, session: &Session) -> AppProcess {
         Ok(text) => text,
         Err(error) => return unconfirmed(error.detail),
     };
-    match devicectl::running_processes(&text) {
+    match devicectl::running_processes(&text, install, executable) {
         Ok(listing) => judge_app_process(&listing, install, executable, pid),
         Err(why) => unconfirmed(why),
     }

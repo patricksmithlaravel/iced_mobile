@@ -87,14 +87,18 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - `icm stop ios-device` no longer reads the recorded pid as unlisted when a process in the device's
   listing gives its `processIdentifier` as something other than an integer (a string or a float).
   That entry was dropped, so `stop` said the app was not running, terminated nothing and removed the
-  record while the app ran. The listing now fails as unconfirmed, as an unreadable one does: the
-  record stays, the WARN names the `processIdentifier`, and the next stop asks again
+  record while the app ran. The listing now fails as unconfirmed, as an unreadable one does, when
+  that process may be the app (no executable, an unreadable one, or the app's own): the record stays,
+  the WARN names the `processIdentifier`, and the next stop asks again
   (`tests/ios_device.rs`: `stop_keeps_the_record_when_a_listed_pid_is_not_an_integer`;
-  `devicectl::running_processes`). Not seen on a phone: devicectl writes integer pids. The same
-  listing gives a run the pid of an app that reported no `start` event (`listed_app_pid`), so a run
-  whose listing holds such a process records no pid, as it does for an unreadable listing, and `stop`
-  then removes that record without asking the device. Before, the entry was skipped and the app's pid
-  was recorded. That case is not fixed here.
+  `devicectl::running_processes`). A process whose executable is another program is left out, as
+  before, and `stop` asks the device about the recorded pid
+  (`stop_terminates_the_app_past_an_unrelated_process_without_an_integer_pid`). Not seen on a phone:
+  devicectl writes integer pids. The same listing gives a run the pid of an app that reported no
+  `start` event (`listed_app_pid`). A listing that holds such a process which may be the app records
+  no pid, as an unreadable listing does, and `stop` then removes that record without asking the
+  device; that case is not fixed here. Another program's entry does not stop the run from recording
+  the app's pid (`a_run_records_the_apps_pid_past_an_unrelated_process_without_an_integer_pid`).
 - `icm logs desktop` of a running app whose environment could not be read back in full no longer
   prints the secrets it inherited. A read of the process that returned its arguments and no
   variables (macOS does for a platform binary), or another environment than the app's (the app

@@ -380,9 +380,7 @@ impl Listed {
     /// executable, an empty or blank one, or one that does not decode. Such
     /// an entry says nothing about what the process is.
     pub fn usable_program(&self) -> Option<String> {
-        let path = self.executable.as_deref()?;
-        let path = decode_once(path.strip_prefix("file://").unwrap_or(path))?;
-        (!path.trim().is_empty()).then_some(path)
+        usable_path(self.executable.as_deref())
     }
 
     /// Why [`Listed::usable_program`] names no path, for a message. An
@@ -407,10 +405,22 @@ impl Listed {
 /// devicectl writes JSON too (`info.outcome` `failed`, an `error`), so
 /// that, or any text without `result.runningProcesses`, is an error, never
 /// an empty device: a listing that could not be had says nothing about
-/// what runs. So is a process whose `processIdentifier` is not an integer
-/// (or is missing): it cannot be told from a recorded pid, and leaving it
-/// out would read that pid as unlisted.
-pub fn running_processes(text: &str) -> Result<Vec<Listed>, String> {
+/// what runs.
+///
+/// A process whose `processIdentifier` is not an integer (or is missing)
+/// cannot be told from a recorded pid, and leaving it out would read that
+/// pid as unlisted, so it fails the listing. It is left out only when it is
+/// known not to be the app installed at `install` (`binary` inside it): its
+/// executable is a path icm can read and that is another program
+/// ([`is_other_program`]). Such a process cannot hide the app's pid, whatever
+/// its own pid is, so an unrelated one does not fail the listing. `install`
+/// is `None` when the record names no install, and then nothing is known to
+/// be another program.
+pub fn running_processes(
+    text: &str,
+    install: Option<&str>,
+    binary: &str,
+) -> Result<Vec<Listed>, String> {
     let json: Value = serde_json::from_str(text)
         .map_err(|error| format!("devicectl's process list is not JSON: {error}"))?;
     if let Some(outcome) = json.pointer("/info/outcome").and_then(Value::as_str)
@@ -426,30 +436,50 @@ pub fn running_processes(text: &str) -> Result<Vec<Listed>, String> {
         .pointer("/result/runningProcesses")
         .and_then(Value::as_array)
         .ok_or("devicectl's process list has no result.runningProcesses")?;
-    processes
-        .iter()
-        .map(|process| -> Result<Listed, String> {
-            let pid = process
-                .get("processIdentifier")
-                .and_then(Value::as_i64)
-                .ok_or_else(|| match process.get("processIdentifier") {
-                    Some(value) => format!(
-                        "devicectl's process list has a process whose processIdentifier ({value}) is not an integer"
-                    ),
-                    None => {
-                        "devicectl's process list has a process with no processIdentifier"
-                            .to_string()
-                    }
-                })?;
-            Ok(Listed {
-                pid,
-                executable: process
-                    .get("executable")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            })
-        })
-        .collect()
+    let mut listed = Vec::with_capacity(processes.len());
+    for process in processes {
+        let executable = process
+            .get("executable")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let Some(pid) = process.get("processIdentifier").and_then(Value::as_i64) else {
+            if is_other_program(executable.as_deref(), install, binary) {
+                continue;
+            }
+            return Err(match process.get("processIdentifier") {
+                Some(value) => format!(
+                    "devicectl's process list has a process whose processIdentifier ({value}) is not an integer"
+                ),
+                None => {
+                    "devicectl's process list has a process with no processIdentifier".to_string()
+                }
+            });
+        };
+        listed.push(Listed { pid, executable });
+    }
+    Ok(listed)
+}
+
+/// Whether a process without an integer pid is known not to be the app
+/// installed at `install`: its executable is a path icm can read
+/// ([`Listed::usable_program`]) and [`match_installed_executable`] calls it
+/// [`Match::Different`]. A missing, blank, unreadable or other-scheme
+/// executable is not known to be another program, and neither is any process
+/// when there is no install.
+fn is_other_program(executable: Option<&str>, install: Option<&str>, binary: &str) -> bool {
+    let (Some(path), Some(dir)) = (executable, install) else {
+        return false;
+    };
+    usable_path(Some(path)).is_some()
+        && match_installed_executable(path, dir, binary) == Match::Different
+}
+
+/// The decoded path of a listed executable icm can read: a `file://` URL's
+/// or a plain path, not blank once decoded. See [`Listed::usable_program`].
+fn usable_path(executable: Option<&str>) -> Option<String> {
+    let path = executable?;
+    let path = decode_once(path.strip_prefix("file://").unwrap_or(path))?;
+    (!path.trim().is_empty()).then_some(path)
 }
 
 /// A physical device entry as devicectl 642 writes it (icm's tests and
@@ -517,7 +547,7 @@ mod tests {
             {"processIdentifier": 1}
         ]}})
         .to_string();
-        let listed = running_processes(&text).unwrap();
+        let listed = running_processes(&text, None, "app").unwrap();
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].pid, 812);
         assert_eq!(
@@ -528,7 +558,7 @@ mod tests {
         assert_eq!(listed[1].program(), "?");
         // A device that runs nothing answers with an empty list.
         assert!(
-            running_processes(r#"{"result":{"runningProcesses":[]}}"#)
+            running_processes(r#"{"result":{"runningProcesses":[]}}"#, None, "app")
                 .unwrap()
                 .is_empty()
         );
@@ -536,20 +566,22 @@ mod tests {
         let failed = json!({"info": {"outcome": "failed"},
             "error": {"localizedDescription": "The device is not connected."}})
         .to_string();
-        let error = running_processes(&failed).unwrap_err();
+        let error = running_processes(&failed, None, "app").unwrap_err();
         assert!(error.contains("not connected"), "{error}");
-        assert!(running_processes(r#"{"result":{}}"#).is_err());
-        assert!(running_processes("").is_err());
-        assert!(running_processes("not json").is_err());
+        assert!(running_processes(r#"{"result":{}}"#, None, "app").is_err());
+        assert!(running_processes("", None, "app").is_err());
+        assert!(running_processes("not json", None, "app").is_err());
     }
 
     /// A listed process whose `processIdentifier` is not an integer (a string,
     /// a float, or none at all) cannot be matched with a recorded pid. Dropping
     /// it made the recorded pid read as unlisted, so `stop` took the app for
-    /// not running and removed the record while it ran. The whole listing is
-    /// an error instead, which `stop` reports as unconfirmed.
+    /// not running and removed the record while it ran. When that process is
+    /// the installed app, or may be it, the whole listing is an error instead,
+    /// which `stop` reports as unconfirmed.
     #[test]
     fn a_listed_process_without_an_integer_pid_fails_the_listing() {
+        let install = "file:///private/var/containers/Bundle/Application/X/App.app/";
         let app = "file:///private/var/containers/Bundle/Application/X/App.app/app";
         for entry in [
             json!({"executable": app, "processIdentifier": "4242"}),
@@ -561,9 +593,66 @@ mod tests {
                 entry
             ]}})
             .to_string();
-            let error = running_processes(&text).unwrap_err();
+            let error = running_processes(&text, Some(install), "app").unwrap_err();
             assert!(error.contains("processIdentifier"), "{text}: {error}");
         }
+    }
+
+    /// A process without an integer pid is left out when its executable is a
+    /// usable path of another program, whatever its pid: another bundle, another
+    /// container's copy of the app, another binary, or a plain path. The
+    /// installed app's own integer pid stays listed.
+    #[test]
+    fn an_unrelated_process_without_an_integer_pid_leaves_the_listing_whole() {
+        let install = "file:///private/var/containers/Bundle/Application/X/App.app/";
+        let app = "file:///private/var/containers/Bundle/Application/X/App.app/app";
+        let text = json!({"info": {"outcome": "success"}, "result": {"runningProcesses": [
+            {"executable": "file:///usr/libexec/backboardd", "processIdentifier": "50"},
+            {"executable": "file:///private/var/containers/Bundle/Application/Y/App.app/app", "processIdentifier": "51"},
+            {"executable": "file:///private/var/containers/Bundle/Application/X/My%20App.app/app", "processIdentifier": "52"},
+            {"executable": "file:///private/var/containers/Bundle/Application/X/App.app/other", "processIdentifier": 4.0},
+            {"executable": "/usr/libexec/lockdownd", "processIdentifier": "53"},
+            {"executable": "file:///usr/libexec/backboardd"},
+            {"executable": app, "processIdentifier": 812}
+        ]}})
+        .to_string();
+        let listed = running_processes(&text, Some(install), "app").unwrap();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].pid, 812);
+        assert_eq!(listed[0].executable.as_deref(), Some(app));
+    }
+
+    /// A process without an integer pid may be the app, so it fails the
+    /// listing, unless its executable is known to be another program: one with
+    /// no executable, an empty or blank one, an unreadable or other-scheme one,
+    /// or the installed app's own path. With no install, nothing is known to be
+    /// another program.
+    #[test]
+    fn a_process_without_an_integer_pid_that_may_be_the_app_fails_the_listing() {
+        let install = "file:///private/var/containers/Bundle/Application/X/App.app/";
+        let app = "file:///private/var/containers/Bundle/Application/X/App.app/app";
+        for entry in [
+            json!({"processIdentifier": "5"}),
+            json!({"executable": "", "processIdentifier": "5"}),
+            json!({"executable": " \t ", "processIdentifier": "5"}),
+            json!({"executable": "file:///var/%ZZ/app", "processIdentifier": "5"}),
+            json!({"executable": "https://example.com/x/app", "processIdentifier": "5"}),
+            json!({"executable": app, "processIdentifier": "5"}),
+        ] {
+            let text = json!({"info": {"outcome": "success"}, "result": {"runningProcesses": [
+                {"executable": "file:///usr/libexec/backboardd", "processIdentifier": 50},
+                entry
+            ]}})
+            .to_string();
+            let error = running_processes(&text, Some(install), "app").unwrap_err();
+            assert!(error.contains("processIdentifier"), "{text}: {error}");
+        }
+        let text = json!({"result": {"runningProcesses": [
+            {"executable": "file:///usr/libexec/backboardd", "processIdentifier": "50"}
+        ]}})
+        .to_string();
+        let error = running_processes(&text, None, "app").unwrap_err();
+        assert!(error.contains("processIdentifier"), "{error}");
     }
 
     /// An executable icm can read is a path that is not blank once decoded.

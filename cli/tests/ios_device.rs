@@ -1247,6 +1247,33 @@ fn stop_keeps_the_record_when_a_listed_pid_is_not_an_integer() {
     }
 }
 
+/// A listing may hold another process whose `processIdentifier` is a string.
+/// It is not the app, so it does not stop the device from answering: `stop`
+/// asks the device and terminates the recorded pid, as it does without that
+/// entry. Before, the whole listing failed, so `stop` kept the record and
+/// warned, though the app was listed under its integer pid.
+#[test]
+fn stop_terminates_the_app_past_an_unrelated_process_without_an_integer_pid() {
+    let device = Device::new();
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(device.session()["app_pid"], 4242, "{}", device.session());
+    device.list_processes(&[
+        json!({"executable": "file:///usr/libexec/backboardd", "processIdentifier": "50"}),
+        process(4242, APP_EXECUTABLE),
+    ]);
+
+    let before = device.devicectl_calls().len();
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    let calls = device.devicectl_calls()[before..].to_vec();
+    assert_asked_then_terminated(&calls, 4242, "the app past an unrelated process");
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
+    assert!(!device.session_path().exists());
+}
+
 /// A device that answers with text that is no process list is not an empty
 /// device: devicectl writes its failures as JSON too.
 #[test]
@@ -1382,6 +1409,52 @@ fn a_probe_ready_copy_in_another_container_is_not_recorded_as_the_app() {
         device.log("xcrun.log")
     );
     assert!(!device.terminated(), "{}", device.log("xcrun.log"));
+}
+
+/// An app that reports no `start` event is recorded with the one pid the
+/// device lists for the installed app. The listing also holds another process
+/// whose `processIdentifier` is a string: it is another program, so it cannot
+/// be the app. Before, that entry failed the whole listing, so the run recorded
+/// no pid and no terminate command, and `stop` removed the record without
+/// asking the device or warning, while the app ran on the phone.
+#[test]
+fn a_run_records_the_apps_pid_past_an_unrelated_process_without_an_integer_pid() {
+    let mut device = Device::new();
+    device.set("ICM_FAKE_SCENARIO", "silent");
+    device.list_processes(&[
+        json!({"executable": "file:///usr/libexec/backboardd", "processIdentifier": "50"}),
+        process(4242, APP_EXECUTABLE),
+    ]);
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(run["process"]["ready"]["source"], "probe", "{run}");
+    let session = device.session();
+    assert_eq!(session["app_pid"], 4242, "{session}");
+    assert_eq!(
+        session["stop"],
+        json!([[
+            "xcrun",
+            "devicectl",
+            "device",
+            "process",
+            "terminate",
+            "--device",
+            UDID,
+            "--pid",
+            "4242"
+        ]]),
+        "{session}"
+    );
+
+    let before = device.devicectl_calls().len();
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    let calls = device.devicectl_calls()[before..].to_vec();
+    assert_asked_then_terminated(&calls, 4242, "the app past an unrelated process");
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
+    assert!(!device.session_path().exists());
 }
 
 #[test]
