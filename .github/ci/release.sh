@@ -103,7 +103,9 @@ smoke_macos() {
     *) fail "$exe has no $(uname -m) slice ($archs)" ;;
     esac
     want=$(toml_key desktop.macos min_os)
-    minos=$(vtool -show-build "$exe" | awk '$1 == "minos" { print $2; exit }')
+    # The LC_BUILD_VERSION's minos, read as phase5.sh reads it (its otool
+    # step has passed on a runner). vtool was used nowhere else here.
+    minos=$(otool -l "$exe" | awk '/cmd LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }')
     echo "minos: $minos ([desktop.macos] min_os = $want)"
     [ "$minos" = "$want" ] || fail "minos $minos is not [desktop.macos] min_os $want"
 
@@ -181,7 +183,15 @@ smoke_linux() {
     wait_ready "$results/app.stderr" "$pid" 60 || rc=1
     kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
     kill "$xvfb" 2>/dev/null || true
-    wait 2>/dev/null || true
+    # A process that ignores TERM would hold the waits below until the job's
+    # timeout, so KILL the group and Xvfb after a grace period. Neither pid
+    # has been reaped yet (wait_ready only polls it), so the group id cannot
+    # have been reused in the meantime. Then wait for exactly these two pids.
+    sleep 2
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    kill -KILL "$xvfb" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    wait "$xvfb" 2>/dev/null || true
     [ "$rc" = 0 ] || fail "the AppImage did not reach its first frame"
 }
 
