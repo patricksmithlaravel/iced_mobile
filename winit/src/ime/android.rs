@@ -28,12 +28,16 @@
 //!   composition (see `feed`): a composition the engine shows when the
 //!   field becomes one (the application made it secure while the keyboard
 //!   composed) is committed as typed text, with no new generation, and so
-//!   is one held back from the field since an Enter, Tab or Escape or an
-//!   operation moved the focus (an `on_submit` that focuses the password
-//!   field), which a field that is no password field gets as its preedit
-//!   now. The window then redraws, and the next drain, operation or
+//!   is one held back from the field since a focus moved (an `on_submit`
+//!   that focuses the password field), which a field that is no password
+//!   field gets as its preedit once a tap or a focus move has decided the
+//!   field. The window then redraws, and the next drain, operation or
 //!   interrupt gives the field these edits before anything else. The
-//!   window draws no preedit over a password field.
+//!   window draws no preedit over a password field. After an Enter, Tab or
+//!   Escape, from the keyboard or from hardware, a redraw decides only once
+//!   a focus move from code or a tap on the field has come after the key:
+//!   the application may still move the focus in a subscription (see
+//!   `feed`), so the composition otherwise waits for a tap or a focus move.
 //! - [`disable`] runs when no field asks any more. The field has lost the
 //!   focus, so what the keyboard typed and composes there is dropped, as
 //!   desktop input methods drop a composition then: the queue is emptied,
@@ -84,7 +88,8 @@
 //!   returns run (a focus moved to the next field), before the event loop
 //!   replays [`Shell::resume`] and an `AboutToWait` for the rest, which then
 //!   reaches the field the application left the focus in, with no preedit
-//!   until the next redraw tells the shell that field's purpose. The Java side
+//!   until a tap or a focus move lets a redraw tell the shell that field's
+//!   purpose. The Java side
 //!   rebases its mirror right after such a key, as after an arrow, Home or
 //!   End, with no new generation, so none of that text is dropped. When a
 //!   message asks to forget the text (the session's text starts with a
@@ -344,7 +349,8 @@ pub(crate) fn operated<P, C>(
         } else if moved.caret || !moved.held.is_empty() {
             // It stops after an Enter, Tab or Escape: the key left the
             // engine idle, so the rest acts at the caret wherever it is.
-            let (edits, _waits) = SESSION.with_borrow_mut(Session::finish);
+            let (edits, _waits) =
+                SESSION.with_borrow_mut(|session| session.finish(false));
 
             let _ = deliver(edits, windows, events);
         }
@@ -460,6 +466,18 @@ impl Shell {
             _ => return false,
         }
 
+        // A hardware Enter, Tab or Escape: the application may move the
+        // focus after it, as after the keyboard's key (see `feed`).
+        let yields = matches!(
+            event,
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if event.state == ElementState::Pressed
+                && super::yields_turn(&event.logical_key)
+        );
+
         // Handled again: done, unless the application took its turn after a
         // key, and the rest comes before the event.
         let (edits, waits) = if std::mem::take(&mut self.replaying)
@@ -467,7 +485,7 @@ impl Shell {
         {
             (Vec::new(), false)
         } else {
-            SESSION.with_borrow_mut(Session::finish)
+            SESSION.with_borrow_mut(|session| session.finish(yields))
         };
 
         closed(windows, events);
@@ -515,9 +533,9 @@ impl Shell {
 
     /// The application's turn after an Enter, Tab or Escape key ended: the
     /// next drain applies what the keyboard sent after it, which reaches the
-    /// field the application left the focus in with no preedit until a
-    /// redraw tells the shell that field's purpose. The window redraws for
-    /// that, also when the key changed nothing.
+    /// field the application left the focus in with no preedit until a tap
+    /// or a focus move lets a redraw tell the shell that field's purpose.
+    /// The window redraws for that, also when the key changed nothing.
     pub(crate) fn resume(&mut self) {
         SESSION.with_borrow_mut(|session| session.feed.resume());
 
@@ -649,8 +667,9 @@ impl Session {
     /// commits a composition at the field's caret, and has the Java side
     /// forget its text ([`Feed::finish`]). Returns the edits for the field,
     /// and whether the application is to take its turn after an Enter, Tab
-    /// or Escape key first, after which this applies the rest.
-    fn finish(&mut self) -> (Vec<Edit>, bool) {
+    /// or Escape key first, after which this applies the rest. `yields` says
+    /// the event is a hardware Enter, Tab or Escape (see [`Feed::finish`]).
+    fn finish(&mut self, yields: bool) -> (Vec<Edit>, bool) {
         let mut edits = Vec::new();
 
         if !self.is_installed() {
@@ -658,7 +677,9 @@ impl Session {
         }
 
         let mut calls = Vec::new();
-        let waits = self.feed.finish(&mut Shared, &mut edits, &mut calls);
+        let waits =
+            self.feed
+                .finish(&mut Shared, &mut edits, &mut calls, yields);
         self.perform(calls);
 
         (edits, waits)
