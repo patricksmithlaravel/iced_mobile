@@ -447,6 +447,10 @@
 //!   `update` returns for them before the text the keyboard typed after
 //!   them reaches a field: a field cleared on submit gets that text alone,
 //!   and the field `on_submit` moves the focus to (`focus_next`) gets it.
+//!   When that field is a password field, the keyboard is set up for it
+//!   only from the next redraw: it typed that text as the last field's
+//!   keyboard, which may suggest and learn words, and what it composed of
+//!   it reaches the password field as typed text, never drawn in clear.
 //!   A key the application handles later, from a subscription
 //!   (`keyboard::listen`, which is how it takes Tab: `text_input` ignores
 //!   it) or a task, comes after that text, which then goes to the field
@@ -585,25 +589,30 @@
 //! marked text).
 //!
 //! A secure `text_input` (`.secure(true)`) is marked secure to the Android
-//! keyboard with the input connection, which then shows its password
-//! layout without suggestions and is asked not to learn what is typed (an
-//! input type of `TYPE_TEXT_VARIATION_PASSWORD` and
+//! keyboard with the input connection, which then shows its password layout
+//! without suggestions and is asked not to learn what is typed (an input
+//! type of `TYPE_TEXT_VARIATION_PASSWORD` and
 //! `IME_FLAG_NO_PERSONALIZED_LEARNING`). What a keyboard composes there
-//! reaches the field as typed text, so it is never drawn in clear. On iOS
-//! the view answers `isSecureTextEntry` for it: on the iOS 27.0 Simulator
-//! the keyboard then has no emoji or dictation key, and it switches to and
-//! from that keyboard as the focus moves between the secure field and
-//! another (a physical iPhone has not been tried). When the focus moves
-//! straight from a secure field to another field, with the keyboard up,
-//! that field's keyboard can label its numbers key ".?123" instead of
+//! reaches the field as typed text, so it is never drawn in clear, and so
+//! does a composition that reaches a secure field from another purpose (the
+//! field an Enter or Tab moved the focus from, the field the application
+//! focused from code, or a field it makes secure while the keyboard
+//! composes): the shell commits it as typed text at the redraw that tells
+//! it the field's purpose, and a field the focus moves to gets no preedit
+//! until then. On Android and iOS the window never draws a secure field's
+//! preedit. On iOS the view answers `isSecureTextEntry` for it: on the iOS
+//! 27.0 Simulator the keyboard then has no emoji or dictation key, and it
+//! switches to and from that keyboard as the focus moves between the secure
+//! field and another (a physical iPhone has not been tried). When the focus
+//! moves straight from a secure field to another field, with the keyboard
+//! up, that field's keyboard can label its numbers key ".?123" instead of
 //! "123" until its numbers are shown once or it is hidden and shown again;
 //! it types as usual. A keyboard shown while none was up is set up for its
-//! field at once, without that label. The iOS keyboard shows no
-//! suggestions in any field anyway. On both, when a `text_editor` focused
-//! from code also takes the keyboard ([Known
-//! limitations](#known-limitations)), the keyboard is still set up for the
-//! secure field: iced asks for a secure keyboard when any field that wants
-//! it is secure.
+//! field at once, without that label. The iOS keyboard shows no suggestions
+//! in any field anyway. On both, when a `text_editor` focused from code
+//! also takes the keyboard ([Known limitations](#known-limitations)), the
+//! keyboard is still set up for the secure field: iced asks for a secure
+//! keyboard when any field that wants it is secure.
 //!
 //! # Events for launchers
 //!
