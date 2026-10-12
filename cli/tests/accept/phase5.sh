@@ -247,36 +247,9 @@ other_hosts() {
 
 # --- macOS ----------------------------------------------------------------
 
-# keychain_paths: the paths of a `security list-keychains` listing on
-# stdin, one per line, without their quotes.
-keychain_paths() {
-    sed -n 's/^[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p'
-}
-
-# join_search_list KEYCHAIN: with ICM_ACCEPT_KEYCHAIN_SEARCH=1 only (a
-# throwaway machine), KEYCHAIN joins the end of the user's search list, as
-# codesign needs (see the header); otherwise nothing changes.
-join_search_list() {
-    [ "${ICM_ACCEPT_KEYCHAIN_SEARCH:-}" = 1 ] || return 0
-    local list=() path
-    while IFS= read -r path; do
-        list+=("$path")
-    done < <(printf '%s\n' "$SEARCH_LIST_BEFORE" | keychain_paths)
-    security list-keychains -d user -s ${list[@]+"${list[@]}"} "$1"
-    evidence "ICM_ACCEPT_KEYCHAIN_SEARCH=1: $(basename "$1") joined the search list for this release"
-}
-
-# restore_search_list: with ICM_ACCEPT_KEYCHAIN_SEARCH=1 only, the user's
-# search list as it was before the run, when it differs.
-restore_search_list() {
-    [ "${ICM_ACCEPT_KEYCHAIN_SEARCH:-}" = 1 ] || return 0
-    [ "$(security list-keychains -d user)" != "$SEARCH_LIST_BEFORE" ] || return 0
-    local list=() path
-    while IFS= read -r path; do
-        list+=("$path")
-    done < <(printf '%s\n' "$SEARCH_LIST_BEFORE" | keychain_paths)
-    security list-keychains -d user -s ${list[@]+"${list[@]}"}
-}
+# join_search_list and restore_search_list (lib.sh) let the test keychain
+# join the search list for the signed release with
+# ICM_ACCEPT_KEYCHAIN_SEARCH=1 only (see the header).
 
 keychains() {
     mkdir -p "$ACCEPT/keys"

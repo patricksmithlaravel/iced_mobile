@@ -389,3 +389,69 @@ fn no_pipe_ends_in_a_reader_that_leaves_early() {
         found.join("\n")
     );
 }
+
+/// phase2.sh and phase5.sh sign with a throwaway keychain that stays off
+/// the user's keychain search list. Only with ICM_ACCEPT_KEYCHAIN_SEARCH=1
+/// (a CI runner, whose codesign finds no identity outside the list) does
+/// `join_search_list` add it, at the end, and `restore_search_list` puts
+/// back the list from before the run, a path with a space and an empty list
+/// included. A stand-in `security` keeps the list in a file, so the real
+/// one is never read or changed.
+#[test]
+fn the_test_keychain_joins_the_search_list_only_when_asked() {
+    let host = Host::new("");
+    let list = host.root.path().join("search-list");
+    let calls = host.root.path().join("security-calls");
+    executable(
+        &host.root.path().join("bin/security"),
+        &format!(
+            "#!/bin/sh\n[ \"$1 $2 $3\" = 'list-keychains -d user' ] || exit 1\nshift 3\nif [ \"${{1:-}}\" = -s ]; then\n  shift\n  echo \"set $#\" >> '{calls}'\n  : > '{list}'\n  for keychain in \"$@\"; do printf '    \"%s\"\\n' \"$keychain\" >> '{list}'; done\nelse\n  cat '{list}'\nfi\n",
+            calls = calls.display(),
+            list = list.display()
+        ),
+    );
+    let before = "    \"/Users/runner/Library/Keychains/login.keychain-db\"\n    \"/Library/Keychains/With Space.keychain\"\n";
+    let script = |asked: bool| {
+        format!(
+            "{}\nSEARCH_LIST_BEFORE=$(security list-keychains -d user)\njoin_search_list '/tmp/accept/keys/test.keychain-db'\necho '--- joined'\nsecurity list-keychains -d user\nrestore_search_list\necho '--- restored'\nsecurity list-keychains -d user\n",
+            if asked {
+                "ICM_ACCEPT_KEYCHAIN_SEARCH=1"
+            } else {
+                "unset ICM_ACCEPT_KEYCHAIN_SEARCH"
+            }
+        )
+    };
+    let calls_made = || std::fs::read_to_string(&calls).unwrap_or_default();
+
+    // Not asked: the list is never set.
+    std::fs::write(&list, before).unwrap();
+    let output = host.bash(&script(false));
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("--- joined\n{before}--- restored\n{before}")
+    );
+    assert_eq!(calls_made(), "");
+
+    // Asked: the keychain joins the end, and the list comes back as it was.
+    let output = host.bash(&script(true));
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "evidence: ICM_ACCEPT_KEYCHAIN_SEARCH=1: test.keychain-db joined the search list for this release\n--- joined\n{before}    \"/tmp/accept/keys/test.keychain-db\"\n--- restored\n{before}"
+        )
+    );
+    assert_eq!(calls_made(), "set 3\nset 2\n");
+
+    // An empty list: only the keychain, then empty again.
+    std::fs::write(&list, "").unwrap();
+    std::fs::remove_file(&calls).unwrap();
+    let output = host.bash(&script(true));
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "evidence: ICM_ACCEPT_KEYCHAIN_SEARCH=1: test.keychain-db joined the search list for this release\n--- joined\n    \"/tmp/accept/keys/test.keychain-db\"\n--- restored\n"
+    );
+    assert_eq!(calls_made(), "set 1\nset 0\n");
+}

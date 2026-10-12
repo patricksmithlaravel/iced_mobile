@@ -138,7 +138,9 @@ stop only the platforms they drive and leave the other platforms' devices alone
     `ICM_KEYCHAIN` names a keychain file that does not exist and `ICM_PROVISIONING_PROFILES` an
     empty directory in `$ACCEPT`. The test identity lives in a temporary keychain made by
     `test-identity.sh`, which never joins the search list (a step checks it) and is deleted at the
-    end; the profile is a CMS envelope signed by a throwaway key.
+    end; the profile is a CMS envelope signed by a throwaway key. As in phase5.sh, only a throwaway
+    machine's `ICM_ACCEPT_KEYCHAIN_SEARCH=1` (the CI job sets it) lets that keychain join the list
+    for the signed release (`join_search_list` in `lib.sh`); the list is put back and checked.
   - It creates the managed `icm-iphone-<n>-pro-max-ios-<version>` simulator when it is missing and
     shuts it down. The owner's signed release, upload and a physical iPhone are SKIP
     (`ICM_ACCEPT_DEVICE=1` runs on a connected, provisioned iPhone).
