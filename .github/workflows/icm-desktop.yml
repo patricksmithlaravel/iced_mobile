@@ -110,6 +110,18 @@ jobs:
           grep -A1 '^\[desktop.linux\]$' icm.toml
           icm doctor desktop --fix --yes --json -q || true
           icm check desktop --json -q | jq -e '.ok'
+      # As .github/ci/release.sh does: the app and its Cargo.lock are
+      # committed, so the release names a clean tree (without a commit,
+      # release.dirty_tree is only a WARN, and this job would release a
+      # different precondition from icm.yml's Linux job).
+      - name: Commit the app and its Cargo.lock
+        working-directory: /tmp/demo
+        run: |
+          git add -A
+          git -c user.name="icm CI" -c user.email="ci@icm.invalid" -c commit.gpgsign=false \
+            commit --no-verify -q -m "A new app from the template, with its Cargo.lock"
+          git ls-files --error-unmatch Cargo.lock >/dev/null
+          git log --oneline -1
       - name: Release (unsigned; downloads the pinned appimagetool with --yes)
         working-directory: /tmp/demo
         run: |
