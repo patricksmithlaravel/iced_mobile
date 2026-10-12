@@ -12,7 +12,8 @@
 //! reason a fix repairs (its toolchain was not installed, so `cargo
 //! metadata` failed) is resolved again after each round, and the checks
 //! that need it (the lock and its wasm-bindgen, the AVD's API level) join
-//! the next probe.
+//! the next probe. A missing toolchain is reported once, by the
+//! `rust.toolchain` requirement with its fix.
 //!
 //! The exit code (§4.4): 4 while anything `icm doctor --fix [--yes]` could
 //! fix remains, else 9 while owner items remain, else the exit of any other
@@ -140,7 +141,8 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
             // A project that failed for a reason a fix repairs (`cargo
             // metadata` with the project's toolchain not installed) is
             // resolved again: until it resolves, the checks that need it
-            // are skipped, and its failure would outlive the fix.
+            // (its ABIs, target_sdk and lock) are skipped, and its failure
+            // would outlive the fix.
             if project.is_none()
                 && config_problem
                     .as_ref()
@@ -159,10 +161,18 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
         }
     }
 
-    // Report.
+    // Report. The `rust.toolchain` requirement reports a missing toolchain
+    // with its fix, so the project's failure to resolve because of it is
+    // not reported a second time.
     if let Some(problem) = &config_problem {
-        ctx.rep
-            .check(Check::from_error(problem.clone(), Status::Fail));
+        let reported = toolchain_missing(Some(problem))
+            && requirements
+                .iter()
+                .any(|r| r.key == "rust.toolchain" && r.failing());
+        if !reported {
+            ctx.rep
+                .check(Check::from_error(problem.clone(), Status::Fail));
+        }
     }
     let mut remaining: Vec<IcmError> = Vec::new();
     for requirement in &requirements {
@@ -180,10 +190,10 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
         }
         if !args.fix && !requirement.fixes.is_empty() && requirement.failing() {
             check.error.likely_causes.push(format!(
-                "`icm doctor {} --fix{}` repairs it",
+                "`icm doctor {}--fix{}` repairs it",
                 requirement
                     .platform
-                    .map(Platform::as_str)
+                    .map(|p| format!("{} ", p.as_str()))
                     .unwrap_or_default(),
                 if requirement.by() == By::DoctorYes {
                     " --yes"
@@ -293,6 +303,11 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+/// Whether the project did not resolve because its toolchain is missing.
+fn toolchain_missing(problem: Option<&IcmError>) -> bool {
+    problem.is_some_and(|error| error.id == CheckId::EnvRustToolchainMissing.id())
 }
 
 /// The fixes to run this round: those of failing requirements, allowed by

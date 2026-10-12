@@ -247,8 +247,10 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   it names, `deps.skew` and the AVD's API level. Before, the app's first failure (`cargo metadata`
   could not run without the toolchain) stayed the result after the fix: exit 4
   (`env.rust_toolchain_missing`) under the summary `ready`, with no lock and no wasm-bindgen CLI, so
-  `icm release web` could not run until a second `doctor`. Seen on the first run of the web
-  workflow on GitHub's Linux runner.
+  `icm release web` could not run until a second `doctor`. Seen on the first runs of the web and
+  Android workflows on GitHub's Linux runner. Without `--fix`, the missing toolchain is now reported
+  once, by the `rust.toolchain` check with its fix, and the hint of a check without a platform no
+  longer reads `icm doctor  --fix` with two spaces.
 
 ## Changes in v0.14.1-mobile.2
 
