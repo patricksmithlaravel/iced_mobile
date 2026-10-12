@@ -300,10 +300,12 @@ Text input on Android, and secure fields on Android and iOS:
   keyboards that have a Ctrl key), Page Up and Down, function keys and Insert are dropped, and its
   keys come without modifiers, its own Shift or one held on a hardware keyboard: its arrows, Home
   and End move the caret without selecting, and a Ctrl held on a hardware keyboard does not make
-  its deletions delete words. A hardware keyboard's keys reach the app as key events, as before,
-  unless the input method takes them: while a field asks for the keyboard, one that composes a
-  hardware keyboard's letters (CJK input methods) types them into the field as commits and
-  preedits, not `KeyPressed` events.
+  its deletions delete words. An arrow while the keyboard has selected some of the text it typed
+  (its Select word) ends that selection at its start (Left, Up) or its end (Right, Down) instead,
+  as the field's own arrows end a selection. A hardware keyboard's keys reach the app as key
+  events, as before, unless the input method takes them: while a field asks for the keyboard, one
+  that composes a hardware keyboard's letters (CJK input methods) types them into the field as
+  commits and preedits, not `KeyPressed` events.
 - **Android:** `text::editor::Motion` has two new variants there, `Previous` and `Next`: one
   grapheme cluster back and on in the order of the text, or across a line break, whatever the
   direction of the line, where `Left` and `Right` move on screen. An exhaustive `match` on `Motion`

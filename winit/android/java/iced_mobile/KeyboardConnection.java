@@ -308,14 +308,18 @@ final class KeyboardConnection extends BaseInputConnection {
                         view.forward(keyCode);
                     }
                     break;
-                case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                case KeyEvent.KEYCODE_TAB:
-                case KeyEvent.KEYCODE_ESCAPE:
                 case KeyEvent.KEYCODE_DPAD_UP:
                 case KeyEvent.KEYCODE_DPAD_DOWN:
                 case KeyEvent.KEYCODE_DPAD_LEFT:
                 case KeyEvent.KEYCODE_DPAD_RIGHT:
+                    if (!collapse(keyCode)) {
+                        view.forward(keyCode);
+                    }
+                    break;
+                case KeyEvent.KEYCODE_ENTER:
+                case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                case KeyEvent.KEYCODE_TAB:
+                case KeyEvent.KEYCODE_ESCAPE:
                 case KeyEvent.KEYCODE_MOVE_HOME:
                 case KeyEvent.KEYCODE_MOVE_END:
                     view.forward(keyCode);
@@ -517,6 +521,37 @@ final class KeyboardConnection extends BaseInputConnection {
         }
 
         return plain == null ? text : plain.toString();
+    }
+
+    /**
+     * An arrow while the keyboard has text selected in the mirror (a
+     * keyboard's Select word) ends the selection at its start for Left and
+     * Up and at its end for Right and Down, as iced's text fields end one
+     * and an {@code EditText} in a left-to-right line does. The app never
+     * had that selection, only its end as the caret, so the arrow does not
+     * reach it: the report moves its caret, and the mirror keeps its text.
+     * False when nothing is selected.
+     */
+    private boolean collapse(int keyCode) {
+        Editable text = view.mirror();
+        int[] selection = selection(text);
+
+        if (selection == null || selection[0] == selection[1]) {
+            return false;
+        }
+
+        boolean back = keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                || keyCode == KeyEvent.KEYCODE_DPAD_UP;
+
+        beginBatchEdit();
+
+        try {
+            Selection.setSelection(text, back ? selection[0] : selection[1]);
+        } finally {
+            endBatchEdit();
+        }
+
+        return true;
     }
 
     /**

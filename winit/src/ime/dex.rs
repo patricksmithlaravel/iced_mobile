@@ -99,7 +99,10 @@
 //! - `KEYCODE_ESCAPE` (111).
 //! - `KEYCODE_DPAD_UP` (19), `KEYCODE_DPAD_DOWN` (20), `KEYCODE_DPAD_LEFT`
 //!   (21), `KEYCODE_DPAD_RIGHT` (22), `KEYCODE_MOVE_HOME` (122) and
-//!   `KEYCODE_MOVE_END` (123).
+//!   `KEYCODE_MOVE_END` (123). An arrow key while the mirror has a
+//!   selection is no key: it ends the selection, at its start for Left and
+//!   Up and at its end for Right and Down, as iced's fields end one, which
+//!   is reported as a state; a composition stays.
 //! - 0x10000 (`Keyboard.SELECT_ALL`, the engine's `SELECT_ALL`): the
 //!   keyboard's Select all (`performContextMenuAction` with
 //!   `android.R.id.selectAll`). Android has no key code for it, and none of

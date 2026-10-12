@@ -1048,6 +1048,8 @@ mod tests {
         told: Told,
         /// Every selection the keyboard was told, in order.
         updates: Vec<Told>,
+        /// Arrows that ended the mirror's selection.
+        collapses: usize,
         out: VecDeque<Message>,
     }
 
@@ -1065,6 +1067,7 @@ mod tests {
                 reported: (Vec::new(), (0, 0), None),
                 told: ((0, 0), None),
                 updates: Vec::new(),
+                collapses: 0,
                 out: VecDeque::new(),
             }
         }
@@ -1254,11 +1257,27 @@ mod tests {
 
         /// A key press from the keyboard, as `KeyboardConnection` handles
         /// it: Backspace and Delete edit the mirror by code point when it
-        /// has something to delete, other keys go to the app.
+        /// has something to delete, an arrow ends the mirror's selection
+        /// when it has one, other keys go to the app.
         fn send_key(&mut self, code: i32) {
             let (start, end) = self.ordered_selection();
 
             match code {
+                // `KeyboardConnection.collapse`: at the start for Left and
+                // Up, at the end for Right and Down.
+                KEYCODE_DPAD_LEFT | KEYCODE_DPAD_UP | KEYCODE_DPAD_RIGHT
+                | KEYCODE_DPAD_DOWN
+                    if start < end =>
+                {
+                    let back =
+                        matches!(code, KEYCODE_DPAD_LEFT | KEYCODE_DPAD_UP);
+                    let cursor = if back { start } else { end };
+
+                    self.collapses += 1;
+                    self.begin_batch_edit();
+                    self.selection = (cursor, cursor);
+                    self.end_batch_edit();
+                }
                 KEYCODE_DEL | KEYCODE_FORWARD_DEL if start < end => {
                     self.delete(start, end);
                     self.report();
@@ -1640,6 +1659,8 @@ mod tests {
         deletions: usize,
         submits: usize,
         moves: usize,
+        /// Arrows that ended the keyboard's selection instead.
+        collapses: usize,
         /// Taps and hardware keys that reset, rebases, and requests to
         /// forget the text.
         interruptions: usize,
@@ -1663,6 +1684,7 @@ mod tests {
             self.deletions += other.deletions;
             self.submits += other.submits;
             self.moves += other.moves;
+            self.collapses += other.collapses;
             self.interruptions += other.interruptions;
             self.rebases += other.rebases;
             self.forgets += other.forgets;
@@ -1681,6 +1703,7 @@ mod tests {
                 ("deletions", self.deletions),
                 ("submits", self.submits),
                 ("moves", self.moves),
+                ("collapses", self.collapses),
                 ("interruptions", self.interruptions),
                 ("rebases", self.rebases),
                 ("forgets", self.forgets),
@@ -4067,6 +4090,75 @@ mod tests {
     }
 
     #[test]
+    fn an_arrow_ends_the_keyboards_selection_where_a_field_does() {
+        // The keyboard selects a word it typed (HeliBoard's Select word sets
+        // the selection from the text it reads back), then presses an arrow.
+        // The app never had that selection, only its end as the caret: the
+        // arrow ends it at its start for Left and Up and at its end for
+        // Right and Down, as iced's fields end a selection, and does not
+        // reach the app. The mirror keeps its text.
+        for (selection, code, moves, expected) in [
+            (
+                (6, 11),
+                KEYCODE_DPAD_LEFT,
+                keys(Key::Previous, 5),
+                "> hello Xworld!",
+            ),
+            ((11, 6), KEYCODE_DPAD_LEFT, vec![], "> hello Xworld!"),
+            (
+                (6, 11),
+                KEYCODE_DPAD_UP,
+                keys(Key::Previous, 5),
+                "> hello Xworld!",
+            ),
+            ((6, 11), KEYCODE_DPAD_RIGHT, vec![], "> hello worldX!"),
+            (
+                (11, 6),
+                KEYCODE_DPAD_RIGHT,
+                keys(Key::Next, 5),
+                "> hello worldX!",
+            ),
+            (
+                (11, 6),
+                KEYCODE_DPAD_DOWN,
+                keys(Key::Next, 5),
+                "> hello worldX!",
+            ),
+        ] {
+            let label = format!("{selection:?} {code}");
+            let mut harness = Harness::new("> ", "!");
+
+            let _ = harness.run(|m| m.commit_text("hello world", 1));
+            let _ = harness.run(|m| m.set_selection(selection.0, selection.1));
+
+            assert_eq!(harness.run(|m| m.send_key(code)), moves, "{label}");
+            assert_eq!(harness.mirror.units.len(), 11, "{label}");
+
+            let _ = harness.run(|m| m.commit_text("X", 1));
+            assert_eq!(harness.value(), expected, "{label}");
+        }
+
+        // A composition stays: the cursor moves inside it.
+        let mut harness = Harness::new("", "");
+        let _ = harness.run(|m| m.set_composing_text("hello", 1));
+        let _ = harness.run(|m| m.set_selection(1, 3));
+        assert_eq!(
+            harness.run(|m| m.send_key(KEYCODE_DPAD_LEFT)),
+            [preedit("hello", 1)]
+        );
+
+        // With nothing selected, the arrow is the app's, and the mirror
+        // starts over.
+        let mut harness = Harness::new("> ", "!");
+        let _ = harness.run(|m| m.commit_text("hello", 1));
+        assert_eq!(
+            harness.run(|m| m.send_key(KEYCODE_DPAD_LEFT)),
+            [Edit::Key(Key::Left)]
+        );
+        assert!(harness.mirror.units.is_empty());
+    }
+
+    #[test]
     fn caret_moving_keys_keep_the_generation_and_every_key_counts() {
         let mut harness = Harness::new("", "!");
 
@@ -4256,7 +4348,17 @@ mod tests {
             0..=43 => text_op(m, rng),
             44..=51 => m.send_key(KEYCODE_DEL),
             52..=53 => m.send_key(KEYCODE_FORWARD_DEL),
-            54..=55 => m.send_key(rng.pick(KEYS)),
+            54..=55 => {
+                // Often after a selection, as after a keyboard's Select
+                // word.
+                if rng.chance(40) {
+                    let len = m.len() as i64;
+
+                    m.set_selection(rng.between(0, len), rng.between(0, len));
+                }
+
+                m.send_key(rng.pick(KEYS));
+            }
             // Codes the Java side does not send; the engine ignores them.
             56 => m.key(rng.pick(&[0, 4, 82, -1, 999])),
             57 => m.commit_text("\n", 1),
@@ -4368,6 +4470,7 @@ mod tests {
 
         assert_eq!(harness.engine.base, expected.committed, "seed {seed}");
 
+        harness.seen.collapses = harness.mirror.collapses;
         harness.seen
     }
 

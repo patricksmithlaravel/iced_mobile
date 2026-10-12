@@ -493,11 +493,15 @@
 //!   without modifiers, its own Shift or one held on a hardware keyboard:
 //!   its arrows, Home and End move the caret without selecting, and a Ctrl
 //!   held on a hardware keyboard does not make its deletions delete words.
-//!   A hardware keyboard's keys reach the application as key events, as
-//!   before, unless the input method takes them: while a field asks for
-//!   the keyboard, one that composes a hardware keyboard's letters (CJK
-//!   input methods) types them into the field as its own text, commits and
-//!   preedits, not `KeyPressed` events.
+//!   An arrow while the keyboard has selected some of the text it typed
+//!   (its Select word, a selection the field does not show) ends that
+//!   selection at its start (Left, Up) or its end (Right, Down) instead, as
+//!   the field's own arrows end a selection. A hardware keyboard's keys
+//!   reach the application as key events, as before, unless the input
+//!   method takes them: while a field asks for the keyboard, one that
+//!   composes a hardware keyboard's letters (CJK input methods) types them
+//!   into the field as its own text, commits and preedits, not `KeyPressed`
+//!   events.
 //! - The keyboard's editing panel (Gboard's text editing tools) works in
 //!   part: Select all selects the field's text (the field's own Ctrl+A),
 //!   and Paste inserts the clipboard's text at the caret without its line
