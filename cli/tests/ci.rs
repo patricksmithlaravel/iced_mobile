@@ -329,3 +329,304 @@ fn the_lock_has_an_android_activity_that_shows_the_keyboard() {
         );
     }
 }
+
+/// What only a Mac can check: its `/bin/bash` is the bash 3.2 that GitHub's
+/// macOS runners run `run:` steps and `#!/usr/bin/env bash` scripts with,
+/// and `.github/ci/xcode.sh` reads Xcode's plists with `plutil`.
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::{Output, Path, PermissionsExt, ci_files, fork, read};
+    use std::process::Command;
+
+    /// `/bin/bash -n FILE`: bash's complaint when it cannot parse FILE.
+    fn bash32_parse_error(file: &Path) -> Option<String> {
+        let out = Command::new("/bin/bash")
+            .arg("-n")
+            .arg(file)
+            .output()
+            .expect("run /bin/bash");
+        (!out.status.success()).then(|| String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+
+    /// The script with GitHub's `${{ … }}` expressions, which the runner
+    /// replaces before bash reads it, as a plain word.
+    fn without_expressions(script: &str) -> String {
+        let mut out = String::new();
+        let mut rest = script;
+        while let Some(start) = rest.find("${{") {
+            let Some(end) = rest[start..].find("}}") else {
+                break;
+            };
+            out.push_str(&rest[..start]);
+            out.push_str("EXPR");
+            rest = &rest[start + end + 2..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The bash `run:` steps of a workflow's jobs that run on macOS, as
+    /// (the line of `run:`, the script). A job runs on macOS when its text
+    /// names macos (its `runs-on` or its matrix). A step whose `shell:` is
+    /// not bash (pwsh) is left out.
+    fn macos_bash_steps(text: &str) -> Vec<(usize, String)> {
+        let lines: Vec<&str> = text.lines().collect();
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        let filled = |line: &str| !line.trim().is_empty();
+        let Some(jobs) = lines.iter().position(|line| *line == "jobs:") else {
+            return Vec::new();
+        };
+        // A job is a key two spaces in under `jobs:`, up to the next one.
+        let mut starts: Vec<usize> = (jobs + 1..lines.len())
+            .filter(|&i| {
+                indent(lines[i]) == 2
+                    && !lines[i].trim_start().starts_with('#')
+                    && lines[i].trim_end().ends_with(':')
+            })
+            .collect();
+        starts.push(lines.len());
+
+        let mut steps = Vec::new();
+        for job in starts.windows(2) {
+            let (start, end) = (job[0], job[1]);
+            if !lines[start..end]
+                .join("\n")
+                .to_ascii_lowercase()
+                .contains("macos")
+            {
+                continue;
+            }
+            for i in start..end {
+                let trimmed = lines[i].trim_start();
+                let key = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+                let Some(value) = key.strip_prefix("run:") else {
+                    continue;
+                };
+                // The step's keys sit in this column, after its `- `.
+                let column = lines[i].len() - key.len();
+                let first = (start..=i)
+                    .rev()
+                    .find(|&j| {
+                        indent(lines[j]) + 2 == column && lines[j].trim_start().starts_with("- ")
+                    })
+                    .unwrap_or(i);
+                let last = (i + 1..end)
+                    .find(|&j| filled(lines[j]) && indent(lines[j]) < column)
+                    .unwrap_or(end);
+                let shell = (first..last).find_map(|j| {
+                    let trimmed = lines[j].trim_start();
+                    let key = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+                    (lines[j].len() - key.len() == column)
+                        .then(|| key.strip_prefix("shell:"))
+                        .flatten()
+                });
+                if shell.is_some_and(|shell| !shell.trim().starts_with("bash")) {
+                    continue;
+                }
+                let value = value.trim();
+                let script = if value.starts_with('|') || value.starts_with('>') {
+                    let block_end = (i + 1..end)
+                        .find(|&j| filled(lines[j]) && indent(lines[j]) <= column)
+                        .unwrap_or(end);
+                    let block = &lines[i + 1..block_end];
+                    let margin = block
+                        .iter()
+                        .filter(|line| filled(line))
+                        .map(|line| indent(line))
+                        .min()
+                        .unwrap_or(0);
+                    block
+                        .iter()
+                        .map(|line| line.get(margin..).unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    value.to_string()
+                };
+                steps.push((i + 1, without_expressions(&script)));
+            }
+        }
+        steps
+    }
+
+    /// GitHub's macOS runners have no bash but /bin/bash, 3.2. It cannot
+    /// parse a `case` inside `$(...)` (the pattern's `)` ends the command
+    /// substitution), which failed icm-ios.yml's Xcode step on its first
+    /// run, and other syntax newer bashes take. Every bash step of a job
+    /// that runs on macOS, every script in .github/ci and every acceptance
+    /// script (phase2.sh and phase5.sh run on macOS runners) must parse.
+    #[test]
+    fn macos_bash_parses_every_step_and_script() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut checked = Vec::new();
+        let mut failures = Vec::new();
+        let mut check = |label: String, file: &Path| {
+            if let Some(error) = bash32_parse_error(file) {
+                failures.push(format!("{label}: {error}"));
+            }
+            checked.push(label);
+        };
+
+        for (path, text) in ci_files() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name.ends_with(".yml") {
+                for (line, script) in macos_bash_steps(&text) {
+                    let file = scratch.path().join(format!("{name}-{line}.sh"));
+                    std::fs::write(&file, script).unwrap();
+                    check(format!(".github/workflows/{name}:{line}"), &file);
+                }
+            } else if name.ends_with(".sh") {
+                check(format!(".github/ci/{name}"), &path);
+            }
+        }
+        let accept = fork().join("cli/tests/accept");
+        let mut scripts: Vec<_> = std::fs::read_dir(&accept)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "sh"))
+            .collect();
+        scripts.sort();
+        for path in scripts {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            check(format!("cli/tests/accept/{name}"), &path);
+        }
+
+        // The steps were found: icm-ios.yml's Xcode step, icm.yml's macOS
+        // jobs, framework.yml's.
+        for wanted in [
+            ".github/workflows/icm-ios.yml:",
+            ".github/workflows/icm.yml:",
+            ".github/workflows/framework.yml:",
+            ".github/ci/xcode.sh",
+            "cli/tests/accept/phase2.sh",
+        ] {
+            assert!(
+                checked.iter().any(|label| label.starts_with(wanted)),
+                "nothing of {wanted} was checked: {checked:#?}"
+            );
+        }
+        assert!(
+            failures.is_empty(),
+            "macOS's /bin/bash (3.2) cannot parse these:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// A plist of string values, as an Xcode bundle's are.
+    fn plist(entries: &[(&str, &str)]) -> String {
+        let mut text = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n",
+        );
+        for (key, value) in entries {
+            text.push_str(&format!("\t<key>{key}</key>\n\t<string>{value}</string>\n"));
+        }
+        text.push_str("</dict>\n</plist>\n");
+        text
+    }
+
+    /// An Xcode bundle as the script reads it: its licence type (none: no
+    /// LicenseInfo.plist) and its version.
+    fn xcode_bundle(apps: &Path, name: &str, license: Option<&str>, version: &str) {
+        let contents = apps.join(name).join("Contents");
+        std::fs::create_dir_all(contents.join("Resources")).unwrap();
+        std::fs::create_dir_all(contents.join("Developer")).unwrap();
+        if let Some(license) = license {
+            std::fs::write(
+                contents.join("Resources/LicenseInfo.plist"),
+                plist(&[("licenseID", "EA0000"), ("licenseType", license)]),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            contents.join("version.plist"),
+            plist(&[
+                ("CFBundleShortVersionString", version),
+                ("ProductBuildVersion", "17A000"),
+            ]),
+        )
+        .unwrap();
+    }
+
+    fn xcode_sh(apps: &Path) -> Output {
+        Command::new(fork().join(".github/ci/xcode.sh"))
+            .arg(apps)
+            .output()
+            .expect("run .github/ci/xcode.sh")
+    }
+
+    /// The developer directory xcode.sh picks in `apps`.
+    fn picked(apps: &Path) -> String {
+        let out = xcode_sh(apps);
+        assert!(
+            out.status.success(),
+            "xcode.sh failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// icm-ios.yml selects the Xcode `.github/ci/xcode.sh` picks: the
+    /// newest release, judged by the bundle's licence type and version.
+    /// GitHub's images keep each Xcode as Xcode_<version>.app with links
+    /// under other names, and link a beta (Xcode_27.2_beta_2.app) under its
+    /// plain version too (Xcode_27.2.app), so a name says nothing.
+    #[test]
+    fn xcode_sh_picks_the_newest_release_xcode() {
+        let script = fork().join(".github/ci/xcode.sh");
+        let mode = script.metadata().unwrap().permissions().mode();
+        assert!(mode & 0o111 != 0, ".github/ci/xcode.sh is not executable");
+        assert!(
+            read(".github/workflows/icm-ios.yml").contains("developer_dir=$(.github/ci/xcode.sh)"),
+            "icm-ios.yml no longer selects the Xcode .github/ci/xcode.sh picks"
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        // The temporary directory is under a link (/var); the script prints
+        // real paths.
+        let apps = std::fs::canonicalize(root.path()).unwrap();
+        let link = |target: &str, name: &str| {
+            std::os::unix::fs::symlink(apps.join(target), apps.join(name)).unwrap();
+        };
+        let developer = |name: &str| format!("{}/{name}/Contents/Developer", apps.display());
+
+        let out = xcode_sh(&apps);
+        assert_eq!(out.status.code(), Some(1), "no Xcode at all");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("::error::no release Xcode"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // The macOS 26 image's releases and their links.
+        xcode_bundle(&apps, "Xcode_26.0.1.app", Some("GM"), "26.0.1");
+        link("Xcode_26.0.1.app", "Xcode_26.0.app");
+        xcode_bundle(&apps, "Xcode_26.4.1.app", Some("GM"), "26.4.1");
+        link("Xcode_26.4.1.app", "Xcode_26.4.app");
+        xcode_bundle(&apps, "Xcode_26.6.app", Some("GM"), "26.6");
+        link("Xcode_26.6.app", "Xcode_26.6.0.app");
+        // Newer, but none a release: a beta also linked under its plain
+        // version, a beta under a release's name, a bundle without a
+        // licence, a link to nothing.
+        xcode_bundle(&apps, "Xcode_27.2_beta_2.app", Some("Beta"), "27.2");
+        link("Xcode_27.2_beta_2.app", "Xcode_27.2.app");
+        xcode_bundle(&apps, "Xcode_27.3.app", Some("Beta"), "27.3");
+        xcode_bundle(&apps, "Xcode_28.0.app", None, "28.0");
+        link("Xcode_gone.app", "Xcode_29.0.app");
+        assert_eq!(picked(&apps), developer("Xcode_26.6.app"));
+
+        // Versions compare by number.
+        xcode_bundle(&apps, "Xcode_26.10.app", Some("GM"), "26.10");
+        assert_eq!(picked(&apps), developer("Xcode_26.10.app"));
+
+        // A release candidate is a GM build, which the App Store takes.
+        xcode_bundle(
+            &apps,
+            "Xcode_27.1_Release_Candidate.app",
+            Some("GM"),
+            "27.1",
+        );
+        link("Xcode_27.1_Release_Candidate.app", "Xcode_27.1.app");
+        assert_eq!(picked(&apps), developer("Xcode_27.1_Release_Candidate.app"));
+    }
+}

@@ -19,11 +19,13 @@ on:
       - "cli/**"
       - "examples/app/**"
       - ".github/workflows/icm-ios.yml"
+      - ".github/ci/xcode.sh"
   pull_request:
     paths:
       - "cli/**"
       - "examples/app/**"
       - ".github/workflows/icm-ios.yml"
+      - ".github/ci/xcode.sh"
   workflow_dispatch:
 
 permissions:
@@ -66,17 +68,19 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      # .github/ci/xcode.sh judges each Xcode by its LicenseInfo.plist, not
+      # its name: the images also link a beta under a plain version name.
+      # The step runs under macOS's bash 3.2, which cannot parse a `case`
+      # inside `$(...)`.
       - name: Select the newest release Xcode (26 or later)
         run: |
-          xcode=$(for app in /Applications/Xcode_*.app; do
-            case "$app" in *[Bb]eta*) ;; *) echo "$app" ;; esac
-          done | sort -V | tail -n 1)
-          echo "selecting $xcode"
-          sudo xcode-select -s "$xcode/Contents/Developer"
+          developer_dir=$(.github/ci/xcode.sh)
+          echo "selecting $developer_dir"
+          sudo xcode-select -s "$developer_dir"
           xcodebuild -version
           major=$(xcodebuild -version | awk '/^Xcode/ {split($2, v, "."); print v[1]}')
-          if [ "$major" -lt 26 ]; then
-            echo "::error::Xcode $major is below the App Store floor (26)"
+          if ! [ "$major" -ge 26 ] 2>/dev/null; then
+            echo "::error::Xcode ${major:-(no version)} is below the App Store floor (26)"
             exit 1
           fi
       - name: Rust

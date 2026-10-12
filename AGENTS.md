@@ -82,7 +82,10 @@ the template on every platform, tests on macOS, Linux and Windows, the `rust-ver
 `.github/workflows/icm.yml` (icm's checks, the `cargo install --git` check, a fresh resolve of a new
 app, the desktop releases with `--sign none`, and the tag check). The jobs' logic is in
 `.github/ci/*.sh`, which run locally too. `cli/tests/ci.rs` fails when the workflows stop running a
-command listed above, so change both together. `icm-ios.yml`, `icm-android.yml`, `icm-web.yml` and
+command listed above, so change both together. On macOS it also fails when a bash step of a macOS
+job, a `.github/ci` script or an acceptance script does not parse under `/bin/bash`: macOS runners
+have only that bash 3.2, which cannot parse a `case` inside `$(...)`.
+`icm-ios.yml`, `icm-android.yml`, `icm-web.yml` and
 `icm-desktop.yml` run each platform's acceptance and real-host jobs when `cli/` or the template
 changes; the Windows jobs wait for the repository variable `ICM_WINDOWS_HOST`, since icm does not
 build on Windows yet. Actions has not run on the fork yet: the owner enables workflows on its Actions
