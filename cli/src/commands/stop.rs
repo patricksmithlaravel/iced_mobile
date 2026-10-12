@@ -689,6 +689,7 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
     let mut sessions = Vec::new();
     let mut text = String::new();
     let mut running = 0;
+    let mut ios_device_unknown = false;
     for (path, session) in session::list(&dir) {
         match session {
             Ok(session) => {
@@ -791,6 +792,16 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
                         " unverified (pid {pid} cannot be told from another process: {why}; `icm explain run.identity_unavailable`)"
                     ));
                     false
+                } else if !host_alive && session.platform == crate::platform::ios_device::PLATFORM {
+                    // The console process is all icm holds on the host, and
+                    // it says nothing about the app on the phone: a kept
+                    // record (its terminate command failed) outlives it, and
+                    // the app may still run. Only `stop` asks the device.
+                    line.push_str(&format!(
+                        " session open (app state unknown: its console process has ended; `icm stop ios-device` asks the device){failed}"
+                    ));
+                    ios_device_unknown = true;
+                    false
                 } else if !host_alive && has_pids {
                     line.push_str(" stale (its processes are gone)");
                     false
@@ -878,6 +889,12 @@ pub fn ps(ctx: &mut Ctx) -> Result<()> {
     if running > 0 {
         ctx.rep
             .next("icm stop --all --json -q", "stop every session");
+    }
+    if ios_device_unknown {
+        ctx.rep.next(
+            "icm stop ios-device --json -q",
+            "ask the device whether the app still runs, and end it",
+        );
     }
     Ok(())
 }

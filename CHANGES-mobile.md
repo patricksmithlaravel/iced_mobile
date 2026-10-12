@@ -32,6 +32,11 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   still written as the app wrote it (`docs/agents/limitations.md`). The release's secret scan
   (`release.secret_in_artifacts`) finds the base64 too, so a value that a build bakes in only as
   base64 makes the release unuploadable, where the scan passed it before.
+- `icm ps` no longer calls an ios-device session stale once its console process has ended. A kept
+  record (its terminate command failed) outlives that process while the app may still run on the
+  phone, and `ps` said `stale (its processes are gone)` and counted nothing running, so an agent
+  following it could skip the retry. It now says the app's state is unknown and names
+  `icm stop ios-device`, which asks the device, and its result names that command as the next step.
 - **iOS:** the vendored winit reports an insertion of only a line break as Return and one of only
   `\t` as Tab, deciding per insertion, so a Return typed right after another key in the same turn
   of the event loop is no longer lost.

@@ -161,6 +161,33 @@ impl Device {
     }
 
     fn json(&self, args: &[&str]) -> Value {
+        let mut all = args.to_vec();
+        all.extend(["--json", "-q"]);
+        let output = self.run(&all);
+        let text = String::from_utf8_lossy(&output.stdout);
+        let last = text.lines().last().unwrap_or_else(|| {
+            panic!(
+                "no output; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        let result: Value = serde_json::from_str(last).unwrap();
+        assert_eq!(result["type"], "result");
+        assert_eq!(
+            output.status.code().map(i64::from),
+            result["exit"].as_i64(),
+            "{result}"
+        );
+        result
+    }
+
+    /// `icm <args>` in human mode: what a person reads on stdout.
+    fn text(&self, args: &[&str]) -> String {
+        String::from_utf8_lossy(&self.run(args).stdout).into_owned()
+    }
+
+    /// Runs `icm <args>` with the fake tools and returns its output.
+    fn run(&self, args: &[&str]) -> std::process::Output {
         let fakes = fixtures().join("fake-ios");
         let home = std::env::var("HOME").unwrap_or_default();
         let state = self.state();
@@ -170,7 +197,6 @@ impl Device {
         }
         let _ = command
             .args(args)
-            .args(["--json", "-q"])
             .current_dir(self.dir())
             .stdin(Stdio::null())
             .env("ICM_CACHE_DIR", self.root.path().join("cache"))
@@ -207,22 +233,7 @@ impl Device {
         for (key, value) in &self.env {
             let _ = command.env(key, value);
         }
-        let output = command.output().unwrap();
-        let text = String::from_utf8_lossy(&output.stdout);
-        let last = text.lines().last().unwrap_or_else(|| {
-            panic!(
-                "no output; stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-        });
-        let result: Value = serde_json::from_str(last).unwrap();
-        assert_eq!(result["type"], "result");
-        assert_eq!(
-            output.status.code().map(i64::from),
-            result["exit"].as_i64(),
-            "{result}"
-        );
-        result
+        command.output().unwrap()
     }
 
     fn abs(&self, value: &Value) -> PathBuf {
@@ -1043,6 +1054,58 @@ fn a_kept_record_reports_the_console_process_it_ended() {
         device.session_path().exists(),
         "the kept record was removed"
     );
+}
+
+/// `ps` does not judge the app on the phone by the console process. The
+/// terminate command fails, so the record stays, and the console process
+/// `stop` ended is gone. `ps` then said "stale (its processes are gone)" and
+/// counted nothing running, so an agent following it would conclude that
+/// nothing runs and skip the retry, while the app may still run on the phone
+/// (`stop` says so in the same state). It now reports the app's state as
+/// unknown, and points to `icm stop ios-device`, which asks the device.
+#[test]
+fn ps_does_not_call_a_kept_ios_device_record_stale() {
+    let device = Device::new();
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+    std::fs::write(device.state().join("terminate-fail"), "").unwrap();
+
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert_eq!(stop["kept"][0]["app"], "terminate_failed", "{stop}");
+    assert!(
+        device.session_path().exists(),
+        "the kept record was not removed"
+    );
+
+    let ps = device.json(&["ps"]);
+    assert_eq!(ps["exit"], 0, "{ps}");
+    let session = &ps["sessions"][0];
+    assert_eq!(session["platform"], "ios-device", "{ps}");
+    assert_eq!(session["running"], false, "{ps}");
+    assert_eq!(session["app_running"], Value::Null, "{ps}");
+
+    let text = device.text(&["ps"]);
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("ios-device:"))
+        .unwrap_or_else(|| panic!("no ios-device line in {text}"));
+    assert!(!line.contains("stale"), "{text}");
+    assert!(!line.contains("running"), "{text}");
+    assert!(line.contains("app state unknown"), "{text}");
+    assert!(line.contains("icm stop ios-device"), "{text}");
+    assert!(line.contains("Jo's iPhone"), "{text}");
+    assert!(
+        ps["next"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|next| next["cmd"] == "icm stop ios-device --json -q"),
+        "{ps}"
+    );
+    assert!(device.session_path().exists(), "ps removed the record");
+    assert!(device.terminated(), "{}", device.log("xcrun.log"));
 }
 
 /// devicectl can list the recorded pid with no executable, an empty one, or
