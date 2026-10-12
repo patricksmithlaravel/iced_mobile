@@ -375,6 +375,59 @@
 //! }
 //! ```
 //!
+//! # Text input
+//!
+//! `text_input` and `text_editor` take the system keyboard's text on both
+//! platforms.
+//!
+//! On Android with NativeActivity (the default) on Android 8 (API 26) and
+//! later, the shell gives the keyboard an input connection of its own: a
+//! small view from a dex embedded in `iced_winit`, loaded at run time, so
+//! the APK still needs no Java code. The keyboard can then compose,
+//! suggest, autocorrect and swipe-type, and accented letters and CJK arrive
+//! whole:
+//!
+//! - The word being composed is a preedit: drawn underlined at the caret,
+//!   not part of the value until the keyboard commits it (a space, a
+//!   suggestion, Enter). `on_input` sees the value without it until then.
+//!   A tap anywhere, a hardware key, or the window losing the focus commits
+//!   it first, and the application handles the commit, and builds its view
+//!   again, before the tap: a Send button that is enabled only once the
+//!   field holds text takes the tap that finished the word.
+//! - The keyboard sees only the text typed since the field got the focus or
+//!   since the last tap, never the field's earlier text, so its suggestions
+//!   and auto-capitalisation do not see what was there before. Backspace and
+//!   the arrow keys still reach that text.
+//! - The keyboard's Enter (its key, its action button, or a commit of a
+//!   lone line break) reaches the application as the Enter key, after the
+//!   text typed before it, and submits a `text_input`; Tab and Escape are
+//!   keys too. A line break or tab inside longer committed text is dropped,
+//!   as on iOS.
+//! - The keyboard's edits reach the field as the clusters `text_input`
+//!   moves and deletes by. `text_editor`'s Backspace can delete by
+//!   character instead, so a combining sequence the keyboard revises can
+//!   come out wrong there.
+//! - An application that moves the focus or the caret from code
+//!   (`text_input::focus`, `focus_next`, `unfocus`, `move_cursor_to`,
+//!   `select_all`) while the keyboard types ends what it typed there: a
+//!   focus moved away drops the word being composed, and a caret moved in
+//!   the field commits it first.
+//! - If the user hides the keyboard while a field keeps the focus, a tap on
+//!   the field brings it back.
+//!
+//! On Android before 8, when the view cannot be added, and with
+//! GameActivity, the keyboard reaches the application through key events
+//! only, without composition or suggestions. iOS sends typed text as key
+//! events and has no marked text, so CJK input methods do not compose
+//! there.
+//!
+//! A secure `text_input` (`.secure(true)`) is marked secure to the system
+//! keyboard on both platforms, which then shows no suggestions and learns
+//! nothing from it (on Android an input type of `TYPE_TEXT_VARIATION_PASSWORD`
+//! and `IME_FLAG_NO_PERSONALIZED_LEARNING`, on iOS `isSecureTextEntry`). On
+//! Android, what a keyboard composes there reaches the field as typed text,
+//! so it is never drawn in clear.
+//!
 //! # Events for launchers
 //!
 //! A launcher such as `icm` learns that the app started, drew its first
@@ -695,6 +748,13 @@
 //!   fields fire only from a hardware keyboard on Android. The
 //!   [clipboard](#clipboard) itself works: offer Copy and Paste buttons
 //!   where they matter.
+//! - **Text input on Android** ([Text input](#text-input)). The keyboard
+//!   sees only the text typed since the field got the focus or the last
+//!   tap; a word being composed is dropped when the application moves the
+//!   focus itself; and a combining mark or vowel sign typed right after the
+//!   place the user tapped joins the character before it, which
+//!   `text_input` then deletes with it, as it does on the desktop.
+//!   GameActivity, and Android before 8, get key events only.
 //! - **Line breaks in inserted text on iOS.** UIKit hands over text one
 //!   insertion at a time. An insertion that is only a line break (`"\n"`,
 //!   `"\r"`, or `"\r\n"` counted once) is one Return, as from the

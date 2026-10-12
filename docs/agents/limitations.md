@@ -29,24 +29,48 @@ this file in the commit that fixes or finds a limitation.
   only when the user asks to paste: Android 10 and later give `None` to an
   app without the input focus, and iOS 16 and later ask the user ("Allow
   Paste") before an app reads what another app copied.
-- **Limited text input** (iOS, Android).
-  - Android (NativeActivity) receives key events only: no composition,
-    autocorrect, swipe typing or suggestions, and characters outside the key
-    map (many accented letters, all CJK) can be lost. iOS has no marked
-    text, so CJK input methods do not compose either. Do not promise
-    non-ASCII input on Android, and type into the app on a device.
+- **Text input differs from the desktop** (iOS, Android).
+  - On Android (NativeActivity, the default, Android 8 and later) the
+    keyboard composes, suggests, autocorrects and swipe-types, and accented
+    letters and CJK arrive whole. The word being composed shows underlined
+    at the caret and is not part of the value until the keyboard commits it
+    (a space, a suggestion, Enter, or a tap anywhere): `on_input` sees the
+    text without it until then. With GameActivity (`android-game-activity`)
+    the keyboard reaches the app through key events only, without
+    composition or suggestions. iOS has no marked text, so CJK input
+    methods do not compose there.
+  - The Android keyboard sees only the text typed since the field got the
+    focus or since the last tap, so its suggestions and auto-capitalisation
+    do not see the field's earlier text.
+  - When the app moves the focus itself (`text_input::focus`, `focus_next`,
+    `unfocus`, or the field leaving the view) while the Android keyboard
+    composes a word, the word is dropped, and so is a word the keyboard had
+    taken back from the field after a Backspace into it.
+    Moving the caret from code (`move_cursor_to`, `select_all`) commits the
+    word first. Let the user's tap or Enter move the focus where it can.
+  - `text_input` deletes by character cluster, as on the desktop: a
+    combining mark or vowel sign typed right after the place the user
+    tapped joins the character before it, and Backspace then deletes both
+    (`text_input` may also put its caret one character further when that
+    happens in the middle of the text). `text_editor`'s Backspace can delete
+    by character instead, so a combining sequence the Android keyboard
+    revises can come out wrong there.
+  - Password fields (`.secure(true)`) are marked secure to the system
+    keyboard on Android and iOS: it shows no suggestions and learns nothing
+    from them. On Android, what a keyboard composes there reaches the field
+    as typed text, so it is never drawn in clear.
   - The keyboard covers fields in the lower half of the screen unless the
     root is padded with `SafeArea::padding` from `iced::mobile::safe_area()`,
     whose bottom rises with it, as the template's is. On Android it rises
     up to a quarter of a second late, so the template keeps its field near
     the top.
-  - If the user hides the keyboard while a field keeps the focus, tapping
-    the field does not bring it back until the field has lost the focus
-    once.
-  - Password fields (`.secure(true)`) are not marked secure to the system
-    keyboard, which may suggest or learn what is typed.
   - iOS hardware keyboards deliver typed characters, Return, Tab and
     Backspace only: no arrows, Escape or Cmd shortcuts.
+  - On Android, the keyboard's Enter (its key, its action button, or a
+    commit of a lone line break) reaches the app as the Enter key, after the
+    text typed before it, and submits a `text_input`. A line break or tab
+    inside longer committed text (a suggestion, a paste from the keyboard's
+    clipboard) is dropped.
   - On iOS, Return and Tab count only when UIKit inserts them alone, as
     the Return and Tab keys do (`"\r\n"` is one Return). A line break or
     tab inside longer inserted text (dictation, a keyboard suggestion, a
