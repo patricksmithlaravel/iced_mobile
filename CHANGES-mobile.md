@@ -321,6 +321,8 @@ Text input on Android, and secure fields on Android and iOS:
   also takes the keyboard next to a password field (a tap does not take its focus), the keyboard is
   set up for the password field: on Android and iOS, `InputMethod::merge` makes the merged request
   secure when any of the requests is.
+- `text_editor` draws no placeholder while it shows a preedit, as `text_input` does: an empty editor
+  showed its placeholder under the word an input method composed.
 - The known limitations in an app's `AGENTS.md` describe text input as it now is, and say that the
   iOS keyboard shows no predictions in any field: the app's view takes key input only.
 

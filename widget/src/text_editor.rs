@@ -986,7 +986,13 @@ where
 
         let text_bounds = bounds.shrink(self.padding);
 
-        if internal.editor.is_empty() {
+        // The placeholder gives way to a preedit, as in `text_input`.
+        let is_composing = state
+            .preedit
+            .as_ref()
+            .is_some_and(|preedit| !preedit.content.is_empty());
+
+        if internal.editor.is_empty() && !is_composing {
             if let Some(placeholder) = self.placeholder.clone() {
                 renderer.fill_text(
                     Text {
