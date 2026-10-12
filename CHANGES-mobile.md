@@ -19,6 +19,11 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   the old guard, and
   `docs/agents/limitations.md` says what the collector does not redact. `icm stop` ends the
   collector with its app, after it has written the app's last output.
+- `icm` redacts the base64 of a secret as it redacts the secret. Before, the base64 of an inherited
+  or handed secret reached the desktop live files, `app.log`, `logs.ndjson`, `result.json`,
+  `events.ndjson` and `logs` output unredacted: a whole value, a `Basic` header's (the secret after
+  `user:`), and a percent-encoded or JSON-escaped one. A base64 encoding that a line break splits is
+  still written as the app wrote it (`docs/agents/limitations.md`).
 - **iOS:** the vendored winit reports an insertion of only a line break as Return and one of only
   `\t` as Tab, deciding per insertion, so a Return typed right after another key in the same turn
   of the event loop is no longer lost.

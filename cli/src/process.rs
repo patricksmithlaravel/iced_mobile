@@ -515,7 +515,8 @@ fn redact_forms(text: &str, secrets: &[String]) -> Option<String> {
             out = Some(replaced);
         }
     }
-    out
+    let encoded = redact_base64(out.as_deref().unwrap_or(text), secrets);
+    encoded.or(out)
 }
 
 /// `text` with `secret` replaced where some of its bytes are
@@ -580,13 +581,189 @@ fn hex_byte(pair: &[u8]) -> Option<u8> {
     u8::try_from(digit(pair[0])? * 16 + digit(pair[1])?).ok()
 }
 
-/// Replaces each of `secrets` in the text of a file icm keeps: everywhere
-/// as text (in each form [`secret_values`] holds: raw, JSON-escaped,
-/// percent-encoded, and percent-encoded any other way), then, in each line
-/// with escapes, in the decoded JSON strings it holds, whatever escapes
-/// their encoder used (an NDJSON record, a line of `log show --style
-/// ndjson`, a JSON document after a log line's prefix): see
-/// `redact_json_strings`.
+/// `text` with each base64 encoding of a secret replaced (the last step of
+/// [`redact_forms`]). A run is a stretch of base64 characters, of either
+/// alphabet: `%2B` and `%2F` (either hex case) and a JSON `\/` stand for `+`
+/// and `/` in it, and padding (`=`, `%3D`) ends it. A secret's encoding can
+/// start at any of the four positions a 3-byte group starts at, so each run
+/// is decoded from each of them, and its bytes searched for every form of
+/// every secret. Only the characters of the groups that hold a byte of a
+/// secret are replaced: the characters of a group that holds other bytes
+/// depend on them too, which icm does not know. `None` when no run encodes
+/// a secret.
+fn redact_base64(text: &str, secrets: &[String]) -> Option<String> {
+    let bytes = text.as_bytes();
+    // Each cut: the bytes of the text it takes, and what replaces them.
+    let mut cuts: Vec<(usize, usize, &'static str)> = Vec::new();
+    // The padding after a redaction belongs to the encoding it replaced. A
+    // partial line can be written between an encoding's characters and its
+    // padding, so the padding can arrive after the redaction: it is dropped.
+    for (at, _) in text.match_indices(REDACTED) {
+        let end = at + REDACTED.len();
+        let padding = padding_len(bytes, end);
+        if padding > 0 {
+            cuts.push((end, end + padding, ""));
+        }
+    }
+    // Four characters carry three bytes, so a run that encodes the shortest
+    // secret has at least as many characters as that secret's encoding.
+    if let Some(shortest) = secrets.iter().map(String::len).filter(|&len| len > 0).min() {
+        let need = (4 * shortest).div_ceil(3);
+        let mut at = 0;
+        while at < bytes.len() {
+            if base64_token(bytes, at).is_none() {
+                at += 1;
+                continue;
+            }
+            // Each character with the bytes of the text it takes.
+            let mut run = Vec::new();
+            while let Some((symbol, len)) = base64_token(bytes, at) {
+                run.push((symbol, at, at + len));
+                at += len;
+            }
+            if run.len() >= need {
+                encoded_spans(bytes, &run, secrets, &mut cuts);
+            }
+        }
+    }
+    if cuts.is_empty() {
+        return None;
+    }
+    cuts.sort_unstable();
+    let mut merged: Vec<(usize, usize, &'static str)> = Vec::new();
+    for (start, end, replacement) in cuts {
+        match merged.last_mut() {
+            // Overlapping cuts become one, redacted if either is, and so do
+            // adjacent redactions. A deletion next to a redaction stays apart.
+            Some(last) if start < last.1 || (start == last.1 && last.2 == replacement) => {
+                last.1 = last.1.max(end);
+                if replacement == REDACTED {
+                    last.2 = REDACTED;
+                }
+            }
+            _ => merged.push((start, end, replacement)),
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (start, end, replacement) in merged {
+        out.push_str(&text[copied..start]);
+        out.push_str(replacement);
+        copied = end;
+    }
+    out.push_str(&text[copied..]);
+    Some(out)
+}
+
+/// The base64 character that the text holds at `at`, and how many of its
+/// bytes it takes: a letter, a digit, `+`, `/`, `-` or `_`, or the `+` or
+/// `/` that `%2B` or `%2F` (either hex case) and a JSON `\/` stand for.
+/// Padding is not one.
+fn base64_token(bytes: &[u8], at: usize) -> Option<(u8, usize)> {
+    match *bytes.get(at)? {
+        symbol @ (b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'-' | b'_') => {
+            Some((symbol, 1))
+        }
+        b'%' => match bytes.get(at + 1..at + 3)?.to_ascii_uppercase().as_slice() {
+            b"2B" => Some((b'+', 3)),
+            b"2F" => Some((b'/', 3)),
+            _ => None,
+        },
+        b'\\' if bytes.get(at + 1) == Some(&b'/') => Some((b'/', 2)),
+        _ => None,
+    }
+}
+
+/// Appends to `spans` the byte ranges of a run's characters (each with its
+/// range in `bytes`, the text) that encode one of `secrets`: from each of
+/// the four positions a group can start at, the run's bytes are searched for
+/// each secret, and the characters of the groups that hold a found secret's
+/// bytes are its span. A span that reaches the run's last character takes
+/// the padding after it too: padding says how long the secret was.
+fn encoded_spans(
+    bytes: &[u8],
+    run: &[(u8, usize, usize)],
+    secrets: &[String],
+    spans: &mut Vec<(usize, usize, &'static str)>,
+) {
+    for phase in 0..run.len().min(4) {
+        let symbols: Vec<u8> = run[phase..].iter().map(|&(symbol, _, _)| symbol).collect();
+        let decoded = base64_bytes(&symbols);
+        for secret in secrets {
+            let want = secret.as_bytes();
+            if want.is_empty() {
+                continue;
+            }
+            for (at, window) in decoded.windows(want.len()).enumerate() {
+                if window == want {
+                    // Group `g` holds bytes `3g..3g+3` and characters
+                    // `4g..4g+4` of the run from `phase`.
+                    let first = phase + 4 * (at / 3);
+                    let last = (phase + 4 * (at + want.len()).div_ceil(3)).min(run.len());
+                    let mut end = run[last - 1].2;
+                    if last == run.len() {
+                        end += padding_len(bytes, end);
+                    }
+                    spans.push((run[first].1, end, REDACTED));
+                }
+            }
+        }
+    }
+}
+
+/// How many bytes of padding the text holds at `at`: up to two `=`, or
+/// `%3D` (either hex case) for each.
+fn padding_len(bytes: &[u8], at: usize) -> usize {
+    let mut end = at;
+    for _ in 0..2 {
+        match bytes.get(end) {
+            Some(b'=') => end += 1,
+            Some(b'%')
+                if bytes
+                    .get(end + 1..end + 3)
+                    .is_some_and(|hex| hex.eq_ignore_ascii_case(b"3D")) =>
+            {
+                end += 3;
+            }
+            _ => break,
+        }
+    }
+    end - at
+}
+
+/// The bytes that base64 characters encode, from the first one: each four
+/// give three bytes, and a final partial group the bits its characters
+/// carry, as an unpadded encoding writes it.
+fn base64_bytes(symbols: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(symbols.len() * 3 / 4 + 1);
+    let (mut held, mut count) = (0u32, 0u32);
+    for &symbol in symbols {
+        let value = match symbol {
+            b'A'..=b'Z' => symbol - b'A',
+            b'a'..=b'z' => symbol - b'a' + 26,
+            b'0'..=b'9' => symbol - b'0' + 52,
+            b'+' | b'-' => 62,
+            _ => 63, // `/` or `_`
+        };
+        held = (held << 6) | u32::from(value);
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((held >> count) as u8);
+            held &= (1 << count) - 1;
+        }
+    }
+    out
+}
+
+/// Replaces each of `secrets` in the text of a file icm keeps: everywhere as
+/// text (in each form [`secret_values`] holds: raw, JSON-escaped,
+/// percent-encoded, and percent-encoded any other way), and as base64 in any of
+/// its alphabets, padded or not and at any position in its groups
+/// (`redact_base64`), then, in each line with escapes, in the decoded JSON
+/// strings it holds, whatever escapes their encoder used (an NDJSON record, a
+/// line of `log show --style ndjson`, a JSON document after a log line's
+/// prefix): see `redact_json_strings`.
 pub fn redact_text<'a>(text: &'a str, secrets: &[String]) -> Cow<'a, str> {
     if secrets.is_empty() {
         return Cow::Borrowed(text);
@@ -1075,7 +1252,8 @@ pub fn redact_values(text: &str) -> String {
 /// record), as serde and JavaScript write it and as Apple's `log` writes it
 /// (`/` as `\/`), since a line of an app's output or a tool's NDJSON can
 /// carry it that way, and percent-encoded, as a URL carries it
-/// ([`url_encoded`]).
+/// ([`url_encoded`]). Their base64 is not listed: the redaction finds it
+/// (`redact_base64`).
 pub fn secret_values() -> Vec<String> {
     registry().clone()
 }
@@ -2060,6 +2238,105 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// Base64 as a test writes it: standard or URL-safe, padded or not.
+    fn base64_text(bytes: &[u8], url: bool, pad: bool) -> String {
+        const STANDARD: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let alphabet = if url { URL } else { STANDARD };
+        let mut out = String::new();
+        for group in bytes.chunks(3) {
+            let word = group.iter().enumerate().fold(0u32, |word, (i, &byte)| {
+                word | u32::from(byte) << (16 - 8 * i)
+            });
+            for i in 0..4 {
+                if i <= group.len() {
+                    out.push(char::from(alphabet[(word >> (18 - 6 * i)) as usize & 63]));
+                } else if pad {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    /// The base64 an app writes for a secret is redacted, in either
+    /// alphabet, with or without padding, percent-encoded or in a JSON `\/`,
+    /// and wherever the secret stands in it (an `Authorization: Basic`
+    /// header puts `user:` before it). Each expected text is the system's
+    /// `base64` of the value, and the text around it stays.
+    #[test]
+    fn base64_of_secrets_is_redacted() {
+        let mut secrets = Vec::new();
+        add_secret(&mut secrets, "s2orig/t\"ok\\en-4417263", 4);
+        add_secret(&mut secrets, "k??>??/?>tok", 4);
+        for (text, expected) in [
+            (
+                "key czJvcmlnL3Qib2tcZW4tNDQxNzI2Mw== end",
+                "key <redacted> end",
+            ),
+            (
+                "key czJvcmlnL3Qib2tcZW4tNDQxNzI2Mw end",
+                "key <redacted> end",
+            ),
+            ("key az8/Pj8/Lz8+dG9r end", "key <redacted> end"),
+            ("key az8_Pj8_Lz8-dG9r end", "key <redacted> end"),
+            // `user:` takes the first group whole, so its characters stay.
+            (
+                "Authorization: Basic dXNlcjpzMm9yaWcvdCJva1xlbi00NDE3MjYz",
+                "Authorization: Basic dXNl<redacted>",
+            ),
+            ("q=az8%2FPj8%2FLz8%2BdG9r&x=1", "q=<redacted>&x=1"),
+            ("raw az8\\/Pj8\\/Lz8+dG9r end", "raw <redacted> end"),
+            // Padding that a partial line's later write brings right after a
+            // redaction is dropped with it; padding after a space stays.
+            ("key <redacted>== end", "key <redacted> end"),
+            ("key <redacted> == end", "key <redacted> == end"),
+        ] {
+            assert_eq!(redact_text(text, &secrets), expected, "{text}");
+        }
+
+        // The secret after every head and before every tail of up to four
+        // bytes, in both alphabets and padded or not. The characters of the
+        // groups that hold a byte of the secret are redacted, and no others.
+        for secret in ["s2orig/t\"ok\\en-4417263", "k??>??/?>tok"] {
+            for head in 0..=4 {
+                for tail in 0..=4 {
+                    for url in [false, true] {
+                        for pad in [false, true] {
+                            let stream = format!("{}{secret}{}", &"uvwx"[..head], &"yzab"[..tail]);
+                            let encoded = base64_text(stream.as_bytes(), url, pad);
+                            let chars = base64_text(stream.as_bytes(), url, false);
+                            let start = 4 * (head / 3);
+                            let end = (4 * (head + secret.len()).div_ceil(3)).min(chars.len());
+                            // Padding follows only the stream's last characters,
+                            // and a span that reaches them takes it too.
+                            let padding = if end == chars.len() {
+                                ""
+                            } else {
+                                &encoded[chars.len()..]
+                            };
+                            let expected = format!(
+                                "[{}<redacted>{}{padding}]",
+                                &chars[..start],
+                                &chars[end..]
+                            );
+                            let text = format!("[{encoded}]");
+                            assert_eq!(
+                                redact_text(&text, &secrets),
+                                expected,
+                                "{stream:?} url={url} pad={pad}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Base64 of other text is left as it is.
+        let other = base64_text(b"hello world, nothing secret", false, true);
+        assert!(matches!(redact_text(&other, &secrets), Cow::Borrowed(_)));
     }
 
     #[test]

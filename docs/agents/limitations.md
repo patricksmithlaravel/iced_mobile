@@ -156,6 +156,10 @@ this file in the commit that fixes or finds a limitation.
   writes the live files. A secret the app gets some other way (a file, a
   request) and logs is not known to icm, and is written as the app wrote it,
   as on every platform. Hand such a secret to `icm run desktop --env NAME=…`.
+- **`icm` finds a base64 encoding of a secret only within one run of base64 characters.** A line
+  break, a space or any other character outside base64 ends a run, and so does a percent escape
+  other than `%2B`, `%2F` or `%3D`. An encoding that a line wrap splits (MIME or PEM output, 64 or
+  76 characters a line) is written as the app wrote it.
 - **A desktop session from before the log collector cannot redact every
   inherited secret.** Its live `app.stdout` and `app.stderr` hold the app's
   output raw. `icm logs desktop` learns the secret-named variables the app

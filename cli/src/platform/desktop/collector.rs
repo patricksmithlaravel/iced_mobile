@@ -22,13 +22,13 @@
 //! usage error of a bad argv, which goes nowhere.
 //!
 //! A complete line is redacted as [`process::redact_bytes`] redacts a file:
-//! every form of every secret, and the JSON strings of a line that has
-//! escapes. An `ICM_EVENT <json>` line keeps its JSON valid
-//! ([`redact_line`]). A partial line waits for its newline. When it has
-//! waited [`IDLE`], or grown past [`PARTIAL_LIMIT`], its text is redacted and
-//! written up to its last [`holdback`] bytes, which stay pending: the rest of
-//! a secret may not have arrived yet. At end of file the partial line is
-//! written whole.
+//! every form of every secret, its base64 (any alphabet, padding or position in
+//! a group), and the JSON strings of a line that has escapes. An `ICM_EVENT
+//! <json>` line keeps its JSON valid ([`redact_line`]). A partial line waits
+//! for its newline. When it has waited [`IDLE`], or grown past
+//! [`PARTIAL_LIMIT`], its text is redacted and written up to its last
+//! [`holdback`] bytes, which stay pending: the rest of a secret may not have
+//! arrived yet. At end of file the partial line is written whole.
 
 use crate::catalogue::CheckId;
 use crate::error::{IcmError, Result};
@@ -481,18 +481,21 @@ fn redact_line(line: &[u8], secrets: &[String]) -> Vec<u8> {
     process::redact_bytes(line.to_vec(), secrets)
 }
 
-/// How many bytes at the end of a partial line may begin a secret, so they
-/// are held back until more of the line arrives. A match is a form of a
-/// secret, possibly with some of its bytes percent-escaped
-/// ([`process::redact_text`]), and every form is at most as long as the
-/// longest in `secrets`. An escaped byte takes three bytes, so a match is at
-/// most three times that length.
+/// How many bytes at the end of a partial line may begin a secret, so they are
+/// held back until more of the line arrives. A match is a form of a secret,
+/// possibly with some of its bytes percent-escaped ([`process::redact_text`]),
+/// and every form is at most as long as the longest in `secrets`. An escaped
+/// byte takes three bytes, so a match is at most three times that length. A
+/// base64 encoding of a secret, each character percent-escaped and its padding
+/// included, is at most `4 * longest + 22` bytes ([`process::redact_text`]
+/// replaces it): a secret of `n` bytes spans at most `(n + 4) / 3` groups of
+/// four characters, three escaped bytes each, and the padding is at most six.
 fn holdback(secrets: &[String]) -> usize {
     secrets
         .iter()
         .map(String::len)
         .max()
-        .map_or(0, |longest| (3 * longest).saturating_sub(1))
+        .map_or(0, |longest| 4 * longest + 22)
 }
 
 /// Where a UTF-8 character that the end of `bytes` cuts short begins, or the
@@ -519,7 +522,7 @@ mod tests {
 
     /// Forms of [`VALUE`] as output carries them, each as (before, form,
     /// after) on a line of its own.
-    const FORMS: [(&str, &str, &str); 10] = [
+    const FORMS: [(&str, &str, &str); 13] = [
         ("", r#"tok/se"kr\it-123456"#, ""),
         ("", r#"tok/se\"kr\\it-123456"#, ""),
         ("", r#"tok\/se\"kr\\it-123456"#, ""),
@@ -534,6 +537,11 @@ mod tests {
             r#""}"#,
         ),
         ("GET /?t=", "tok%2Fse%22kr%5Cit-123456", "&x=1"),
+        // The base64 of the value: padded, without padding, and with its
+        // padding percent-escaped.
+        ("", "dG9rL3NlImtyXGl0LTEyMzQ1Ng==", ""),
+        ("", "dG9rL3NlImtyXGl0LTEyMzQ1Ng", ""),
+        ("", "dG9rL3NlImtyXGl0LTEyMzQ1Ng%3D%3D", ""),
     ];
 
     /// The secret list for [`VALUE`]: every form, longest first.
@@ -619,8 +627,9 @@ mod tests {
 
     /// A percent-escaped match can be longer than every form of its secret:
     /// `%61bcdef` is 8 bytes for the 6-byte secret `abcdef`. Cut anywhere
-    /// after an idle write, it is still redacted whole, so the holdback is
-    /// three times the longest form, not one less than it.
+    /// after an idle write, it is still redacted whole, so the holdback
+    /// covers more than the longest form: as much as a base64 encoding of the
+    /// secret with every character escaped ([`holdback`]).
     #[test]
     fn a_percent_escape_longer_than_every_form_is_held_back_whole() {
         let secret = "abcdef";
@@ -636,6 +645,27 @@ mod tests {
             stream.finish();
             let (out, _) = stream.into_parts();
             assert_eq!(out, b"x <redacted> y\n", "split at {split}");
+        }
+    }
+
+    /// The base64 of `user:` and the secret, as an `Authorization: Basic`
+    /// header writes it, starts the secret mid-group: the group `use` takes
+    /// keeps its characters, the rest is redacted. Cut anywhere after an idle
+    /// write, the output is the same.
+    #[test]
+    fn a_base64_secret_that_starts_mid_group_is_redacted_from_its_group() {
+        let line = "Authorization: Basic dXNlcjp0b2svc2Uia3JcaXQtMTIzNDU2 end\n";
+        let expected = "Authorization: Basic dXNl<redacted> end\n";
+        let secrets = secrets();
+        for split in 0..=line.len() {
+            let mut stream = Stream::new(Vec::new(), secrets.clone());
+            stream.push(&line.as_bytes()[..split]);
+            stream.idle(Instant::now() + IDLE);
+            stream.push(&line.as_bytes()[split..]);
+            stream.finish();
+            let (out, dropped) = stream.into_parts();
+            assert_eq!(dropped, 0);
+            assert_eq!(out, expected.as_bytes(), "split at {split}");
         }
     }
 
