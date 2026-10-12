@@ -40,33 +40,53 @@ this file in the commit that fixes or finds a limitation.
     the caret and is not part of the value until the keyboard commits it (a
     space, a suggestion, Enter, or a tap anywhere): `on_input` sees the text
     without it until then. Do not count on `on_input` seeing whole words.
-  - With GameActivity (`android-game-activity`), and when the input
-    connection cannot be installed (before Android 8, or after a failure,
-    with one warning in the log), the keyboard reaches the app through key
-    events only: no composition, suggestions or swipe typing, and text the
-    keyboard does not send as keys (many accented letters, all CJK) can be
-    lost. Password fields are not marked secure there. With GameActivity
-    and before Android 8, a keyboard the user hid comes back only after the
-    field has lost the focus once.
+  - When the input connection cannot be installed (before Android 8, or
+    after a failure, with one warning in the log), the keyboard reaches the
+    app through key events only: no composition, suggestions or swipe
+    typing, and text the keyboard does not send as keys (many accented
+    letters, all CJK) can be lost. Password fields are not marked secure
+    there, and a keyboard the user hid comes back only after the field has
+    lost the focus once.
+  - With GameActivity (`android-game-activity`) the keyboard types into
+    GameActivity's own input connection, whose text reaches winit as text
+    events that the vendored winit drops: what the keyboard commits there,
+    plain letters included, does not reach the field, and only the keys it
+    sends as key events do. Password fields are not marked secure, and a
+    keyboard the user hid comes back only after the field has lost the
+    focus once. GameActivity has not been run with this; use NativeActivity
+    (the default) for text input.
   - On iOS the app's view takes key input only (`UIKeyInput`): the keyboard
     shows no predictions and capitalises nothing by itself in any field,
     and CJK input methods do not compose (there is no marked text).
-  - The Android keyboard sees only the text typed since the field got the
-    focus, the last tap or the last Enter, so its suggestions do not see
-    the field's earlier text. The field asks it for no automatic capitals.
+  - The Android keyboard sees only the text it typed since it last started
+    over, never the field's earlier text, so its suggestions do not see
+    what was there before. It starts over when the field gets the focus;
+    at a tap, a hardware key other than a modifier, or the window losing
+    the focus; after its own Enter, Tab, Escape, arrow, Home or End keys
+    (moving the cursor with the space bar sends arrows); after a caret
+    move from code or a change between a password field and another
+    field; once its text passes 4096 UTF-16 units; when what it typed
+    starts with a character that joins the one before it (a combining mark
+    or vowel sign typed first); and, in a password field, after every
+    edit. The field asks it for no automatic capitals.
   - The Android keyboard keeps its own copy of the text it typed and takes
     it that the field has all of it. When `on_input` refuses that text or
-    changes its length (a length limit, digits only), a later edit that
-    reaches back into it, such as a Backspace into the previous word or an
-    autocorrection the user undoes, can delete or replace characters the
-    field shows. Typing and single Backspaces stay in step. With such a
-    field, return a caret move from code with the refusal
+    changes its length (a length limit, digits only, formatting that adds
+    spaces), or the app changes the field's value itself while the
+    keyboard has typed into it (from a subscription or a task's result), a
+    later edit that reaches back into that text, such as a Backspace into
+    the previous word or an autocorrection the user undoes, can delete or
+    replace characters the field shows. Typing does not bring the keyboard
+    back in step; starting over (above) does. With such a field, return a
+    caret move from code with the refusal or the change
     (`operation::move_cursor_to_end`): it starts the keyboard over from
     what the field shows.
   - When the app moves the focus itself (`operation::focus`, `focus_next`,
-    `unfocus`, or the field leaving the view) while the Android keyboard
-    composes a word, the word is dropped, and so is a word the keyboard had
-    taken back from the field after a Backspace into it.
+    `focus_previous`, `focusable::unfocus` run with
+    `iced::advanced::widget::operate`, or the field leaving the view) while
+    the Android keyboard composes a word, the word is dropped, and so is a
+    word the keyboard had taken back from the field after a Backspace into
+    it.
     Moving the caret from code (`move_cursor_to`, `select_all`) commits the
     word where it was typed first, then moves the caret, so a position
     counts the word. What the keyboard typed before such an operation
@@ -87,11 +107,27 @@ this file in the commit that fixes or finds a limitation.
     that virama then replaces the whole conjunct, the field's consonant
     with it, and the caret ends up after the conjunct. Typing at the end of
     the text is not affected.
-  - Password fields (`.secure(true)`) are marked secure to the system
-    keyboard on iOS and on Android with the input connection above: it
-    shows its password layout without suggestions and is asked not to
-    learn what is typed. On Android, what a keyboard composes there reaches
-    the field as typed text, so it is never drawn in clear.
+  - On Android, an on-screen keyboard's keys reach a field only as text,
+    Backspace, Delete, Enter, Tab, Escape, the arrows, Home and End. Its
+    Ctrl and Meta shortcuts (Ctrl+C, X, V and A on keyboards that have a
+    Ctrl key) and its other keys (Page Up and Down, function keys, Insert)
+    are dropped, and its arrows, Home and End come without its own Shift,
+    so they move the caret without selecting. A hardware keyboard's keys
+    reach the app as before.
+  - On Android, a keyboard the user hid while a field keeps the focus
+    comes back at a tap on a field, and also whenever the window gets the
+    focus back (after the notification shade, a system dialog or another
+    app): nothing tells the app that the user hid it.
+  - Password fields (`.secure(true)`) are marked secure to the Android
+    keyboard with the input connection above: it shows its password layout
+    without suggestions and is asked not to learn what is typed, and what
+    it composes there reaches the field as typed text, so it is never drawn
+    in clear. On iOS the view tells UIKit that the field is secure text
+    entry, which has not been seen on a simulator or device yet; the iOS
+    keyboard shows no suggestions in any field anyway (above). On both, the
+    keyboard is set up for the first field in the view that wants it, so a
+    `text_editor` focused from code that comes before the password field
+    leaves it unmarked (see `text_editor` below).
   - The keyboard covers fields in the lower half of the screen unless the
     root is padded with `SafeArea::padding` from `iced::mobile::safe_area()`,
     whose bottom rises with it, as the template's is. On Android it rises
@@ -122,7 +158,11 @@ this file in the commit that fixes or finds a limitation.
   tap cannot focus a `text_editor` (focusing it from code works), nor take
   the focus away from one: a `text_editor` focused from code stays focused
   when the user taps a `text_input`, and both then take what is typed, so
-  a password typed into a secure field shows in clear in the editor. Move
+  a password typed into a secure field shows in clear in the editor. When
+  the editor comes before that field in the view (above it in a column),
+  the keyboard is also set up for the editor: the password field is not
+  marked secure, so the keyboard may suggest and learn the password, and
+  on Android a word it composes shows in clear at the editor's caret. Move
   the focus away from it from code (`operation::focus` on another widget
   unfocuses the rest), for example from a Done button. Links in
   `rich_text` and `markdown` cannot be tapped, and `pick_list` and

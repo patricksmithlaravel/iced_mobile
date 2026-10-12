@@ -12,7 +12,7 @@ import android.view.inputmethod.BaseInputConnection;
  * {@link BaseInputConnection}'s; this class counts batch edits, has the view
  * report the mirror when the outermost one ends, handles the keys the
  * keyboard sends and the Enter and Tab it commits, and keeps line breaks and
- * tabs out of the mirror.
+ * tabs out of what it commits and composes (replaceText is not filtered).
  *
  * <p>A connection edits nothing once the view restarted the keyboard, was
  * uninstalled, or the system closed the connection. Everything here runs on
@@ -376,8 +376,8 @@ final class KeyboardConnection extends BaseInputConnection {
 
     /**
      * The text without its line breaks and tabs, which the app never gets
-     * inside longer text: the mirror then holds only what the field has, and
-     * every Backspace over it deletes in the field.
+     * inside longer text: what is committed is then in the field, and every
+     * Backspace over it deletes there.
      */
     private static CharSequence plain(CharSequence text) {
         if (text == null) {

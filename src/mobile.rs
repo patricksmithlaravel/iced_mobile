@@ -402,19 +402,29 @@
 //!   the commit, and builds its view again, before the tap: a Send button
 //!   that is enabled only once the field holds text takes the tap that
 //!   finished the word.
-//! - The keyboard sees only the text typed since the field got the focus,
-//!   the last tap or the last Enter, never the field's earlier text, so its
-//!   suggestions do not see what was there before. Backspace and the arrow
-//!   keys still reach that text. The field asks the keyboard for no
-//!   automatic capitals.
+//! - The keyboard sees only the text it typed since it last started over,
+//!   never the field's earlier text, so its suggestions do not see what was
+//!   there before. Backspace and the arrow keys still reach that text. It
+//!   starts over when the field gets the focus; at a tap, a hardware key
+//!   other than a modifier, or the window losing the focus; after its own
+//!   Enter, Tab, Escape, arrow, Home or End keys (moving the cursor with the
+//!   space bar sends arrows); after a caret move from code or a change
+//!   between a password field and another field; once its text passes 4096
+//!   UTF-16 units; when what it typed starts with a character that joins
+//!   the one before it (a combining mark or vowel sign typed first); and,
+//!   in a password field, after every edit. The field asks the keyboard for
+//!   no automatic capitals.
 //! - The keyboard keeps its own copy of the text it typed and takes it that
 //!   the field has all of it. An `on_input` that refuses that text or
-//!   changes its length (a length limit, digits only) puts it out of step:
-//!   a later edit that reaches back into it (a Backspace into the previous
-//!   word, an autocorrection undone) can delete or replace characters the
-//!   field shows. Return a caret move from code with the refusal
-//!   (`operation::move_cursor_to_end`), which starts the keyboard over from
-//!   what the field shows.
+//!   changes its length (a length limit, digits only, formatting that adds
+//!   spaces), or a change of the field's value from code while the keyboard
+//!   has typed into it (from a subscription or a task's result), puts it
+//!   out of step: a later edit that reaches back into that text (a
+//!   Backspace into the previous word, an autocorrection undone) can delete
+//!   or replace characters the field shows. Typing does not bring it back
+//!   in step; starting over does. Return a caret move from code with the
+//!   refusal or the change (`operation::move_cursor_to_end`), which starts
+//!   the keyboard over from what the field shows.
 //! - The keyboard's Enter (its key, its action button, or a commit of a
 //!   lone line break) reaches the application as the Enter key, after the
 //!   text typed before it, and submits a `text_input`; Tab (its key, or a
@@ -425,36 +435,60 @@
 //!   character instead, so a combining sequence the keyboard revises can
 //!   come out wrong there.
 //! - An application that moves the focus or the caret from code
-//!   (`operation::focus`, `focus_next`, `unfocus`, `move_cursor_to`,
-//!   `select_all`) while the keyboard types ends what it typed there: a
-//!   focus moved away drops the word being composed, and a caret moved in
-//!   the field commits it where it was typed first, then moves (so a
-//!   position counts the word, and `select_all` selects it too). What the
-//!   keyboard typed before the operation reaches the field before it runs.
+//!   (`operation::focus`, `focus_next`, `focus_previous`,
+//!   `move_cursor_to`, `select_all`, or `focusable::unfocus` run with
+//!   `iced::advanced::widget::operate`) while the keyboard types ends what
+//!   it typed there: a focus moved away drops the word being composed, and
+//!   a caret moved in the field commits it where it was typed first, then
+//!   moves (so a position counts the word, and `select_all` selects it
+//!   too). What the keyboard typed before the operation reaches the field
+//!   before it runs.
+//! - The keyboard's keys reach a field only as text, Backspace, Delete,
+//!   Enter, Tab, Escape, the arrows, Home and End. Its Ctrl and Meta
+//!   shortcuts (on keyboards that have a Ctrl key) and its other keys (Page
+//!   Up and Down, function keys, Insert) are dropped, and its arrows, Home
+//!   and End come without its own Shift, so they move the caret without
+//!   selecting. A hardware keyboard's keys reach the application as before.
 //! - If the user hides the keyboard while a field keeps the focus, a tap on
-//!   the field brings it back, also on a `text_editor`, which otherwise
-//!   ignores the tap. A tap elsewhere leaves it hidden.
+//!   a field brings it back, also on a `text_editor`, which otherwise
+//!   ignores the tap. A tap elsewhere leaves it hidden. The window getting
+//!   the focus back (after the notification shade, a system dialog or
+//!   another app) brings it back too: the shell is not told that the user
+//!   hid it.
 //!
-//! With GameActivity, and when the input connection cannot be installed
-//! (before Android 8, or after a failure, with one warning in the log),
-//! the keyboard reaches the application through key events only, without
-//! composition or suggestions, and text it does not send as keys (many
-//! accented letters, all CJK) can be lost. Password fields are not marked
-//! secure there. With GameActivity and before Android 8, a keyboard the user
-//! hid comes back only after the field has lost the focus once.
+//! When the input connection cannot be installed (before Android 8, or
+//! after a failure, with one warning in the log), the keyboard reaches the
+//! application through key events only, without composition or
+//! suggestions, and text it does not send as keys (many accented letters,
+//! all CJK) can be lost. Password fields are not marked secure there, and
+//! a keyboard the user hid comes back only after the field has lost the
+//! focus once.
+//!
+//! With GameActivity the keyboard types into GameActivity's own input
+//! connection, whose text reaches winit as text events that the vendored
+//! winit drops: what the keyboard commits there, plain letters included,
+//! does not reach the field, and only the keys it sends as key events do.
+//! Password fields are not marked secure, and a keyboard the user hid
+//! comes back only after the field has lost the focus once. GameActivity
+//! has not been run with this; use NativeActivity for text input.
 //!
 //! iOS sends typed text as key events: the app's view takes key input only
 //! (`UIKeyInput`), so the keyboard shows no predictions and capitalises
 //! nothing by itself, and CJK input methods do not compose (there is no
 //! marked text).
 //!
-//! A secure `text_input` (`.secure(true)`) is marked secure to the system
-//! keyboard on iOS and on Android with the input connection, which then
-//! shows its password layout without suggestions and is asked not to learn
-//! what is typed (on Android an input type of `TYPE_TEXT_VARIATION_PASSWORD`
-//! and `IME_FLAG_NO_PERSONALIZED_LEARNING`, on iOS `isSecureTextEntry`). On
-//! Android, what a keyboard composes there reaches the field as typed text,
-//! so it is never drawn in clear.
+//! A secure `text_input` (`.secure(true)`) is marked secure to the Android
+//! keyboard with the input connection, which then shows its password
+//! layout without suggestions and is asked not to learn what is typed (an
+//! input type of `TYPE_TEXT_VARIATION_PASSWORD` and
+//! `IME_FLAG_NO_PERSONALIZED_LEARNING`). What a keyboard composes there
+//! reaches the field as typed text, so it is never drawn in clear. On iOS
+//! the view answers `isSecureTextEntry` for it, which has not been seen on
+//! a simulator or device yet: the iOS keyboard shows no suggestions in any
+//! field anyway. On both, the keyboard is set up for the first field in
+//! the view that wants it, so a `text_editor` focused from code that comes
+//! before the secure field leaves it unmarked ([Known
+//! limitations](#known-limitations)).
 //!
 //! # Events for launchers
 //!
@@ -777,26 +811,35 @@
 //!   [clipboard](#clipboard) itself works: offer Copy and Paste buttons
 //!   where they matter.
 //! - **Text input on Android** ([Text input](#text-input)). The keyboard
-//!   sees only the text typed since the field got the focus, the last tap
-//!   or the last Enter; a word being composed is dropped when the application moves the
-//!   focus itself; and a combining mark or vowel sign typed right after the
-//!   place the user tapped joins the character before it, which
-//!   `text_input` then deletes with it, as it does on the desktop. In the
-//!   middle of the text, a consonant and virama the keyboard types right
-//!   before a consonant of the field make one conjunct with it, which the
-//!   keyboard's next Backspace or consonant there replaces whole, the
-//!   field's consonant with it. An `on_input` that refuses or shortens the
-//!   keyboard's text puts the keyboard out of step until the caret moves.
-//!   GameActivity, and Android before 8, get key events only, and their
-//!   password fields are not marked secure.
+//!   sees only the text it typed since it last started over (the focus, a
+//!   tap, its own Enter, Tab, Escape or arrow keys, and more); a word being
+//!   composed is dropped when the application moves the focus itself; and
+//!   a combining mark or vowel sign typed right after the place the user
+//!   tapped joins the character before it, which `text_input` then deletes
+//!   with it, as it does on the desktop. In the middle of the text, a
+//!   consonant and virama the keyboard types right before a consonant of
+//!   the field make one conjunct with it, which the keyboard's next
+//!   Backspace or consonant there replaces whole, the field's consonant
+//!   with it. An `on_input` that refuses the keyboard's text or changes its
+//!   length, or a change of the field's value from code while the keyboard
+//!   types, puts the keyboard out of step until it starts over, which
+//!   typing does not do. The keyboard's Ctrl and Meta shortcuts and its
+//!   Shift with the arrows do not reach fields. When the input connection
+//!   cannot be installed (Android before 8, or a failure), the keyboard
+//!   sends key events only, password fields are not marked secure and a
+//!   tap does not bring a hidden keyboard back. With GameActivity, what the
+//!   keyboard commits does not reach fields at all.
 //! - **Text input on iOS** ([Text input](#text-input)). The keyboard shows
 //!   no predictions, capitalises nothing by itself and does not compose
 //!   CJK: the app's view takes key input only.
 //! - **`text_editor` ignores touch.** A tap neither focuses a `text_editor`
 //!   nor takes the focus from one, so one focused from code goes on taking
 //!   the keyboard's text alongside a `text_input` the user taps, a password
-//!   too, which the editor shows in clear: move the focus away from it from
-//!   code.
+//!   too, which the editor shows in clear. When the editor comes before
+//!   that field in the view, the keyboard is set up for the editor, so the
+//!   password field is not marked secure either: the keyboard may suggest
+//!   and learn the password, and on Android a word it composes shows in
+//!   clear at the editor's caret. Move the focus away from it from code.
 //! - **Line breaks in inserted text on iOS.** UIKit hands over text one
 //!   insertion at a time. An insertion that is only a line break (`"\n"`,
 //!   `"\r"`, or `"\r\n"` counted once) is one Return, as from the

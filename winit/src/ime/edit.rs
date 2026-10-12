@@ -43,9 +43,11 @@
 //! commits: Enter and Tab reach the app as keys (the Java side turns a commit
 //! of only a line break into Enter and of only a tab into Tab, as iOS does),
 //! and inside longer text they are dropped, as `text_input` drops them from
-//! such an insertion on iOS. The Java side keeps them out of the mirror, so
-//! that the keyboard never deletes a character the app did not get; the
-//! engine drops them from what it reads too.
+//! such an insertion on iOS. The Java side keeps them out of what the
+//! keyboard commits, composes and types, so that the keyboard does not
+//! delete a character the app did not get; the engine drops them from what
+//! it reads too, which also covers `replaceText` (Android 14), whose text
+//! the Java side does not filter.
 
 use std::iter;
 use std::ops::Range;

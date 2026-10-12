@@ -61,11 +61,13 @@
 //! keyboard's outermost batch edit ends, and only when something changed
 //! since the last report, reset or rebase:
 //!
-//! - `text`: the mirror, the composing text included. It never holds a
-//!   line break or a tab: a commit of only a line break or only a tab is a
-//!   key instead (below), and they are dropped from longer text the
-//!   keyboard commits or composes, so every character of the mirror is in
-//!   the field.
+//! - `text`: the mirror, the composing text included. What the keyboard
+//!   commits, composes or types puts no line break or tab into it: a
+//!   commit of only a line break or only a tab is a key instead (below),
+//!   and they are dropped from longer text. `replaceText` (Android 14) is
+//!   not filtered, so its text can hold them, and one of only a line break
+//!   is no Enter; the engine drops them from what it reads, so the field
+//!   never gets one.
 //! - `selStart`, `selEnd`: the selection in UTF-16 units, as Android's
 //!   `Selection` has it: `selStart` is the anchor and `selEnd` the cursor,
 //!   so `selEnd` may be less than `selStart`. Equal when nothing is
@@ -223,7 +225,8 @@ pub(crate) const PURPOSE_NORMAL: i32 = 0;
 /// [`SHOW`]'s purpose for a secure field: a password.
 pub(crate) const PURPOSE_SECURE: i32 = 1;
 
-/// [`SHOW`]'s purpose for a terminal: no suggestions, nothing learned.
+/// [`SHOW`]'s purpose for a terminal: no suggestions. Unlike
+/// [`PURPOSE_SECURE`], it does not ask the keyboard not to learn.
 pub(crate) const PURPOSE_TERMINAL: i32 = 2;
 
 #[cfg(test)]

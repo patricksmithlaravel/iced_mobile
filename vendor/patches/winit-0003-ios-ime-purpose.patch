@@ -3,10 +3,11 @@ From: patricksmithlaravel <patricksmithlaravel@gmail.com>
 Date: Sun, 11 Oct 2026 23:30:28 -0500
 Subject: [PATCH] ios: implement Window::set_ime_purpose
 
-Window::set_ime_purpose only logged that it is ignored on iOS, so the
-soft keyboard treated every field alike: a password field got
-suggestions, autocorrection and auto-capitalization, and the keyboard
-could learn what was typed into it.
+Window::set_ime_purpose only logged that it is ignored on iOS, so UIKit
+took the default text input traits for every field: a password field was
+not secure text entry, and nothing asked the keyboard to leave
+autocorrection, auto-capitalization or smart punctuation out of a
+password or a terminal.
 
 The view now keeps the purpose and answers the optional
 UITextInputTraits getters that UIKit reads from the first responder to
@@ -37,7 +38,10 @@ With UIKit under Mac Catalyst (macOS 27 SDK), -[UITextInputTraits
 takeTraitsFrom:] took byte-identical traits from a UIKeyInput object
 that answers the defaults above and from one that implements none of
 the getters, and the answers for Password and Terminal as listed. Not
-yet seen on a simulator or device.
+yet seen on a simulator or device: the view adopts only UIKeyInput, and
+its keyboard on the simulator shows no predictions and capitalizes
+nothing in any field, with or without this change, so what the traits
+change for it there has not been observed.
 ---
  src/changelog/unreleased.md     |   6 ++
  src/platform_impl/ios/view.rs   | 115 +++++++++++++++++++++++++++++++-

@@ -906,7 +906,7 @@ Input on a device: `icm input android tap X Y`, `icm input web tap X Y`, `icm in
 ## Known limitations of iced_mobile {{framework_tag}}
 {{docs/agents/limitations.md of that tag: the safe area arrives with the window (headless only at a device's
 size); no edit menu on mobile; the Android keyboard composes only with NativeActivity from Android 8 and sees only
-the text typed since the last tap; a drag starting on a button does not scroll; text_editor and rich-text links ignore touch;
+the text it typed since it last started over; a drag starting on a button does not scroll; text_editor and rich-text links ignore touch;
 dark-mode switches keep Android's bar icons; lifecycle() messages come late, so save in on_lifecycle and lock
 on Background, never on Inactive; one window on Android; iPad unsupported; non-Latin text depends on system
 fonts (verify on device)}}

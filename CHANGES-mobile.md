@@ -253,43 +253,58 @@ Text input on Android, and secure fields on Android and iOS:
   commits and preedits for the focused field. A word the keyboard composes (CJK input methods and
   some other keyboards; Gboard on the Android 16 emulator commits each letter in Latin-script
   languages) shows underlined at the caret and joins the value once the keyboard commits it. The
-  keyboard sees only the text typed since the field got the focus, the last tap or the last Enter.
-  Before, the keyboard could only send key events: no composition, suggestions or swipe typing, and
-  characters outside the key map were lost. Before Android 8, when the input connection cannot be
-  installed (one warning in the log) and with GameActivity, nothing changes.
+  keyboard sees only the text it typed since it last started over: when the field got the focus,
+  at a tap, after its Enter, Tab, Escape or arrow keys, after a caret moved from code, and at the
+  other points `docs/agents/limitations.md` lists. Before, the keyboard could only send key events:
+  no composition, suggestions or swipe typing, and characters outside the key map were lost.
+  Before Android 8 and when the input connection cannot be installed (one warning in the log),
+  nothing changes. Nor with GameActivity, whose input connection hands the keyboard's text to winit
+  as text events that the vendored winit drops, so what the keyboard commits there does not reach
+  fields; the docs said before that only text not sent as keys could be lost there.
 - **Android:** the keyboard's Enter, from its key, its action button or a commit of a lone line
   break, reaches the app as the Enter key after the text typed before it, and submits a
   `text_input`; its Tab, from its key or a commit of a lone tab, is the Tab key. Line breaks and
   tabs inside longer committed text are dropped. Backspace and Delete reach the field's text
   before and after what the keyboard typed, also from keyboards that delete with
   `deleteSurroundingText` (AOSP's keyboard and its forks), and so do the arrow, Home and End keys,
-  without dropping keys sent in quick succession.
+  without dropping keys sent in quick succession. The keyboard's other keys no longer reach the
+  app, as they did as key events before: its Ctrl and Meta shortcuts (Ctrl+C, X, V and A on
+  keyboards that have a Ctrl key), Page Up and Down, function keys and Insert are dropped, and its
+  arrows, Home and End come without its own Shift, so they move the caret without selecting. A
+  hardware keyboard's keys reach the app as before.
 - **Android:** a tap, a hardware key other than a modifier or the window losing the focus commits
   the word being composed, and the app takes the commit, and builds its view again, before the tap:
   a Send button enabled only once the field holds text takes the tap that finished the word. Shift,
   Ctrl, Alt and the other modifiers leave the word alone.
 - **Android:** when the app moves the focus from code (`operation::focus`, `focus_next`,
-  `unfocus`) or the field leaves the view, the word being composed is dropped and the field's
-  preedit cleared: the window gets `input_method::Event::Closed`, as winit's desktop backends send
-  it when the input method is turned off. The next field's keyboard starts with no text. A caret
-  moved from code (`move_cursor_to`, `select_all`) commits the word where it was typed first, then
-  moves. What the keyboard typed before such an operation reaches the field before it runs.
+  `focus_previous`, or `focusable::unfocus` run with `iced::advanced::widget::operate`) or the
+  field leaves the view, the word being composed is dropped and the field's preedit cleared: the
+  window gets `input_method::Event::Closed`, as winit's desktop backends send it when the input
+  method is turned off. The next field's keyboard starts with no text. A caret moved from code
+  (`move_cursor_to`, `select_all`) commits the word where it was typed first, then moves. What the
+  keyboard typed before such an operation reaches the field before it runs.
 - **Android:** while no field asks for the keyboard, the keyboard's view is no text editor, so a
   hardware keyboard's keys reach the app as before, also with input methods that compose hardware
   keys.
-- **Android:** tapping a focused field brings back the keyboard the user hid, also a `text_editor`
-  focused from code, which otherwise ignores the tap. A tap elsewhere leaves it hidden. Before, the
-  field had to lose the focus once, as it still has with GameActivity and before Android 8.
-- Password fields (`.secure(true)`) are marked secure to the system keyboard on iOS, and on Android
-  with the input connection above: the keyboard shows its password layout without suggestions. On
-  Android the input type is `TYPE_TEXT_VARIATION_PASSWORD` with `IME_FLAG_NO_PERSONALIZED_LEARNING`,
-  and what a keyboard composes there reaches the field as typed text, never as a preedit drawn in
-  clear. On iOS the vendored winit implements `Window::set_ime_purpose`
-  (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers `isSecureTextEntry` and
-  turns off autocorrection, spell checking, auto-capitalisation and smart punctuation for a
-  password, the terminal purpose turns off the same without secure entry, and a changed purpose
-  reloads the keyboard that is shown. Before, the keyboard was not told that a field held a
-  password.
+- **Android:** tapping a field brings back the keyboard the user hid, also a `text_editor` focused
+  from code, which otherwise ignores the tap. A tap elsewhere leaves it hidden. The window getting
+  the focus back (after the notification shade, a system dialog or another app) brings it back
+  too, since nothing tells the shell that the user hid it. Before, the field had to lose the focus
+  once, as it still has with GameActivity, before Android 8 and when the input connection cannot be
+  installed.
+- Password fields (`.secure(true)`) are marked secure to the system keyboard on Android with the
+  input connection above, and on iOS: the Android keyboard shows its password layout without
+  suggestions. On Android the input type is `TYPE_TEXT_VARIATION_PASSWORD` with
+  `IME_FLAG_NO_PERSONALIZED_LEARNING`, and what a keyboard composes there reaches the field as typed
+  text, never as a preedit drawn in clear. On iOS the vendored winit implements
+  `Window::set_ime_purpose` (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers
+  `isSecureTextEntry` and turns off autocorrection, spell checking, auto-capitalisation and smart
+  punctuation for a password, the terminal purpose turns off the same without secure entry, and a
+  changed purpose reloads the keyboard that is shown. What that changes on iOS has not been seen
+  on a simulator or device yet: the keyboard there shows no suggestions in any field anyway. Before,
+  the keyboard was not told that a field held a password. The keyboard is set up for the first
+  field in the view that wants it, so a `text_editor` focused from code that comes before a
+  password field leaves the password field unmarked.
 - The known limitations in an app's `AGENTS.md` describe text input as it now is, and say that the
   iOS keyboard shows no predictions in any field: the app's view takes key input only.
 
