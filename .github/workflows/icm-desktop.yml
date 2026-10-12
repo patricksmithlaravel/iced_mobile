@@ -118,18 +118,27 @@ jobs:
           test -f /usr/share/applications/dev.icm.ci.desktop
           desktop-file-validate /usr/share/applications/dev.icm.ci.desktop
           dpkg -r demo
+      # Ubuntu 22.04's xvfb-run runs the app with `2>&1`, so its ICM_EVENT
+      # lines (stderr) come out on stdout: both go to one file. setsid gives the
+      # run its own process group, ended as a whole once the app is ready
+      # or has exited (--wait keeps $! alive as long as xvfb-run).
       - name: The AppImage draws its first frame under Xvfb
         working-directory: /tmp/demo
+        shell: bash
         run: |
           appimage=$(jq -r .artifacts.appimage /tmp/linux.json)
           chmod +x "$appimage"
-          ( ICM_EVENTS=1 APPIMAGE_EXTRACT_AND_RUN=1 timeout 60 xvfb-run -a "$appimage" 2> /tmp/appimage.err || true ) &
+          ICM_EVENTS=1 APPIMAGE_EXTRACT_AND_RUN=1 setsid --wait xvfb-run -a "$appimage" > /tmp/appimage.log 2>&1 &
+          pid=$!
           for _ in $(seq 1 120); do
-            if grep -q '^ICM_EVENT .*"kind":"ready"' /tmp/appimage.err 2>/dev/null; then break; fi
+            if grep -q '^ICM_EVENT .*"kind":"ready"' /tmp/appimage.log; then break; fi
+            kill -0 "$pid" 2>/dev/null || break
             sleep 0.5
           done
-          pkill -f "$(basename "$appimage")" || true
-          grep '^ICM_EVENT .*"kind":"ready"' /tmp/appimage.err
+          kill -- "-$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          tail -n 40 /tmp/appimage.log
+          grep '^ICM_EVENT .*"kind":"ready"' /tmp/appimage.log
       - name: icm verify linux
         working-directory: /tmp/demo
         run: icm verify linux --json -q | jq -e '.ok'

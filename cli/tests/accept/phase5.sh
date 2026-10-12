@@ -421,8 +421,10 @@ appimage_ready() {
     chmod +x "$appimage"
     rm -f "$ACCEPT/appimage.out" "$ACCEPT/appimage.err"
     if command -v xvfb-run >/dev/null; then
+        # Ubuntu 22.04's xvfb-run runs the app with `2>&1`: its stderr, where
+        # the ICM_EVENT lines go, comes out on stdout. Both go to one file.
         APPIMAGE_EXTRACT_AND_RUN=1 ICM_EVENTS=1 setsid --wait xvfb-run -a "$appimage" \
-            >"$ACCEPT/appimage.out" 2>"$ACCEPT/appimage.err" &
+            >"$ACCEPT/appimage.err" 2>&1 &
     else
         APPIMAGE_EXTRACT_AND_RUN=1 ICM_EVENTS=1 setsid --wait "$appimage" \
             >"$ACCEPT/appimage.out" 2>"$ACCEPT/appimage.err" &
