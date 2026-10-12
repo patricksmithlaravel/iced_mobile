@@ -26,7 +26,9 @@
 //! logger, through [`init_logger`]:
 //!
 //! - `android-native-activity`: runs in Android's `NativeActivity`, which
-//!   needs no Java code. An Android build needs exactly one activity feature.
+//!   needs no Java code in the APK (the keyboard's view is a dex embedded
+//!   in `iced_winit`: [Text input](#text-input)). An Android build needs
+//!   exactly one activity feature.
 //! - `mobile-logger`: lets [`init_logger`] install a logger: logcat,
 //!   os_log, stderr on the desktop, the console on the web.
 //! - `mobile-fira-sans`: embeds Fira Sans and makes it the default font. It
@@ -387,22 +389,24 @@
 //! suggest, autocorrect and swipe-type, and accented letters and CJK arrive
 //! whole:
 //!
-//! - Whether the keyboard composes is its choice: Gboard commits each
-//!   letter as it is typed in Latin-script languages, so `on_input` sees
-//!   every letter and nothing is underlined, while CJK input methods and
-//!   some other keyboards compose. A word being composed is a preedit:
-//!   drawn underlined at the caret, not part of the value until the
-//!   keyboard commits it (a space, a suggestion, Enter). `on_input` sees
-//!   the value without it until then.
-//!   A tap anywhere, a hardware key other than a modifier (Shift, Ctrl,
-//!   Alt, ...), or the window losing the focus commits it first, and the
-//!   application handles the commit, and builds its view again, before the
-//!   tap: a Send button that is enabled only once the field holds text
-//!   takes the tap that finished the word.
-//! - The keyboard sees only the text typed since the field got the focus or
-//!   since the last tap, never the field's earlier text, so its suggestions
-//!   and auto-capitalisation do not see what was there before. Backspace and
-//!   the arrow keys still reach that text.
+//! - Whether the keyboard composes is its choice: Gboard can commit each
+//!   letter as it is typed (it does in Latin-script languages on the
+//!   Android 16 emulator), so `on_input` sees every letter and nothing is
+//!   underlined, while CJK input methods and some other keyboards compose.
+//!   Do not count on `on_input` seeing whole words. A word being composed
+//!   is a preedit: drawn underlined at the caret, not part of the value
+//!   until the keyboard commits it (a space, a suggestion, Enter).
+//!   `on_input` sees the value without it until then. A tap anywhere, a
+//!   hardware key other than a modifier (Shift, Ctrl, Alt, ...), or the
+//!   window losing the focus commits it first, and the application handles
+//!   the commit, and builds its view again, before the tap: a Send button
+//!   that is enabled only once the field holds text takes the tap that
+//!   finished the word.
+//! - The keyboard sees only the text typed since the field got the focus,
+//!   the last tap or the last Enter, never the field's earlier text, so its
+//!   suggestions do not see what was there before. Backspace and the arrow
+//!   keys still reach that text. The field asks the keyboard for no
+//!   automatic capitals.
 //! - The keyboard keeps its own copy of the text it typed and takes it that
 //!   the field has all of it. An `on_input` that refuses that text or
 //!   changes its length (a length limit, digits only) puts it out of step:
@@ -431,15 +435,23 @@
 //!   the field brings it back, also on a `text_editor`, which otherwise
 //!   ignores the tap. A tap elsewhere leaves it hidden.
 //!
-//! On Android before 8, when the view cannot be added, and with
-//! GameActivity, the keyboard reaches the application through key events
-//! only, without composition or suggestions. iOS sends typed text as key
-//! events and has no marked text, so CJK input methods do not compose
-//! there.
+//! With GameActivity, and when the input connection cannot be installed
+//! (before Android 8, or after a failure, with one warning in the log),
+//! the keyboard reaches the application through key events only, without
+//! composition or suggestions, and text it does not send as keys (many
+//! accented letters, all CJK) can be lost. Password fields are not marked
+//! secure there. With GameActivity and before Android 8, a keyboard the user
+//! hid comes back only after the field has lost the focus once.
+//!
+//! iOS sends typed text as key events: the app's view takes key input only
+//! (`UIKeyInput`), so the keyboard shows no predictions and capitalises
+//! nothing by itself, and CJK input methods do not compose (there is no
+//! marked text).
 //!
 //! A secure `text_input` (`.secure(true)`) is marked secure to the system
-//! keyboard on both platforms, which then shows no suggestions and learns
-//! nothing from it (on Android an input type of `TYPE_TEXT_VARIATION_PASSWORD`
+//! keyboard on iOS and on Android with the input connection, which then
+//! shows its password layout without suggestions and is asked not to learn
+//! what is typed (on Android an input type of `TYPE_TEXT_VARIATION_PASSWORD`
 //! and `IME_FLAG_NO_PERSONALIZED_LEARNING`, on iOS `isSecureTextEntry`). On
 //! Android, what a keyboard composes there reaches the field as typed text,
 //! so it is never drawn in clear.
@@ -765,8 +777,8 @@
 //!   [clipboard](#clipboard) itself works: offer Copy and Paste buttons
 //!   where they matter.
 //! - **Text input on Android** ([Text input](#text-input)). The keyboard
-//!   sees only the text typed since the field got the focus or the last
-//!   tap; a word being composed is dropped when the application moves the
+//!   sees only the text typed since the field got the focus, the last tap
+//!   or the last Enter; a word being composed is dropped when the application moves the
 //!   focus itself; and a combining mark or vowel sign typed right after the
 //!   place the user tapped joins the character before it, which
 //!   `text_input` then deletes with it, as it does on the desktop. In the
@@ -775,11 +787,16 @@
 //!   keyboard's next Backspace or consonant there replaces whole, the
 //!   field's consonant with it. An `on_input` that refuses or shortens the
 //!   keyboard's text puts the keyboard out of step until the caret moves.
-//!   GameActivity, and Android before 8, get key events only.
+//!   GameActivity, and Android before 8, get key events only, and their
+//!   password fields are not marked secure.
+//! - **Text input on iOS** ([Text input](#text-input)). The keyboard shows
+//!   no predictions, capitalises nothing by itself and does not compose
+//!   CJK: the app's view takes key input only.
 //! - **`text_editor` ignores touch.** A tap neither focuses a `text_editor`
 //!   nor takes the focus from one, so one focused from code goes on taking
-//!   the keyboard's text alongside a `text_input` the user taps: move the
-//!   focus away from it from code.
+//!   the keyboard's text alongside a `text_input` the user taps, a password
+//!   too, which the editor shows in clear: move the focus away from it from
+//!   code.
 //! - **Line breaks in inserted text on iOS.** UIKit hands over text one
 //!   insertion at a time. An insertion that is only a line break (`"\n"`,
 //!   `"\r"`, or `"\r\n"` counted once) is one Return, as from the

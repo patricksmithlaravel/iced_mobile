@@ -24,7 +24,7 @@ every app instead. Its source is [examples/app/AGENTS.md](examples/app/AGENTS.md
 | `src/mobile.rs` | `iced::mobile` and `iced::android_main!`: the app-facing mobile API. Its docs are the main mobile documentation (features, manifest and plist keys, logs, lifecycle, Activity destruction, known limitations). |
 | `winit/src/lib.rs` | `iced_winit`: `set_android_app`, `activity_destroyed`, and the Android and iOS handling in the event loop. `Lifecycle`, `on_lifecycle`, `LifecycleEvent` and the `lifecycle()` subscription are in `winit/src/lifecycle.rs`; the other platform services in `safe_area.rs` (with `runtime/src/safe_area.rs`), `appearance.rs` (dark mode), `clipboard/` and `modifiers.rs` |
 | `winit/src/icm.rs` | the `ICM_EVENT` protocol (start, theme, ready, lifecycle, app_state, panic, warning, safe_area, exit) that launchers read |
-| `winit/src/ime.rs`, `winit/src/ime/` | Android (NativeActivity): the keyboard's input connection. `edit.rs` turns the keyboard's text into edits for the field (pure, tested on the host), `android.rs` is the JNI session, `dex.rs` the embedded dex and its contract with the Java side |
+| `winit/src/ime.rs`, `winit/src/ime/` | Android (NativeActivity): the keyboard's input connection. `ime.rs` turns edits into iced events and has the widget operations that find the focused fields and watch focus and caret moves, `edit.rs` turns the keyboard's text into edits for the field (pure, tested on the host), `android.rs` is the JNI session, `dex.rs` the embedded dex and its contract with the Java side |
 | `winit/android/` | the Java side of the keyboard (`java/iced_mobile/`), the committed `classes.dex` built from it, `classes.dex.inputs` (the sources' digests and the tools' versions) and `build-dex.sh` |
 | `winit/src/scene.rs`, `winit/src/ios_sdk.rs` | iOS: windows in the UIKit scene, and the SDK the app was linked with |
 | `vendor/winit/`, `vendor/patches/` | winit 0.30.13 with Android fixes, its own workspace; `vendor/winit/PATCHES.md` lists the patches |
@@ -69,7 +69,8 @@ ICED_TEST_BACKEND=tiny-skia cargo test --workspace
   and the Android SDK's `platforms;android-36` and `build-tools;36.0.0`, and its output is
   reproducible. `winit/android/build-dex.sh --check` rebuilds in a temporary directory and fails
   when the committed files differ. Without the SDK, `cargo test -p iced_winit` still fails when a
-  Java source changed without a rebuild.
+  Java source changed without a rebuild, or when the dex lacks a class or method the shell loads
+  (the `ime::dex` tests).
 
 In `cli/`, for any change to icm:
 
@@ -307,9 +308,11 @@ stop only the platforms they drive and leave the other platforms' devices alone
   states `lifecycle()` delivers. The Android keyboard's text (NativeActivity) goes through
   `winit/src/ime/`: the Java view in `winit/android/java/iced_mobile/` (built into
   `winit/android/classes.dex` by `winit/android/build-dex.sh`) reports its text, `ime/android.rs`
-  queues it and calls the view, `ime/edit.rs` turns it into the field's edits, and `ime/dex.rs`
-  holds the contract between them; `winit/src/window.rs` shows and hides the keyboard through it.
-  On iOS, secure and terminal fields set the vendored winit view's text input traits.
+  queues it and calls the view, `ime/edit.rs` turns it into the field's edits, `winit/src/ime.rs`
+  into iced events, and `ime/dex.rs` holds the contract between them; `winit/src/window.rs` shows
+  and hides the keyboard through it, and `winit/src/lib.rs` hands it taps, hardware keys and widget
+  operations. On iOS, secure and terminal fields set the vendored winit view's text input traits
+  (`vendor/winit/src/platform_impl/ios/view.rs`, patch 0003).
 - **winit itself:** `vendor/winit/src/platform_impl/android/` and `.../ios/`.
 - **What icm does per platform:** `cli/src/android/`, `cli/src/platform/ios_sim/`, `cli/src/web/` and
   `cli/src/platform/desktop/`. Pipelines are in `docs/icm/DESIGN.md` §10, and the output contract is

@@ -251,11 +251,12 @@ Text input on Android, and secure fields on Android and iOS:
   and loads it at run time, so APKs still have no Java code: its view gives the keyboard an input
   connection, and the shell turns what the keyboard does to that view's text into key presses,
   commits and preedits for the focused field. A word the keyboard composes (CJK input methods and
-  some other keyboards; Gboard commits each letter in Latin-script languages) shows underlined at
-  the caret and joins the value once the keyboard commits it. The keyboard sees only the text typed
-  since the field got the focus or since the last tap. Before, the keyboard could only send key
-  events: no composition, suggestions or swipe typing, and characters outside the key map were lost.
-  On older Android versions, when the view cannot be added, and with GameActivity, nothing changes.
+  some other keyboards; Gboard on the Android 16 emulator commits each letter in Latin-script
+  languages) shows underlined at the caret and joins the value once the keyboard commits it. The
+  keyboard sees only the text typed since the field got the focus, the last tap or the last Enter.
+  Before, the keyboard could only send key events: no composition, suggestions or swipe typing, and
+  characters outside the key map were lost. Before Android 8, when the input connection cannot be
+  installed (one warning in the log) and with GameActivity, nothing changes.
 - **Android:** the keyboard's Enter, from its key, its action button or a commit of a lone line
   break, reaches the app as the Enter key after the text typed before it, and submits a
   `text_input`; its Tab, from its key or a commit of a lone tab, is the Tab key. Line breaks and
@@ -278,15 +279,19 @@ Text input on Android, and secure fields on Android and iOS:
   keys.
 - **Android:** tapping a focused field brings back the keyboard the user hid, also a `text_editor`
   focused from code, which otherwise ignores the tap. A tap elsewhere leaves it hidden. Before, the
-  field had to lose the focus once.
-- Password fields (`.secure(true)`) are marked secure to the system keyboard: on Android the input
-  type is `TYPE_TEXT_VARIATION_PASSWORD` with `IME_FLAG_NO_PERSONALIZED_LEARNING`, and what a
-  keyboard composes there reaches the field as typed text, never as a preedit drawn in clear; on
-  iOS the vendored winit implements `Window::set_ime_purpose`
-  (`vendor/patches/winit-0003-ios-ime-purpose.patch`), so the view answers `isSecureTextEntry`,
-  and the terminal purpose turns off autocorrection, spell checking and auto-capitalisation too.
-  Before, the keyboard could suggest or learn what was typed.
-- The known limitations in an app's `AGENTS.md` describe text input as it now is.
+  field had to lose the focus once, as it still has with GameActivity and before Android 8.
+- Password fields (`.secure(true)`) are marked secure to the system keyboard on iOS, and on Android
+  with the input connection above: the keyboard shows its password layout without suggestions. On
+  Android the input type is `TYPE_TEXT_VARIATION_PASSWORD` with `IME_FLAG_NO_PERSONALIZED_LEARNING`,
+  and what a keyboard composes there reaches the field as typed text, never as a preedit drawn in
+  clear. On iOS the vendored winit implements `Window::set_ime_purpose`
+  (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers `isSecureTextEntry` and
+  turns off autocorrection, spell checking, auto-capitalisation and smart punctuation for a
+  password, the terminal purpose turns off the same without secure entry, and a changed purpose
+  reloads the keyboard that is shown. Before, the keyboard was not told that a field held a
+  password.
+- The known limitations in an app's `AGENTS.md` describe text input as it now is, and say that the
+  iOS keyboard shows no predictions in any field: the app's view takes key input only.
 
 ## Changes in v0.14.1-mobile.2
 
