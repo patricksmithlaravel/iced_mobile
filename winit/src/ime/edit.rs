@@ -126,7 +126,8 @@ pub(crate) enum Request {
     /// them and build its view again, before the next message is applied:
     /// after an Enter, Tab or Escape key, the field may have been submitted
     /// (and cleared) or the focus moved, and the text the keyboard typed
-    /// after the key belongs to what the field is then.
+    /// after the key belongs to what the field is then (the application's
+    /// turn, in `feed`).
     Yield,
     /// Asks the Java side to rebase at the engine's generation
     /// (`Keyboard.forget`), with no new generation: the session's text
@@ -3256,7 +3257,9 @@ mod tests {
         }
 
         // AOSP's keyboard and others commit a username, Tab, then a
-        // password in one go.
+        // password in one go: in a field the focus stays in, all of it
+        // lands there. An application that moves the focus at the Tab or
+        // Enter gets the rest in the next field (`feed`).
         let mut harness = Harness::new("", "");
         harness.mirror.commit_text("sam", 1);
         harness.mirror.commit_text("\t", 1);

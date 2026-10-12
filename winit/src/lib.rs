@@ -878,6 +878,12 @@ enum Event<Message: 'static> {
     /// sent: the event loop replays it. Takes no slot of the proxy.
     #[cfg(all(target_os = "android", feature = "android-native-activity"))]
     Deferred,
+    /// Android (NativeActivity): the application's turn after the keyboard's
+    /// Enter, Tab or Escape ended, and an `AboutToWait` applies what the
+    /// keyboard sent after the key (see `ime::Shell::drain`). Never sent:
+    /// the event loop replays it. Takes no slot of the proxy.
+    #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+    Resume,
 }
 
 #[derive(Debug)]
@@ -1694,16 +1700,15 @@ async fn run_instance<P>(
 
                         // Android (NativeActivity): what the keyboard typed
                         // since the event loop last turned. After its Enter,
-                        // Tab or Escape the application takes its turn, and
-                        // the views are built again, before the rest.
+                        // Tab or Escape the application takes its turn: it
+                        // handles the key, the views are built again and
+                        // the operations it returns run, before the rest.
                         #[cfg(all(
                             target_os = "android",
                             feature = "android-native-activity"
                         ))]
                         if keyboard.drain(&mut window_manager, &mut events) {
-                            replay.push_back(Event::EventLoopAwakened(
-                                event::Event::AboutToWait,
-                            ));
+                            replay.push_back(Event::Resume);
                         }
 
                         if events.is_empty()
@@ -1952,6 +1957,17 @@ async fn run_instance<P>(
                 for (_id, window) in window_manager.iter_mut() {
                     window.raw.request_redraw();
                 }
+            }
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            Event::Resume => {
+                keyboard.resume();
+
+                replay.push_front(Event::EventLoopAwakened(
+                    event::Event::AboutToWait,
+                ));
             }
             #[cfg(any(target_os = "android", target_os = "ios"))]
             Event::SystemTheme(mode) => {

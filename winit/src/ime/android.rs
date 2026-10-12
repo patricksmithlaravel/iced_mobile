@@ -36,12 +36,14 @@
 //!   `move_cursor_to`, `select_all`, ...) can move the focus or the caret
 //!   while the keyboard has typed into the field, or while the engine knows
 //!   the end of the field's text before the origin, which a caret moved
-//!   elsewhere would make wrong ([`Engine::follows_caret`]). What the
-//!   keyboard sent before it belongs before it, so [`operate`] applies the
-//!   queue first; when that gives the field edits, the operation waits: the
-//!   event loop replays an `AboutToWait`, which hands the field the edits
-//!   and builds the views again, then runs it, and the operations made
-//!   meanwhile after it ([`schedule`], [`deferred`]). The operation then runs through a
+//!   elsewhere would make wrong ([`Feed::follows`]). What the keyboard sent
+//!   before it belongs before it, so [`operate`] applies the queue first,
+//!   except in the application's turn after an Enter, Tab or Escape, when
+//!   the operation may answer the key (see `feed`). When that gives the
+//!   field edits, the operation waits: the event loop replays an
+//!   `AboutToWait`, which hands the field the edits and builds the views
+//!   again, then runs it, and the operations made meanwhile after it
+//!   ([`schedule`], [`deferred`]). The operation then runs through a
 //!   [`Watch`](super::Watch), which records what it moves of the focus and
 //!   of the carets of the fields that have it, and [`operated`] ends the
 //!   session: a focus moved to another widget is handled as [`disable`]
@@ -59,15 +61,17 @@
 //! - [`Shell::drain`], when the event loop is about to wait, applies the
 //!   queued messages to the engine in order and gives the edits to the
 //!   window whose field asks for the keyboard (none: they are dropped).
-//!   After an Enter, Tab or Escape key it stops, and the event loop replays
-//!   an `AboutToWait` for the rest: the application handles the key (a
-//!   submit that clears the field, a focus it moves) and builds its view
-//!   again before the text the keyboard typed after the key reaches the
-//!   field. The Java side rebases its mirror right after such a key, as
-//!   after an arrow, Home or End, with no new generation, so none of that
-//!   text is dropped. When a message asks to forget the text (the session's
-//!   text starts with a character that joins the text before it), the Java
-//!   side is asked to rebase, with no new generation.
+//!   After an Enter, Tab or Escape key it stops, and the application takes
+//!   its turn (see `feed`): it handles the key (a submit that clears the
+//!   field), builds its view again, and the widget operations its `update`
+//!   returns run (a focus moved to the next field), before the event loop
+//!   replays [`Shell::resume`] and an `AboutToWait` for the rest, which then
+//!   reaches the field the application left the focus in. The Java side
+//!   rebases its mirror right after such a key, as after an arrow, Home or
+//!   End, with no new generation, so none of that text is dropped. When a
+//!   message asks to forget the text (the session's text starts with a
+//!   character that joins the text before it), the Java side is asked to
+//!   rebase, with no new generation.
 //! - [`Shell::interrupt`], before a touch starts, a mouse button is pressed,
 //!   a hardware key other than a modifier is pressed or the window loses
 //!   the focus reaches the application: the queued messages are applied
@@ -76,10 +80,13 @@
 //!   field edits, the event loop applies them and builds the views again
 //!   before the event reaches the application (it returns true): a tap on a
 //!   Send button submits the word being composed, even when the button is
-//!   enabled only once the field holds text. The keyboard's text starts
-//!   again where the caret is after the event. A modifier (Shift, Ctrl,
-//!   Alt, ...) moves no caret and ends nothing: an input method that
-//!   composes a hardware keyboard's letters may let it through.
+//!   enabled only once the field holds text. When the queue holds an Enter,
+//!   Tab or Escape key, the edits up to it come first and the application
+//!   takes its turn; the event, handled again after it, applies the rest.
+//!   The keyboard's text starts again where the caret is after the event. A
+//!   modifier (Shift, Ctrl, Alt, ...) moves no caret and ends nothing: an
+//!   input method that composes a hardware keyboard's letters may let it
+//!   through.
 //! - Dropping the [`Shell`] at the end of the run uninstalls the Java side,
 //!   deletes its global reference, empties the queue and lets go of the
 //!   window and the `AndroidApp`. The class and its loader stay loaded for
@@ -92,7 +99,8 @@
 #![allow(unsafe_code)]
 
 use super::dex::{self, Method};
-use super::edit::{Edit, Engine, Message, Request};
+use super::edit::{Edit, Message};
+use super::feed::{self, Call, Feed};
 use crate::conversion;
 use crate::core::widget::Operation;
 use crate::core::{self, input_method, mouse, theme, window};
@@ -240,28 +248,31 @@ where
         return Some((operation, None));
     };
 
-    let edits = SESSION.with_borrow_mut(|session| {
+    let (edits, due) = SESSION.with_borrow_mut(|session| {
         let mut edits = Vec::new();
 
-        // After an Enter, Tab or Escape the rest waits: the edits make the
-        // operation wait too, and the event loop's next `AboutToWait`
-        // applies it.
-        if session.is_shown() {
-            let _ = session.apply_queue(&mut edits);
+        if !session.is_shown() {
+            return (edits, false);
         }
 
-        edits
+        let mut calls = Vec::new();
+        let due = session.feed.operate(&mut Shared, &mut edits, &mut calls);
+        session.perform(calls);
+
+        (edits, due)
     });
 
-    if deliver(edits, windows, events) {
+    // Edits given to the field now, or up to a key the application has not
+    // handled yet, come first.
+    if deliver(edits, windows, events) || due {
         defer(operation);
         return None;
     }
 
     let typing = SESSION.with_borrow(|session| {
-        (session.is_shown() && session.engine.follows_caret()).then(|| Typing {
+        (session.is_shown() && session.feed.follows()).then(|| Typing {
             window,
-            hold: session.engine.is_composing(),
+            hold: session.feed.holds(),
         })
     });
 
@@ -290,7 +301,9 @@ pub(crate) fn operated<P, C>(
             core::Event::InputMethod(input_method::Event::Closed),
         ));
     } else if moved.caret || !moved.held.is_empty() {
-        let edits = SESSION.with_borrow_mut(Session::finish);
+        // It stops after an Enter, Tab or Escape: the key left the engine
+        // idle, so the rest acts at the caret wherever it is.
+        let (edits, _waits) = SESSION.with_borrow_mut(Session::finish);
 
         let _ = deliver(edits, windows, events);
     }
@@ -348,9 +361,12 @@ impl Shell {
     /// loss of the window's focus ends what the keyboard was typing (see the
     /// module's documentation).
     ///
-    /// True when the field got edits: the event loop then handles them, and
-    /// builds the views again, before it hands `event` to the application,
-    /// and calls this again with `event`, which then does nothing.
+    /// True when the field got edits, or the application is to take its
+    /// turn after a key the keyboard sent before the event: the event loop
+    /// then handles them, and builds the views again, before it hands
+    /// `event` to the application, and calls this again with `event`, which
+    /// then applies what the keyboard sent after the key, if any, the same
+    /// way, or does nothing.
     #[must_use]
     pub(crate) fn interrupt<P, C>(
         &mut self,
@@ -382,15 +398,19 @@ impl Shell {
             _ => return false,
         }
 
-        let edits = if std::mem::take(&mut self.replaying) {
-            Vec::new()
+        // Handled again: done, unless the application took its turn after a
+        // key, and the rest comes before the event.
+        let (edits, waits) = if std::mem::take(&mut self.replaying)
+            && !SESSION.with_borrow(|session| session.feed.takes_turn())
+        {
+            (Vec::new(), false)
         } else {
             SESSION.with_borrow_mut(Session::finish)
         };
 
         closed(windows, events);
 
-        self.replaying = deliver(edits, windows, events);
+        self.replaying = deliver(edits, windows, events) || waits;
         self.replaying
     }
 
@@ -398,10 +418,12 @@ impl Shell {
     /// since it last turned, and gives the edits to the window whose field
     /// asks for the keyboard. Called before the loop's idle check.
     ///
-    /// True when it stopped after an Enter, Tab or Escape key with messages
-    /// left: the event loop then handles the edits, and builds the views
-    /// again, and replays an `AboutToWait`, which calls this again for the
-    /// rest.
+    /// True when the application takes its turn after an Enter, Tab or
+    /// Escape key, which this gave the field or an earlier call did: the
+    /// event loop then handles the edits, builds the views again and runs
+    /// the operations, and then replays [`Shell::resume`] behind what it
+    /// replays already, then an `AboutToWait`, which calls this again for
+    /// the rest. During the turn this applies nothing.
     #[must_use]
     pub(crate) fn drain<P, C>(
         &mut self,
@@ -413,18 +435,26 @@ impl Shell {
         C: Compositor<Renderer = P::Renderer>,
         P::Theme: theme::Base,
     {
-        let (edits, more) = SESSION.with_borrow_mut(|session| {
+        let (edits, turn) = SESSION.with_borrow_mut(|session| {
             let mut edits = Vec::new();
-            let more = session.apply_queue(&mut edits);
+            let mut calls = Vec::new();
+            let turn = session.feed.drain(&mut Shared, &mut edits, &mut calls);
+            session.perform(calls);
 
-            (edits, more)
+            (edits, turn)
         });
 
         closed(windows, events);
 
         let _ = deliver(edits, windows, events);
 
-        more
+        turn
+    }
+
+    /// The application's turn after an Enter, Tab or Escape key ended: the
+    /// next drain applies what the keyboard sent after it.
+    pub(crate) fn resume(&mut self) {
+        SESSION.with_borrow_mut(|session| session.feed.resume());
     }
 }
 
@@ -442,7 +472,7 @@ impl Drop for Shell {
 struct Session {
     app: Option<AndroidApp>,
     keyboard: Keyboard,
-    engine: Engine,
+    feed: Feed,
     /// The purpose the keyboard was last shown for, while a field asks for
     /// it.
     shown: Option<i32>,
@@ -524,37 +554,31 @@ impl Session {
 
     /// The field the keyboard typed into lost the focus: what the keyboard
     /// sent, typed and composes there is dropped, and its Java side starts
-    /// over unless it holds nothing (see [`Engine::abandon`]).
+    /// over unless it holds nothing (see [`Feed::abandon`]).
     fn abandon(&mut self) {
-        let mut dropped = std::mem::take(&mut queue().messages);
-
-        if let Some(generation) = self.engine.abandon(dropped.make_contiguous())
-        {
+        if let Some(generation) = self.feed.abandon(&mut Shared) {
             self.call(dex::RESET, &[JValue::Int(generation)]);
         }
     }
 
-    /// The user or the application moves the caret: applies all the
+    /// The user or the application moves the caret: applies what the
     /// keyboard sent, then, unless the engine is idle, resets it, which
     /// commits a composition at the field's caret, and has the Java side
-    /// forget its text ([`Engine::interrupt`]). Returns the edits for the
-    /// field.
-    fn finish(&mut self) -> Vec<Edit> {
+    /// forget its text ([`Feed::finish`]). Returns the edits for the field,
+    /// and whether the application is to take its turn after an Enter, Tab
+    /// or Escape key first, after which this applies the rest.
+    fn finish(&mut self) -> (Vec<Edit>, bool) {
         let mut edits = Vec::new();
 
         if !self.is_installed() {
-            return edits;
+            return (edits, false);
         }
 
-        // All of it comes before the event or the operation, so it does not
-        // stop after an Enter, Tab or Escape.
-        while self.apply_queue(&mut edits) {}
+        let mut calls = Vec::new();
+        let waits = self.feed.finish(&mut Shared, &mut edits, &mut calls);
+        self.perform(calls);
 
-        if let Some(generation) = self.engine.interrupt(&mut edits) {
-            self.call(dex::RESET, &[JValue::Int(generation)]);
-        }
-
-        edits
+        (edits, waits)
     }
 
     fn is_installed(&self) -> bool {
@@ -613,36 +637,18 @@ impl Session {
         }
     }
 
-    /// Applies the queued messages in order, and does what each requests
-    /// before the next is applied. Stops after a message that yields (an
-    /// Enter, Tab or Escape key), leaving the rest queued ahead of what the
-    /// keyboard sends meanwhile: true when it left any.
-    fn apply_queue(&mut self, edits: &mut Vec<Edit>) -> bool {
-        // The lock is let go of before anything calls into Java.
-        let mut messages = std::mem::take(&mut queue().messages);
-
-        while let Some(message) = messages.pop_front() {
-            match self.engine.apply(message, edits) {
-                Request::None => {}
-                Request::Yield => {
-                    if messages.is_empty() {
-                        break;
-                    }
-
-                    let mut queue = queue();
-                    messages.append(&mut queue.messages);
-                    queue.messages = messages;
-
-                    return true;
-                }
-                Request::Forget => {
-                    let generation = self.engine.generation();
+    /// Makes the calls to the Java side the feed asked for, in order.
+    fn perform(&self, calls: Vec<Call>) {
+        for call in calls {
+            match call {
+                Call::Forget(generation) => {
                     self.call(dex::FORGET, &[JValue::Int(generation)]);
+                }
+                Call::Reset(generation) => {
+                    self.call(dex::RESET, &[JValue::Int(generation)]);
                 }
             }
         }
-
-        false
     }
 
     /// Calls `method` of the installed Java side. A failure is logged; the
@@ -678,7 +684,7 @@ impl Session {
 
         // Deletes the global reference.
         self.keyboard = Keyboard::Absent;
-        self.engine = Engine::new();
+        self.feed = Feed::new();
         self.shown = None;
         self.touched = false;
         self.closed = None;
@@ -910,6 +916,24 @@ fn warn(what: &str, error: &dyn std::fmt::Display) {
 /// always whole.
 fn queue() -> MutexGuard<'static, Queue> {
     QUEUE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The queue's messages, for the feed. The lock is held only to take them
+/// and to put them back, never while the feed applies them or anything
+/// calls into Java.
+struct Shared;
+
+impl feed::Queue for Shared {
+    fn take(&mut self) -> VecDeque<Message> {
+        std::mem::take(&mut queue().messages)
+    }
+
+    fn put_back(&mut self, mut rest: VecDeque<Message>) {
+        let mut queue = queue();
+
+        rest.append(&mut queue.messages);
+        queue.messages = rest;
+    }
 }
 
 /// Holds the window to wake, or lets go of it.

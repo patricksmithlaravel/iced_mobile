@@ -11,6 +11,8 @@
 //!   the shell.
 //! - `edit`: the engine that turns the keyboard's reports into edits for the
 //!   focused field.
+//! - `feed`: the engine fed the queue in order, and the application's turn
+//!   after the keyboard's Enter, Tab or Escape.
 //! - `android`: the JNI glue, the queue the Java side fills, and the
 //!   shell's side of a session (`Shell`, `enable`, `disable`, `operate`,
 //!   `operated`, and the operations it defers).
@@ -32,6 +34,11 @@ pub(crate) mod dex;
     test
 ))]
 pub(crate) mod edit;
+#[cfg(any(
+    all(target_os = "android", feature = "android-native-activity"),
+    test
+))]
+pub(crate) mod feed;
 
 #[cfg(all(target_os = "android", feature = "android-native-activity"))]
 mod android;

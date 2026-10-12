@@ -160,9 +160,16 @@ this file in the commit that fixes or finds a limitation.
     commit of a lone line break) reaches the app as the Enter key, after the
     text typed before it, and submits a `text_input`; its Tab (its key, or a
     commit of a lone tab) is the Tab key. The app handles Enter, Tab and
-    Escape, and builds its view again, before the text the keyboard typed
-    after them reaches the field, so a field cleared on submit gets that
-    text alone. A line break or tab inside longer committed text (a
+    Escape, builds its view again and runs the widget operations its
+    `update` returns for them before the text the keyboard typed after them
+    reaches a field, also when a tap or an operation comes in between: a
+    field cleared on submit gets that text alone, and the field `on_submit`
+    moves the focus to (`focus_next`) gets it. A key the app handles later,
+    from a subscription (`keyboard::listen`, which is how an app takes Tab:
+    `text_input` ignores it) or a task, comes after that text: what the
+    keyboard sends in the same instant, such as a password a credential
+    keyboard types right after a username and Tab, goes to the field that
+    had the focus. A line break or tab inside longer committed text (a
     suggestion, a paste from the keyboard's clipboard) is dropped.
   - On iOS, Return and Tab count only when UIKit inserts them alone, as
     the Return and Tab keys do (`"\r\n"` is one Return). A line break or

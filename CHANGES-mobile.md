@@ -264,8 +264,12 @@ Text input on Android, and secure fields on Android and iOS:
 - **Android:** the keyboard's Enter, from its key, its action button or a commit of a lone line
   break, reaches the app as the Enter key after the text typed before it, and submits a
   `text_input`; its Tab, from its key or a commit of a lone tab, is the Tab key. The app handles
-  Enter, Tab and Escape, and builds its view again, before the text typed after them, and none of
-  that text is dropped, however soon it follows. Line breaks and tabs inside longer committed text
+  Enter, Tab and Escape, builds its view again and runs the widget operations its `update` returns
+  for them, before the text typed after them reaches a field, also when a tap or an operation comes
+  in between: a field cleared on submit gets that text alone, and the field `on_submit` moves the
+  focus to gets it. None of that text is dropped, however soon it follows. A key the app handles
+  from a subscription (`keyboard::listen`, how an app takes Tab) or a task comes after that text,
+  which then goes to the field that had the focus. Line breaks and tabs inside longer committed text
   are dropped. Backspace and Delete reach the field's text
   before and after what the keyboard typed, also from keyboards that delete with
   `deleteSurroundingText` (AOSP's keyboard and its forks), and so do the arrow, Home and End keys,

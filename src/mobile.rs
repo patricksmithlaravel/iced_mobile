@@ -430,10 +430,15 @@
 //!   lone line break) reaches the application as the Enter key, after the
 //!   text typed before it, and submits a `text_input`; Tab (its key, or a
 //!   commit of a lone tab) and Escape are keys too. The application handles
-//!   them, and builds its view again, before the text the keyboard typed
-//!   after them reaches the field, so a field cleared on submit gets that
-//!   text alone. A line break or tab inside longer committed text is
-//!   dropped, as on iOS.
+//!   them, builds its view again and runs the widget operations its
+//!   `update` returns for them before the text the keyboard typed after
+//!   them reaches a field: a field cleared on submit gets that text alone,
+//!   and the field `on_submit` moves the focus to (`focus_next`) gets it.
+//!   A key the application handles later, from a subscription
+//!   (`keyboard::listen`, which is how it takes Tab: `text_input` ignores
+//!   it) or a task, comes after that text, which then goes to the field
+//!   that had the focus. A line break or tab inside longer committed text
+//!   is dropped, as on iOS.
 //! - The keyboard's edits reach the field as the clusters `text_input`
 //!   moves and deletes by. `text_editor`'s Backspace can delete by
 //!   character instead, so a combining sequence the keyboard revises can
@@ -828,10 +833,13 @@
 //! - **Text input on Android** ([Text input](#text-input)). The keyboard
 //!   sees only the text it typed since it last started over (the focus, a
 //!   tap, its own Enter, Tab, Escape or arrow keys, and more); a word being
-//!   composed is dropped when the application moves the focus itself; and
-//!   a combining mark, vowel sign or virama typed right after the place the
-//!   user tapped joins the character before it, which `text_input` then
-//!   deletes with it, as it does on the desktop. In the middle of the text,
+//!   composed is dropped when the application moves the focus itself; when
+//!   it moves the focus at the keyboard's Tab or Enter from a subscription
+//!   or a task (Tab needs one), text the keyboard sends right after the key
+//!   goes to the field that had the focus; and a combining mark, vowel sign
+//!   or virama typed right after the place the user tapped joins the
+//!   character before it, which `text_input` then deletes with it, as it
+//!   does on the desktop. In the middle of the text,
 //!   a consonant and virama the keyboard types right before a consonant of
 //!   the field make one conjunct with it, which the keyboard's next
 //!   Backspace or consonant there replaces whole, the field's consonant
