@@ -789,7 +789,9 @@ fn a_detached_failure_keeps_its_exit_code() {
 
 /// `--dry-run` on the web, Android, desktop, `devices` and session commands
 /// prints a plan and touches nothing: no adb, no xcrun, no browser, no
-/// build, no session, no ledger. A desktop shot needs no running app.
+/// build, no session, no ledger. A desktop shot needs no running app. The
+/// iOS Simulator's run reads a stand-in Xcode's version, and is refused on a
+/// host other than macOS.
 #[test]
 fn dry_runs_touch_nothing() {
     let sandbox = Sandbox::with_fixture("app");
@@ -809,6 +811,21 @@ fn dry_runs_touch_nothing() {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // The iOS Simulator's run plans with the selected Xcode's version: a
+    // stand-in Xcode answers, so the plan does not depend on the host's.
+    let xcode = tempfile::tempdir().unwrap();
+    let developer = xcode.path().join("Xcode.app/Contents/Developer");
+    std::fs::create_dir_all(developer.join("usr/bin")).unwrap();
+    let xcodebuild = xcode.path().join("xcodebuild");
+    std::fs::write(
+        &xcodebuild,
+        "#!/bin/sh\necho 'Xcode 27.0'\necho 'Build version 27A266a'\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&xcodebuild, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     let commands: &[&[&str]] = &[
@@ -856,7 +873,19 @@ fn dry_runs_touch_nothing() {
         ] {
             let _ = command.env(format!("ICM_TOOL_{tool}"), &fake);
         }
+        let _ = command
+            .env("DEVELOPER_DIR", &developer)
+            .env("ICM_TOOL_XCODEBUILD", &xcodebuild);
         let result = result(&command.output().unwrap());
+        if *args == ["run", "ios-sim"] && !cfg!(target_os = "macos") {
+            // The iOS Simulator needs macOS: elsewhere its run is refused
+            // before it plans, or runs, anything.
+            assert_eq!(
+                result["errors"][0]["id"], "env.unsupported_host",
+                "{args:?}: {result}"
+            );
+            continue;
+        }
         assert_eq!(result["exit"], 0, "{args:?}: {result}");
         assert_eq!(result["dry_run"], true, "{args:?}: {result}");
         assert!(
