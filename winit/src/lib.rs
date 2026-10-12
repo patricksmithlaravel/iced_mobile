@@ -2513,12 +2513,18 @@ fn run_action<'a, P, C>(
                         if let Some(typing) = typing
                             && typing.window == *id
                         {
+                            // The fields the keyboard types into: only
+                            // their carets are the keyboard's.
+                            let mut focused = ime::FocusedInputs::default();
+                            ui.operate(&window.renderer, &mut focused);
+
                             ui.operate(
                                 &window.renderer,
                                 &mut ime::Watch::new(
                                     operation.as_mut(),
                                     &mut moved,
                                     typing.hold,
+                                    &focused,
                                 ),
                             );
 

@@ -441,8 +441,9 @@
 //!   it typed there: a focus moved away drops the word being composed, and
 //!   a caret moved in the field commits it where it was typed first, then
 //!   moves (so a position counts the word, and `select_all` selects it
-//!   too). What the keyboard typed before the operation reaches the field
-//!   before it runs.
+//!   too). The caret of another field moves and leaves the word alone.
+//!   What the keyboard typed before the operation reaches the field before
+//!   it runs.
 //! - The keyboard's keys reach a field only as text, Backspace, Delete,
 //!   Enter, Tab, Escape, the arrows, Home and End. Its Ctrl and Meta
 //!   shortcuts (on keyboards that have a Ctrl key) and its other keys (Page

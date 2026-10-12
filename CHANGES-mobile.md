@@ -280,8 +280,9 @@ Text input on Android, and secure fields on Android and iOS:
   `focus_previous`, or `focusable::unfocus` run with `iced::advanced::widget::operate`) or the
   field leaves the view, the word being composed is dropped and the field's preedit cleared: the
   window gets `input_method::Event::Closed`, as winit's desktop backends send it when the input
-  method is turned off. The next field's keyboard starts with no text. A caret moved from code
-  (`move_cursor_to`, `select_all`) commits the word where it was typed first, then moves. What the
+  method is turned off. The next field's keyboard starts with no text. A caret moved from code in
+  the field the keyboard types into (`move_cursor_to`, `select_all`) commits the word where it was
+  typed first, then moves; the caret of another field moves and leaves the word alone. What the
   keyboard typed before such an operation reaches the field before it runs.
 - **Android:** while no field asks for the keyboard, the keyboard's view is no text editor, so a
   hardware keyboard's keys reach the app as before, also with input methods that compose hardware

@@ -87,9 +87,10 @@ this file in the commit that fixes or finds a limitation.
     the Android keyboard composes a word, the word is dropped, and so is a
     word the keyboard had taken back from the field after a Backspace into
     it.
-    Moving the caret from code (`move_cursor_to`, `select_all`) commits the
-    word where it was typed first, then moves the caret, so a position
-    counts the word. What the keyboard typed before such an operation
+    Moving the caret of that field from code (`move_cursor_to`,
+    `select_all`) commits the word where it was typed first, then moves the
+    caret, so a position counts the word; the caret of another field moves
+    and leaves the word alone. What the keyboard typed before such an operation
     reaches the field before it runs. Let the user's tap or Enter move the
     focus where it can.
   - `text_input` deletes by character cluster, as on the desktop: a

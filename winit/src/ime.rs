@@ -14,9 +14,10 @@
 //! - `android`: the JNI glue, the queue the Java side fills, and the
 //!   shell's side of a session (`Shell`, `enable`, `disable`, `operate`,
 //!   `operated`, and the operations it defers).
-//! - [`Watch`]: the widget operations that move the focus or a caret while
-//!   the keyboard types, found out as they run, and [`Replay`], which makes
-//!   the caret moves a watch held back.
+//! - [`Watch`]: the widget operations that move the focus, or the caret of a
+//!   field that has it ([`FocusedInputs`]), while the keyboard types, found
+//!   out as they run, and [`Replay`], which makes the caret moves a watch
+//!   held back.
 //!
 //! Only with the `android-native-activity` feature: GameActivity has an
 //! input connection of its own. Elsewhere nothing here is compiled but the
@@ -320,8 +321,57 @@ impl Operation for Focused {
     }
 }
 
-/// What a widget operation did to the focus and to the text inputs, and
-/// what it held back.
+/// An operation that finds the text inputs that have the focus: the fields
+/// the keyboard types into, whose carets are the keyboard's.
+///
+/// A text input is known by its id and its bounds: `text_input` hands its
+/// state to an operation as a text input, then as a focusable, with the
+/// same id and bounds, and two fields never share both.
+#[cfg(any(
+    all(target_os = "android", feature = "android-native-activity"),
+    test
+))]
+#[derive(Debug, Default)]
+pub(crate) struct FocusedInputs {
+    inputs: Vec<(Option<Id>, Rectangle)>,
+}
+
+#[cfg(any(
+    all(target_os = "android", feature = "android-native-activity"),
+    test
+))]
+impl FocusedInputs {
+    /// Whether the widget with `id` and `bounds` has the focus.
+    fn contains(&self, id: Option<&Id>, bounds: Rectangle) -> bool {
+        self.inputs
+            .iter()
+            .any(|(input, at)| input.as_ref() == id && *at == bounds)
+    }
+}
+
+#[cfg(any(
+    all(target_os = "android", feature = "android-native-activity"),
+    test
+))]
+impl Operation for FocusedInputs {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn focusable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        state: &mut dyn Focusable,
+    ) {
+        if state.is_focused() {
+            self.inputs.push((id.cloned(), bounds));
+        }
+    }
+}
+
+/// What a widget operation did to the focus and to the text inputs that
+/// have it, and what it held back.
 #[cfg(any(
     all(target_os = "android", feature = "android-native-activity"),
     test
@@ -330,8 +380,9 @@ impl Operation for Focused {
 pub(crate) struct Moved {
     /// A widget gained or lost the focus.
     pub(crate) focus: bool,
-    /// A text input's caret or selection was set, or the focused widget
-    /// was focused again (which moves `text_input`'s caret to its end).
+    /// The caret or selection of a text input that has the focus was set,
+    /// or the focused widget was focused again (which moves `text_input`'s
+    /// caret to its end).
     pub(crate) caret: bool,
     /// The caret moves held back, in order, while the keyboard composed:
     /// they run once the field has the composition (see [`Watch`]).
@@ -361,16 +412,19 @@ pub(crate) enum Held {
 }
 
 /// An operation that hands every widget to the one it watches and records,
-/// in [`Moved`], what that one does to the focus and the text inputs. The
-/// keyboard's engine follows the caret only through what it types, so a
-/// focus or a caret the application moves itself ends what it typed.
+/// in [`Moved`], what that one does to the focus and to the text inputs
+/// that have it ([`FocusedInputs`], found before it runs). The keyboard's
+/// engine follows the caret only through what it types, so a focus or a
+/// caret the application moves itself ends what it typed. The caret of a
+/// text input without the focus is not the keyboard's: its moves are made
+/// at once and end nothing.
 ///
 /// A `hold`ing watch is used while the keyboard composes, so that the
 /// composition can be committed where it was typed before the caret moves:
-/// it does not make the caret moves of a widget with an id, and records
-/// them in [`Moved::held`] instead, for a [`Replay`] to make once the field
-/// has the composition. Focus moves, and caret moves of a widget without an
-/// id (which a replay cannot find), are made at once.
+/// it does not make the caret moves of a focused widget with an id, and
+/// records them in [`Moved::held`] instead, for a [`Replay`] to make once
+/// the field has the composition. Focus moves, and caret moves of a widget
+/// without an id (which a replay cannot find), are made at once.
 #[cfg(any(
     all(target_os = "android", feature = "android-native-activity"),
     test
@@ -379,6 +433,7 @@ pub(crate) struct Watch<'a, T> {
     inner: &'a mut dyn Operation<T>,
     moved: &'a mut Moved,
     hold: bool,
+    focused: &'a FocusedInputs,
 }
 
 #[cfg(any(
@@ -386,14 +441,21 @@ pub(crate) struct Watch<'a, T> {
     test
 ))]
 impl<'a, T> Watch<'a, T> {
-    /// Watches `inner`, recording into `moved`, holding back caret moves if
-    /// `hold`.
+    /// Watches `inner` over the interface where `focused` found the text
+    /// inputs with the focus, recording into `moved`, holding back their
+    /// caret moves if `hold`.
     pub(crate) fn new(
         inner: &'a mut dyn Operation<T>,
         moved: &'a mut Moved,
         hold: bool,
+        focused: &'a FocusedInputs,
     ) -> Self {
-        Self { inner, moved, hold }
+        Self {
+            inner,
+            moved,
+            hold,
+            focused,
+        }
     }
 }
 
@@ -405,12 +467,14 @@ impl<T> Operation<T> for Watch<'_, T> {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
         let moved = &mut *self.moved;
         let hold = self.hold;
+        let focused = self.focused;
 
         self.inner.traverse(&mut |inner| {
             operate(&mut Watch {
                 inner,
                 moved: &mut *moved,
                 hold,
+                focused,
             });
         });
     }
@@ -454,6 +518,12 @@ impl<T> Operation<T> for Watch<'_, T> {
         bounds: Rectangle,
         state: &mut dyn TextInput,
     ) {
+        // Not a field the keyboard types into.
+        if !self.focused.contains(id, bounds) {
+            self.inner.text_input(id, bounds, state);
+            return;
+        }
+
         self.inner.text_input(
             id,
             bounds,
@@ -735,10 +805,10 @@ mod tests {
         }
     }
 
-    /// Runs `operation` over text inputs with these ids (or none), nested
-    /// in a container the way widgets hand their children on, as each
-    /// operation pass does: through a [`Watch`] that holds caret moves back
-    /// or not, or unwatched. What it moved.
+    /// Runs `operation` over text inputs with these ids (or none), one
+    /// below the other, nested in a container the way widgets hand their
+    /// children on, as each operation pass does: through a [`Watch`] that
+    /// holds caret moves back or not, or unwatched. What it moved.
     fn run_with(
         mut operation: Box<dyn Operation>,
         inputs: &mut [(Id, Input)],
@@ -752,29 +822,30 @@ mod tests {
                 let mut operate = |operation: &mut dyn Operation| {
                     operation.container(None, Rectangle::default());
                     operation.traverse(&mut |operation| {
-                        for (id, input) in inputs.iter_mut() {
+                        for (n, (id, input)) in inputs.iter_mut().enumerate() {
                             let id = ids.then_some(&*id);
+                            let bounds =
+                                rectangle(0.0, n as f32 * 40.0, 200.0, 40.0);
 
-                            operation.text_input(
-                                id,
-                                Rectangle::default(),
-                                input,
-                            );
-                            operation.focusable(
-                                id,
-                                Rectangle::default(),
-                                input,
-                            );
+                            operation.text_input(id, bounds, input);
+                            operation.focusable(id, bounds, input);
                         }
                     });
                 };
 
                 match watch {
-                    Some(hold) => operate(&mut Watch::new(
-                        operation.as_mut(),
-                        &mut moved,
-                        hold,
-                    )),
+                    Some(hold) => {
+                        // The shell finds the focused fields first.
+                        let mut focused = FocusedInputs::default();
+                        operate(&mut focused);
+
+                        operate(&mut Watch::new(
+                            operation.as_mut(),
+                            &mut moved,
+                            hold,
+                            &focused,
+                        ));
+                    }
                     None => operate(operation.as_mut()),
                 }
             }
@@ -952,15 +1023,23 @@ mod tests {
             }
         }
 
+        // Only the focused field's are held back: the others are made at
+        // once.
         let mut inputs = fields(Some(1));
         let moved = run_with(Box::new(Many), &mut inputs, true, Some(true));
         assert!(moved.focus && !moved.caret);
-        assert_eq!(moved.held.len(), 6);
         assert_eq!(
-            moved.held[2..4],
+            moved.held,
             [Held::All(Id::new("b")), Held::To(Id::new("b"), 2)]
         );
         assert!(inputs.iter().all(|(_id, input)| !input.focused));
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|(_id, input)| input.cursor)
+                .collect::<Vec<_>>(),
+            [2, 1, 2]
+        );
 
         // A text input without an id cannot be found again: its caret
         // moves are made at once.
@@ -1021,6 +1100,86 @@ mod tests {
         assert!(!inputs[1].1.focused);
         assert_eq!(inputs[1].1.cursor, 1);
         assert!(inputs[2].1.focused);
+    }
+
+    #[test]
+    fn a_watch_ignores_caret_moves_in_fields_without_the_focus() {
+        for hold in [false, true] {
+            for (operation, held) in caret_moves() {
+                // Focusing "b" moves the focus there: not a caret move.
+                if let Held::Focus(_) = held {
+                    continue;
+                }
+
+                // The keyboard types into "a"; the application moves the
+                // caret of "b".
+                let mut inputs = fields(Some(0));
+
+                assert_eq!(
+                    run_with(operation, &mut inputs, true, Some(hold)),
+                    Moved::default(),
+                    "{held:?}"
+                );
+                assert!(
+                    inputs[1].1.cursor != 1 || inputs[1].1.selection.is_some(),
+                    "{held:?} was not made at once"
+                );
+                assert_eq!(
+                    (inputs[0].1.cursor, inputs[0].1.selection),
+                    (1, None),
+                    "{held:?}"
+                );
+            }
+
+            // No field has the focus.
+            let mut inputs = fields(None);
+            assert_eq!(
+                run_with(
+                    Box::new(text_input::select_all(Id::new("c"))),
+                    &mut inputs,
+                    true,
+                    Some(hold)
+                ),
+                Moved::default()
+            );
+            assert_eq!(inputs[2].1.selection, Some((0, 9)));
+        }
+
+        // Fields without an id are known by their bounds: of an operation
+        // that moves every caret, only the focused field's move counts.
+        struct EveryCaret;
+
+        impl Operation for EveryCaret {
+            fn traverse(
+                &mut self,
+                operate: &mut dyn FnMut(&mut dyn Operation),
+            ) {
+                operate(self);
+            }
+
+            fn text_input(
+                &mut self,
+                _id: Option<&Id>,
+                _bounds: Rectangle,
+                state: &mut dyn TextInput,
+            ) {
+                state.move_cursor_to(5);
+            }
+        }
+
+        for focused in [None, Some(2)] {
+            let mut inputs = fields(focused);
+
+            assert_eq!(
+                run_with(Box::new(EveryCaret), &mut inputs, false, Some(true)),
+                Moved {
+                    caret: focused.is_some(),
+                    ..Moved::default()
+                },
+                "{focused:?}"
+            );
+            assert!(inputs.iter().all(|(_id, input)| input.cursor == 5));
+        }
     }
 
     #[test]

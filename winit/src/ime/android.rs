@@ -40,9 +40,11 @@
 //!   replays an `AboutToWait`, which hands the field the edits and builds
 //!   the views again, then runs it, and the operations made meanwhile after
 //!   it ([`schedule`], [`deferred`]). The operation then runs through a
-//!   [`Watch`](super::Watch), which records what it moves, and [`operated`]
-//!   ends the session: a focus moved to another widget is handled as
-//!   [`disable`] handles it, and a caret moved in the field as a tap is.
+//!   [`Watch`](super::Watch), which records what it moves of the focus and
+//!   of the carets of the fields that have it, and [`operated`] ends the
+//!   session: a focus moved to another widget is handled as [`disable`]
+//!   handles it, and a caret moved in the field as a tap is. The caret of a
+//!   field without the focus moves at once and ends nothing.
 //!   While the keyboard composes, the watch holds the caret moves back, so
 //!   that the composition is committed where it was typed, and they are
 //!   made once the field has it, deferred the same way; a `select_all`
