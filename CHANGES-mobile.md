@@ -183,9 +183,10 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - `icm stop ios-device` keeps the record when its terminate command fails. The entry is not counted
   under `stopped`, the device is listed as `unverified`, and the summary says the app may still be
   running because its terminate command failed. The console process icm started is still ended, and
-  the next `stop` asks the device again. Before, the record was removed and the app counted as
-  stopped, so a retry after the tool recovered said nothing was running. (Fake tools only; not seen
-  on a phone.)
+  the next `stop` asks the device again. The result lists the entry under `kept`, with the pids
+  icm left running (named in the summary) and the processes it ended. Before, the record was
+  removed and the app counted as stopped, so a retry after the tool recovered said nothing was
+  running. (Fake tools only; not seen on a phone.)
 - Plain `icm stop android` (and `icm stop --all`) says why it left the app running when the device
   names another project as the emulator's owner (`android.emulator.shared`), with the `adb` command
   that stops the app by hand, where it said nothing.

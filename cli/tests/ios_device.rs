@@ -909,6 +909,90 @@ fn a_failed_terminate_command_keeps_the_record_and_is_not_a_stop() {
     assert!(!device.session_path().exists());
 }
 
+/// A kept record keeps reporting what it left running. The terminate command
+/// fails, so the record stays, and the console process whose identity icm
+/// could not read is left running: the summary names its pid beside the app
+/// that may still run, and the result carries the entry under `kept` with the
+/// pid in `left_running`. Before, the kept entry was dropped from the summary
+/// and the result, so the pid was reported nowhere.
+#[test]
+fn a_kept_record_still_names_the_console_pid_left_running() {
+    let mut device = Device::new();
+    let why = "proc_pidinfo: Operation not permitted";
+    device.set("ICM_FAKE_IDENTITY_UNREADABLE", why);
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    device
+        .env
+        .retain(|(key, _)| key != "ICM_FAKE_IDENTITY_UNREADABLE");
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = device.session()["pid"].as_i64().unwrap();
+    device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+    std::fs::write(device.state().join("terminate-fail"), "").unwrap();
+
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(device.terminated(), "{}", device.log("xcrun.log"));
+    assert_eq!(stop["stopped"], json!([]), "{stop}");
+    assert_eq!(stop["kept"][0]["app"], "terminate_failed", "{stop}");
+    assert_eq!(stop["kept"][0]["left_running"], json!([pid]), "{stop}");
+    assert_eq!(stop["kept"][0]["processes"], json!([]), "{stop}");
+    assert_eq!(
+        stop["summary"],
+        format!(
+            "ios-device pid {pid} left running (cannot be verified); the app on Jo's iPhone may still be running (its terminate command failed)"
+        ),
+        "{stop}"
+    );
+    assert!(
+        device.session_path().exists(),
+        "the kept record was removed"
+    );
+
+    // The console, whose identity could not be read, was not signalled.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        icm::procid::of(pid as i32).is_some(),
+        "a process whose identity was unavailable was signalled"
+    );
+    end_fake_console(&pid.to_string());
+}
+
+/// A kept record reports the console process icm ended. The record is from
+/// before identities, so `stop` ends the console as it is alive and started
+/// before the record was written; the app's terminate command then fails and
+/// the record stays. The entry under `kept` lists that process in `processes`,
+/// where a stopped entry would. Before, the kept entry was dropped from the
+/// result, so the process icm ended was reported nowhere.
+#[test]
+fn a_kept_record_reports_the_console_process_it_ended() {
+    let device = Device::new();
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    let pid = device.session()["pid"].as_i64().unwrap();
+    let mut session = device.session();
+    let _ = session.as_object_mut().unwrap().remove("identity");
+    std::fs::write(device.session_path(), session.to_string()).unwrap();
+    device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+    std::fs::write(device.state().join("terminate-fail"), "").unwrap();
+
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(device.terminated(), "{}", device.log("xcrun.log"));
+    assert_eq!(stop["stopped"], json!([]), "{stop}");
+    assert_eq!(stop["kept"][0]["app"], "terminate_failed", "{stop}");
+    assert_eq!(stop["kept"][0]["processes"], json!([pid]), "{stop}");
+    assert_eq!(stop["kept"][0]["left_running"], json!([]), "{stop}");
+    assert_eq!(
+        stop["summary"],
+        "the app on Jo's iPhone may still be running (its terminate command failed)",
+        "{stop}"
+    );
+    assert!(
+        device.session_path().exists(),
+        "the kept record was removed"
+    );
+}
+
 /// devicectl can list the recorded pid with no executable, an empty one, or
 /// one whose escapes do not decode. That is no proof the app is gone: `stop`
 /// terminates nothing, names the reason it cannot tell, lists the

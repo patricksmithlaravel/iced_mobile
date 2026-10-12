@@ -78,8 +78,11 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
     // The apps on physical devices icm could not end, as (device id, device
     // name, why the summary gives): the device would not confirm the
     // process, or the terminate command failed. Their records stay, and
-    // they are not counted as stopped.
+    // they are not counted as stopped; their entries go to `kept_entries`,
+    // which the result carries under `kept` with the pids they left running
+    // and the processes they ended.
     let mut apps_kept: Vec<(String, String, &'static str)> = Vec::new();
+    let mut kept_entries: Vec<Value> = Vec::new();
     for platform in &platforms {
         match stop_platform(
             ctx,
@@ -144,6 +147,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
                             device.name
                         };
                         apps_kept.push((id, name, why));
+                        kept_entries.push(entry);
                     }
                     None => stopped.push(entry),
                 }
@@ -190,9 +194,11 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         .count();
     // The processes left running because nothing tells them from another
     // process: neither stopped nor gone, so the summary says so, where it
-    // would otherwise say that nothing was running.
+    // would otherwise say that nothing was running. A kept entry's are said
+    // too: its record stays, but the process is no less unverified.
     let left_running: Vec<String> = stopped
         .iter()
+        .chain(&kept_entries)
         .filter_map(|entry| {
             let pids: Vec<String> = entry["left_running"]
                 .as_array()?
@@ -209,6 +215,7 @@ pub fn stop(ctx: &mut Ctx, args: &StopArgs) -> Result<()> {
         })
         .collect();
     ctx.rep.set("stopped", Value::Array(stopped));
+    ctx.rep.set("kept", Value::Array(kept_entries));
     ctx.rep.set("shutdown", json!(shut_down));
     ctx.rep.set("still_running", json!(still_running));
     ctx.rep.set(
