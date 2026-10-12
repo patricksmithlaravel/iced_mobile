@@ -713,8 +713,10 @@ fn a_session_host_that_cannot_read_its_own_identity_does_not_start() {
         return;
     }
     let sandbox = Sandbox::new();
+    // `--port 0`, as in the other web tests: the host binds before it reads
+    // its identity, so a port another process holds would fail first.
     let run = sandbox.result_with(
-        &["run", "web"],
+        &["run", "web", "--port", "0"],
         &[("ICM_FAKE_IDENTITY_UNREADABLE", "proc_pidinfo: denied")],
     );
     // An OS that will not describe a process to itself is an environment
