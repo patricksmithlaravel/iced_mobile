@@ -138,9 +138,10 @@ stop only the platforms they drive and leave the other platforms' devices alone
     `ICM_KEYCHAIN` names a keychain file that does not exist and `ICM_PROVISIONING_PROFILES` an
     empty directory in `$ACCEPT`. The test identity lives in a temporary keychain made by
     `test-identity.sh`, which never joins the search list (a step checks it) and is deleted at the
-    end; the profile is a CMS envelope signed by a throwaway key. As in phase5.sh, only a throwaway
-    machine's `ICM_ACCEPT_KEYCHAIN_SEARCH=1` (the CI job sets it) lets that keychain join the list
-    for the signed release (`join_search_list` in `lib.sh`); the list is put back and checked.
+    end; the profile is a CMS envelope signed by a throwaway key. As in phase5.sh, only a CI runner
+    with `GITHUB_ACTIONS=true` and `ICM_ACCEPT_KEYCHAIN_SEARCH=1` (the CI job sets it) lets that
+    keychain join the list for the signed release (`join_search_list` in `lib.sh`); the list is put
+    back and checked.
   - It creates the managed `icm-iphone-<n>-pro-max-ios-<version>` simulator when it is missing and
     shuts it down. The owner's signed release, upload and a physical iPhone are SKIP
     (`ICM_ACCEPT_DEVICE=1` runs on a connected, provisioned iPhone).
@@ -161,10 +162,10 @@ stop only the platforms they drive and leave the other platforms' devices alone
   - macOS: an unsigned release and its DMG, which it mounts and verifies, and the app launched. A
     release signed with a throwaway self-signed identity (`test-identity.sh`) in a temporary
     keychain, which never joins the user's search list (the script checks the list is unchanged)
-    and is deleted at the end. The owner's notarization steps are SKIP. Only on a throwaway
-    machine, `ICM_ACCEPT_KEYCHAIN_SEARCH=1` (the CI job sets it) lets that keychain join the list
-    for the signed release, since codesign's `--keychain` only narrows a search of the list and
-    macOS 26's codesign finds no identity outside it; the list is put back and checked.
+    and is deleted at the end. The owner's notarization steps are SKIP. Only on a CI runner with
+    `GITHUB_ACTIONS=true` and `ICM_ACCEPT_KEYCHAIN_SEARCH=1` (the CI job sets it) does that keychain
+    join the list for the signed release, since codesign's `--keychain` only narrows a search of the
+    list and macOS 26's codesign finds no identity outside it; the list is put back and checked.
   - Linux: the `.deb` and the AppImage (`--sign none`), `linux.glibc_floor`, `icm verify linux`,
     `dpkg -i` and `dpkg -r` (as root, or with `ICM_ACCEPT_INSTALL=1` and passwordless sudo), and
     the AppImage's first frame under `xvfb-run` or the session's display.

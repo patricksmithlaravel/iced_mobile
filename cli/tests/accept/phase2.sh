@@ -27,7 +27,7 @@
 # deleted at the end) and a fake App Store profile for ICMTEST001 in a CMS
 # envelope signed by a throwaway key. The release signs and gates the app
 # with them and ends with exit 9, since no Apple service trusts that
-# certificate. Only on a throwaway machine that sets
+# certificate. Only on a CI runner (GITHUB_ACTIONS=true) that sets
 # ICM_ACCEPT_KEYCHAIN_SEARCH=1 (the CI workflow does) does that keychain
 # join the end of the search list, for the signed release only, since the
 # macOS 26 runner's codesign finds no identity outside the list (lib.sh,

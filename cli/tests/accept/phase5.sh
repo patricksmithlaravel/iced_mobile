@@ -40,13 +40,14 @@
 # unchanged) and are deleted at the end. The user's own keychains are
 # never searched. Windows and Linux releases here are `--sign none`.
 #
-# Except on a throwaway machine that asks for it: codesign's --keychain only
+# Except on a CI runner that asks for it: codesign's --keychain only
 # narrows its search to one keychain of the search list (Apple DTS,
 # https://developer.apple.com/forums/thread/728073). macOS 27.0.1's codesign
 # found the identity outside the list; the macOS 26.6.2 CI runner's did not
-# ("<sha1>: no identity found"). With ICM_ACCEPT_KEYCHAIN_SEARCH=1, which
-# the CI workflow sets, the test keychain joins the end of the search list
-# for the signed release only, and icm still names it with ICM_KEYCHAIN.
+# ("<sha1>: no identity found"). With GITHUB_ACTIONS=true (Actions sets it)
+# and ICM_ACCEPT_KEYCHAIN_SEARCH=1, which the CI workflow sets, the test
+# keychain joins the end of the search list for the signed release only,
+# and icm still names it with ICM_KEYCHAIN.
 # The list is then restored, and the step's own check and the final one
 # still compare it with the list from before the run.
 #
@@ -249,7 +250,8 @@ other_hosts() {
 
 # join_search_list and restore_search_list (lib.sh) let the test keychain
 # join the search list for the signed release with
-# ICM_ACCEPT_KEYCHAIN_SEARCH=1 only (see the header).
+# ICM_ACCEPT_KEYCHAIN_SEARCH=1 on a CI runner (GITHUB_ACTIONS=true) only
+# (see the header).
 
 keychains() {
     mkdir -p "$ACCEPT/keys"

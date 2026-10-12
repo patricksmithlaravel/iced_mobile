@@ -392,13 +392,14 @@ fn no_pipe_ends_in_a_reader_that_leaves_early() {
 
 /// phase2.sh and phase5.sh sign with a throwaway keychain that stays off
 /// the user's keychain search list. Only with ICM_ACCEPT_KEYCHAIN_SEARCH=1
-/// (a CI runner, whose codesign finds no identity outside the list) does
-/// `join_search_list` add it, at the end, and `restore_search_list` puts
-/// back the list from before the run, a path with a space and an empty list
-/// included. A stand-in `security` keeps the list in a file, so the real
-/// one is never read or changed.
+/// on a CI runner (GITHUB_ACTIONS=true, whose codesign finds no identity
+/// outside the list) does `join_search_list` add it, at the end, and
+/// `restore_search_list` puts back the list from before the run, a path
+/// with a space and an empty list included. The variable alone, as on a
+/// developer's machine, changes nothing. A stand-in `security` keeps the
+/// list in a file, so the real one is never read or changed.
 #[test]
-fn the_test_keychain_joins_the_search_list_only_when_asked() {
+fn the_test_keychain_joins_the_search_list_only_on_a_ci_runner_that_asks() {
     let host = Host::new("");
     let list = host.root.path().join("search-list");
     let calls = host.root.path().join("security-calls");
@@ -411,21 +412,21 @@ fn the_test_keychain_joins_the_search_list_only_when_asked() {
         ),
     );
     let before = "    \"/Users/runner/Library/Keychains/login.keychain-db\"\n    \"/Library/Keychains/With Space.keychain\"\n";
-    let script = |asked: bool| {
+    // The environment a run has: neither setting, the variable alone (a
+    // developer's machine that sets it), or both on a CI runner.
+    let script = |setting: &str| {
         format!(
-            "{}\nSEARCH_LIST_BEFORE=$(security list-keychains -d user)\njoin_search_list '/tmp/accept/keys/test.keychain-db'\necho '--- joined'\nsecurity list-keychains -d user\nrestore_search_list\necho '--- restored'\nsecurity list-keychains -d user\n",
-            if asked {
-                "ICM_ACCEPT_KEYCHAIN_SEARCH=1"
-            } else {
-                "unset ICM_ACCEPT_KEYCHAIN_SEARCH"
-            }
+            "{setting}\nSEARCH_LIST_BEFORE=$(security list-keychains -d user)\njoin_search_list '/tmp/accept/keys/test.keychain-db'\necho '--- joined'\nsecurity list-keychains -d user\nrestore_search_list\necho '--- restored'\nsecurity list-keychains -d user\n"
         )
     };
+    let neither = "unset ICM_ACCEPT_KEYCHAIN_SEARCH\nunset GITHUB_ACTIONS";
+    let variable_only = "ICM_ACCEPT_KEYCHAIN_SEARCH=1\nunset GITHUB_ACTIONS";
+    let runner = "ICM_ACCEPT_KEYCHAIN_SEARCH=1\nGITHUB_ACTIONS=true";
     let calls_made = || std::fs::read_to_string(&calls).unwrap_or_default();
 
     // Not asked: the list is never set.
     std::fs::write(&list, before).unwrap();
-    let output = host.bash(&script(false));
+    let output = host.bash(&script(neither));
     assert!(output.status.success(), "{}", text(&output));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
@@ -433,8 +434,18 @@ fn the_test_keychain_joins_the_search_list_only_when_asked() {
     );
     assert_eq!(calls_made(), "");
 
-    // Asked: the keychain joins the end, and the list comes back as it was.
-    let output = host.bash(&script(true));
+    // Asked on a developer's machine: the variable alone changes nothing.
+    let output = host.bash(&script(variable_only));
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("--- joined\n{before}--- restored\n{before}")
+    );
+    assert_eq!(calls_made(), "");
+
+    // Asked on a CI runner: the keychain joins the end, and the list comes
+    // back as it was.
+    let output = host.bash(&script(runner));
     assert!(output.status.success(), "{}", text(&output));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
@@ -447,7 +458,7 @@ fn the_test_keychain_joins_the_search_list_only_when_asked() {
     // An empty list: only the keychain, then empty again.
     std::fs::write(&list, "").unwrap();
     std::fs::remove_file(&calls).unwrap();
-    let output = host.bash(&script(true));
+    let output = host.bash(&script(runner));
     assert!(output.status.success(), "{}", text(&output));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
