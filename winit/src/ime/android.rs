@@ -30,10 +30,12 @@
 //! - [`Shell::drain`], when the event loop is about to wait, applies the
 //!   queued messages to the engine in order and gives the edits to the
 //!   window whose field asks for the keyboard (none: they are dropped). When
-//!   a message asks for a reset (an Enter, Tab, Escape, arrow, Home or End
-//!   key), the engine is reset before the next message is applied, and the
-//!   Java side adopts the new generation; the messages it sent before that
-//!   are dropped as stale.
+//!   a message asks for a reset (an Enter, Tab or Escape key), the engine is
+//!   reset before the next message is applied, and the Java side adopts the
+//!   new generation; the messages it sent before that are dropped as stale.
+//!   When it asks to forget the text (the session's text starts with a
+//!   character that joins the text before it), the Java side is asked to
+//!   rebase, with no new generation.
 //! - [`Shell::interrupt`], before a touch starts, a mouse button is pressed,
 //!   a hardware key is pressed or the window loses the focus reaches the
 //!   application: the queued messages are applied first, then, unless the
@@ -53,7 +55,7 @@
 #![allow(unsafe_code)]
 
 use super::dex::{self, Method};
-use super::edit::{Edit, Engine, Message};
+use super::edit::{Edit, Engine, Message, Request};
 use crate::conversion;
 use crate::core::{self, input_method, theme, window};
 use crate::graphics::Compositor;
@@ -376,16 +378,23 @@ impl Session {
         }
     }
 
-    /// Applies the queued messages in order, resetting the engine and the
-    /// Java side where a message asks for it.
+    /// Applies the queued messages in order, and does what each requests
+    /// before the next is applied.
     fn apply_queue(&mut self, edits: &mut Vec<Edit>) {
         // The lock is let go of before anything calls into Java.
         let messages = std::mem::take(&mut queue().messages);
 
         for message in messages {
-            if self.engine.apply(message, edits) {
-                let generation = self.engine.reset(edits);
-                self.call(dex::RESET, &[JValue::Int(generation)]);
+            match self.engine.apply(message, edits) {
+                Request::None => {}
+                Request::Reset => {
+                    let generation = self.engine.reset(edits);
+                    self.call(dex::RESET, &[JValue::Int(generation)]);
+                }
+                Request::Forget => {
+                    let generation = self.engine.generation();
+                    self.call(dex::FORGET, &[JValue::Int(generation)]);
+                }
             }
         }
     }

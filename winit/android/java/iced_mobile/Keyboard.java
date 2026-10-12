@@ -12,9 +12,10 @@ import android.view.inputmethod.InputMethodManager;
  * iced_winit calls, and the native methods it registers.
  *
  * <p>The shell calls {@link #install}, {@link #show}, {@link #hide},
- * {@link #reset} and {@link #uninstall} on android_main's thread. Each posts
- * its work to the UI thread and returns at once, so the work runs in the
- * order of the calls. The native methods are called on the UI thread only.
+ * {@link #reset}, {@link #forget} and {@link #uninstall} on android_main's
+ * thread. Each posts its work to the UI thread and returns at once, so the
+ * work runs in the order of the calls. The native methods are called on the
+ * UI thread only.
  * Every native call carries the generation the last {@link #reset} adopted
  * (0 before the first one), and none is made with an older generation once
  * that reset has run.
@@ -34,6 +35,7 @@ public final class Keyboard {
     private static final int HIDE = 2;
     private static final int RESET = 3;
     private static final int UNINSTALL = 4;
+    private static final int FORGET = 5;
 
     /** Cleared on the UI thread by {@link #uninstall}. */
     private volatile Activity activity;
@@ -90,6 +92,15 @@ public final class Keyboard {
         post(RESET, generation);
     }
 
+    /**
+     * Forgets the keyboard's text, which stays in the field, with no new
+     * generation (a rebase), once nothing composes; nothing if a reset ran
+     * since the shell had {@code generation}.
+     */
+    public void forget(int generation) {
+        post(FORGET, generation);
+    }
+
     /** Removes the view and lets go of the Activity. */
     public void uninstall() {
         post(UNINSTALL, 0);
@@ -137,6 +148,11 @@ public final class Keyboard {
                     case RESET:
                         if (view != null) {
                             view.reset(argument);
+                        }
+                        break;
+                    case FORGET:
+                        if (view != null) {
+                            view.forget(argument);
                         }
                         break;
                     case UNINSTALL:

@@ -16,6 +16,15 @@
 //! delete by character instead, so a combining sequence the keyboard revises
 //! can come out wrong there.
 //!
+//! The app segments its whole value into clusters, so a character that joins
+//! the cluster before it (a combining mark, a vowel sign, a zero width
+//! joiner, an emoji modifier) right after the origin joins the app's text
+//! before the origin, which the engine cannot see. The engine then asks the
+//! Java side to rebase ([`Request::Forget`]): the mirror forgets its text,
+//! the origin moves to the app's caret, and the keyboard never edits across
+//! that join (it would otherwise take back, and lose, the character before
+//! the origin).
+//!
 //! Line breaks and tabs are never part of the text the engine compares or
 //! commits: Enter and Tab reach the app as keys (the Java side turns a commit
 //! of exactly `"\n"` into Enter), and inside longer text they are dropped, as
@@ -70,9 +79,28 @@ pub(crate) enum Message {
     /// Escape, an arrow, Home or End. `code` is Android's key code.
     Key { generation: i32, code: i32 },
     /// The Java side emptied the mirror without a reset (a secure field
-    /// after each report, or a mirror grown past its cap): the app's caret
-    /// becomes the session's origin.
+    /// after each report, a mirror grown past its cap, a caret-moving key,
+    /// or [`Request::Forget`]): the app's caret becomes the session's
+    /// origin.
     Rebase { generation: i32 },
+}
+
+/// What the caller does after [`Engine::apply`], before it applies another
+/// message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Request {
+    /// Nothing.
+    None,
+    /// Calls [`Engine::reset`] and hands the new generation to the Java side
+    /// (`Keyboard.reset`): after an Enter, Tab or Escape key, the field may
+    /// have been submitted or the focus moved.
+    Reset,
+    /// Asks the Java side to rebase at the engine's generation
+    /// (`Keyboard.forget`), with no new generation: the session's text
+    /// starts with a character that joins the cluster before the origin in
+    /// the app. Messages sent before the rebase still apply; the
+    /// [`Message::Rebase`] that follows moves the origin to the app's caret.
+    Forget,
 }
 
 /// A key press for the app.
@@ -126,12 +154,12 @@ pub(crate) enum Edit {
 /// Turns the keyboard's messages into edits for the focused field.
 ///
 /// The caller applies every message in order with [`Engine::apply`], gives
-/// the edits to the window that has the input method, and calls
+/// the edits to the window that has the input method, and does what `apply`
+/// [requests](Request) before it applies another message. It calls
 /// [`Engine::reset`] (then hands the new generation to the Java side) when
-/// `apply` asks for it, before it applies another message, and when the user
-/// moves the caret some other way: a tap, or a hardware key, unless the
-/// engine [is idle](Engine::is_idle). Messages queued before such an event
-/// belong before it, so the caller applies them first.
+/// the user moves the caret some other way too: a tap, or a hardware key,
+/// unless the engine [is idle](Engine::is_idle). Messages queued before such
+/// an event belong before it, so the caller applies them first.
 #[derive(Debug, Default)]
 pub(crate) struct Engine {
     /// The generation of the last reset; messages of any other are stale.
@@ -143,6 +171,8 @@ pub(crate) struct Engine {
     caret: usize,
     /// The preedit the app shows, and its cursor (a byte offset).
     preedit: Option<(String, usize)>,
+    /// A [`Request::Forget`] was made and its rebase has not arrived.
+    forgetting: bool,
 }
 
 impl Engine {
@@ -151,26 +181,27 @@ impl Engine {
         Self::default()
     }
 
-    /// The generation the keyboard's messages must carry to be applied.
-    #[cfg(test)]
+    /// The generation the keyboard's messages must carry to be applied, and
+    /// that a [`Request::Forget`] names.
     pub(crate) fn generation(&self) -> i32 {
         self.generation
     }
 
-    /// Applies one message from the keyboard; pushes the edits for the app.
-    /// Returns true when the keyboard's state should be reset (after an
-    /// Enter, Tab, Escape, arrow, Home or End key from the keyboard).
+    /// Applies one message from the keyboard; pushes the edits for the app,
+    /// and returns what the caller does next.
     ///
-    /// Such a key first commits a shown preedit, so a field submitted by
-    /// Enter has the word being composed, and the caller then calls
-    /// [`Engine::reset`] before it applies another message. A message of
-    /// another generation predates a reset the caller asked for: it is
-    /// dropped.
+    /// An Enter, Tab or Escape key from the keyboard first commits a shown
+    /// preedit, so a field submitted by Enter has the word being composed,
+    /// and requests a reset. An arrow, Home or End key commits it too, and
+    /// requests nothing: the Java side rebases right after it when the mirror
+    /// held text, and an empty mirror leaves the engine idle, so either way
+    /// the origin follows the app's caret. A message of another generation
+    /// predates a reset the caller asked for: it is dropped.
     pub(crate) fn apply(
         &mut self,
         message: Message,
         edits: &mut Vec<Edit>,
-    ) -> bool {
+    ) -> Request {
         match message {
             Message::State {
                 generation,
@@ -178,36 +209,50 @@ impl Engine {
                 selection,
                 composing,
             } => {
-                if generation == self.generation {
-                    self.state(&text, selection, composing, edits);
+                if generation != self.generation {
+                    return Request::None;
                 }
 
-                false
+                self.state(&text, selection, composing, edits);
+
+                if !self.forgetting && joins(&self.base) {
+                    self.forgetting = true;
+
+                    Request::Forget
+                } else {
+                    Request::None
+                }
             }
             Message::Key { generation, code } => {
-                generation == self.generation && self.key(code, edits)
+                if generation == self.generation {
+                    self.key(code, edits)
+                } else {
+                    Request::None
+                }
             }
             Message::Rebase { generation } => {
                 if generation == self.generation {
                     self.clear_preedit(edits);
                     self.base.clear();
                     self.caret = 0;
+                    self.forgetting = false;
                 }
 
-                false
+                Request::None
             }
         }
     }
 
-    /// Native-initiated reset (a tap, a hardware key, or after apply
-    /// returned true): commits a shown composition the way Android does
-    /// (Preedit cleared, then Commit of the composing text), forgets the
-    /// text, and returns the new generation to give the keyboard.
+    /// Native-initiated reset (a tap, a hardware key, or a
+    /// [`Request::Reset`]): commits a shown composition the way Android
+    /// does (Preedit cleared, then Commit of the composing text), forgets
+    /// the text, and returns the new generation to give the keyboard.
     pub(crate) fn reset(&mut self, edits: &mut Vec<Edit>) -> i32 {
         self.commit_preedit(edits);
 
         self.base.clear();
         self.caret = 0;
+        self.forgetting = false;
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
@@ -292,9 +337,9 @@ impl Engine {
         }
     }
 
-    fn key(&mut self, code: i32, edits: &mut Vec<Edit>) -> bool {
+    fn key(&mut self, code: i32, edits: &mut Vec<Edit>) -> Request {
         let Some(key) = Key::from_code(code) else {
-            return false;
+            return Request::None;
         };
 
         match key {
@@ -308,7 +353,7 @@ impl Engine {
                 edits.push(Edit::Key(Key::Backspace));
                 self.move_to(caret, edits);
 
-                false
+                Request::None
             }
             Key::Delete => {
                 // Likewise, the mirror had nothing after its cursor.
@@ -319,21 +364,27 @@ impl Engine {
                 edits.push(Edit::Key(Key::Delete));
                 self.move_to(caret, edits);
 
-                false
+                Request::None
             }
             Key::Left
             | Key::Right
             | Key::Up
             | Key::Down
             | Key::Home
-            | Key::End
-            | Key::Enter
-            | Key::Tab
-            | Key::Escape => {
+            | Key::End => {
+                // The rebase that follows a non-empty mirror, or the empty
+                // one, makes the moved caret the origin: no new generation,
+                // so the keys and text the keyboard sends meanwhile count.
                 self.commit_preedit(edits);
                 edits.push(Edit::Key(key));
 
-                true
+                Request::None
+            }
+            Key::Enter | Key::Tab | Key::Escape => {
+                self.commit_preedit(edits);
+                edits.push(Edit::Key(key));
+
+                Request::Reset
             }
         }
     }
@@ -462,6 +513,26 @@ fn byte_offset(text: &str, index: i32) -> usize {
     text.len()
 }
 
+/// Whether the first character of `text` joins the cluster before it,
+/// whatever that cluster is: a combining or spacing mark (accents, Thai and
+/// Indic vowel signs and viramas), a zero width joiner, an emoji modifier or
+/// a variation selector.
+///
+/// Characters that join only certain clusters (a regional indicator after
+/// another, a Hangul vowel jamo after a leading one, a consonant after a
+/// virama) are left out: text before the origin rarely ends in the first
+/// half of such a pair, while the second half is typed all the time.
+fn joins(text: &str) -> bool {
+    let Some(first) = text.chars().next() else {
+        return false;
+    };
+
+    let mut probe = String::from("a");
+    probe.push(first);
+
+    probe.graphemes(true).count() == 1
+}
+
 /// Appends `text` without its line breaks and tabs.
 fn push_text(out: &mut String, text: &str) {
     out.extend(text.chars().filter(|c| !matches!(c, '\n' | '\r' | '\t')));
@@ -499,18 +570,18 @@ mod tests {
         }
     }
 
-    /// The edits one message gives, and whether it asked for a reset.
-    fn apply(engine: &mut Engine, message: Message) -> (Vec<Edit>, bool) {
+    /// The edits one message gives, and what it requests.
+    fn apply(engine: &mut Engine, message: Message) -> (Vec<Edit>, Request) {
         let mut edits = Vec::new();
-        let reset = engine.apply(message, &mut edits);
+        let request = engine.apply(message, &mut edits);
 
-        (edits, reset)
+        (edits, request)
     }
 
-    /// The edits one message gives when it does not ask for a reset.
+    /// The edits one message gives when it requests nothing.
     fn edits(engine: &mut Engine, message: Message) -> Vec<Edit> {
-        let (edits, reset) = apply(engine, message);
-        assert!(!reset, "unexpected reset request: {edits:?}");
+        let (edits, request) = apply(engine, message);
+        assert_eq!(request, Request::None, "unexpected request: {edits:?}");
 
         edits
     }
@@ -622,8 +693,16 @@ mod tests {
         /// and segments its whole value again.
         fn type_char(&mut self, c: char) {
             self.value.insert(self.caret, c.to_string());
-            self.value = graphemes(&self.value.concat());
+            self.resegment();
             self.caret = (self.caret + 1).min(self.value.len());
+        }
+
+        /// What the app's next `view` does: `text_input` builds its value
+        /// from the string again, segmenting all of it, and keeps the
+        /// caret's index.
+        fn resegment(&mut self) {
+            self.value = graphemes(&self.value.concat());
+            self.caret = self.caret.min(self.value.len());
         }
     }
 
@@ -639,10 +718,28 @@ mod tests {
 
     type Snapshot = (Vec<u16>, (usize, usize), Option<(usize, usize)>);
 
+    /// What the keyboard was told last: the selection and the composing
+    /// region (`InputMethodManager.updateSelection`).
+    type Told = ((usize, usize), Option<(usize, usize)>);
+
+    /// Whether a key moves the app's caret (`KeyboardView.moves`).
+    fn moves(code: i32) -> bool {
+        matches!(
+            code,
+            KEYCODE_DPAD_UP
+                | KEYCODE_DPAD_DOWN
+                | KEYCODE_DPAD_LEFT
+                | KEYCODE_DPAD_RIGHT
+                | KEYCODE_MOVE_HOME
+                | KEYCODE_MOVE_END
+        )
+    }
+
     /// The Java side: an editable mirror in UTF-16 units that the keyboard
     /// edits through the calls of Android's `BaseInputConnection` (over a
-    /// `SpannableStringBuilder`), and that reports its whole state when it
-    /// changed, once per outermost batch edit.
+    /// `SpannableStringBuilder`), as `KeyboardConnection` and `KeyboardView`
+    /// handle them. It reports its whole state when it changed, once per
+    /// outermost batch edit, and tells the keyboard its selection.
     #[derive(Debug)]
     struct Mirror {
         units: Vec<u16>,
@@ -650,13 +747,21 @@ mod tests {
         selection: (usize, usize),
         composing: Option<(usize, usize)>,
         generation: i32,
-        /// A secure field: empty the mirror and rebase after each report.
+        /// A secure field: a composition is reported as typed text, and the
+        /// mirror is emptied and rebased after each report once nothing
+        /// composes.
         secure: bool,
         /// Empty the mirror and rebase when it grows past this many units
         /// with no composition.
         cap: usize,
+        /// The native side asked to forget the text: rebase once nothing
+        /// composes.
+        forgetting: bool,
         batch: usize,
         reported: Snapshot,
+        told: Told,
+        /// Every selection the keyboard was told, in order.
+        updates: Vec<Told>,
         out: VecDeque<Message>,
     }
 
@@ -669,8 +774,11 @@ mod tests {
                 generation: 0,
                 secure,
                 cap,
+                forgetting: false,
                 batch: 0,
                 reported: (Vec::new(), (0, 0), None),
+                told: ((0, 0), None),
+                updates: Vec::new(),
                 out: VecDeque::new(),
             }
         }
@@ -701,13 +809,10 @@ mod tests {
         }
 
         /// `commitText`. A commit of exactly `"\n"` (what keyboards commit
-        /// for Enter) finishes the composition, reports it and sends Enter
-        /// as a key instead.
+        /// for Enter) is the Enter key instead.
         fn commit_text(&mut self, text: &str, new_cursor: i64) {
             if text == "\n" {
-                self.composing = None;
-                self.report();
-                self.key(KEYCODE_ENTER);
+                self.forward(KEYCODE_ENTER);
             } else {
                 self.replace(text, new_cursor, false);
             }
@@ -756,10 +861,36 @@ mod tests {
             self.report();
         }
 
-        /// `BaseInputConnection.deleteSurroundingText`: in UTF-16 units
-        /// (so it may split a surrogate pair), around the selection and the
+        /// `KeyboardConnection.deleteSurroundingText`: in UTF-16 units (so
+        /// it may split a surrogate pair), around the selection and the
         /// composing region together.
         fn delete_surrounding_text(&mut self, before: usize, after: usize) {
+            self.delete_around(before, after, false);
+        }
+
+        /// `KeyboardConnection.deleteSurroundingTextInCodePoints`.
+        fn delete_surrounding_text_in_code_points(
+            &mut self,
+            before: usize,
+            after: usize,
+        ) {
+            self.delete_around(before, after, true);
+        }
+
+        /// Deletes `before` units (or code points) before the selection and
+        /// the composing region, and `after` after them. A side the keyboard
+        /// asked to delete that is empty, with no selection and no
+        /// composition, is the Backspace or Delete key instead: some
+        /// keyboards (AOSP's LatinIME and its forks) delete that way even at
+        /// the start of the text.
+        fn delete_around(
+            &mut self,
+            before: usize,
+            after: usize,
+            code_points: bool,
+        ) {
+            let bare = self.selection.0 == self.selection.1
+                && self.composing.is_none();
             let (mut start, mut end) = self.ordered_selection();
 
             if let Some((composing_start, composing_end)) = self.composing {
@@ -767,13 +898,61 @@ mod tests {
                 end = end.max(composing_end);
             }
 
-            let from = start.saturating_sub(before);
+            let backward = bare && before > 0 && start == 0;
+            let forward = bare && after > 0 && end == self.len();
+
+            let (from, to) = if code_points {
+                let mut from = start;
+
+                for _ in 0..before {
+                    if from == 0 {
+                        break;
+                    }
+
+                    from -= 1;
+
+                    if from > 0
+                        && is_low(self.units[from])
+                        && is_high(self.units[from - 1])
+                    {
+                        from -= 1;
+                    }
+                }
+
+                let mut to = end;
+
+                for _ in 0..after {
+                    if to == self.len() {
+                        break;
+                    }
+
+                    to += 1;
+
+                    if to < self.len()
+                        && is_low(self.units[to])
+                        && is_high(self.units[to - 1])
+                    {
+                        to += 1;
+                    }
+                }
+
+                (from, to)
+            } else {
+                (start.saturating_sub(before), (end + after).min(self.len()))
+            };
+
+            self.begin_batch_edit();
+            self.delete(end, to);
             self.delete(from, start);
+            self.end_batch_edit();
 
-            let end = end - (start - from);
-            self.delete(end, (end + after).min(self.len()));
+            if backward {
+                self.forward(KEYCODE_DEL);
+            }
 
-            self.report();
+            if forward {
+                self.forward(KEYCODE_FORWARD_DEL);
+            }
         }
 
         /// `BaseInputConnection.setSelection`: ignored out of range.
@@ -814,15 +993,39 @@ mod tests {
                     self.delete(end, end + if pair { 2 } else { 1 });
                     self.report();
                 }
-                _ => self.key(code),
+                _ => self.forward(code),
             }
         }
 
-        /// A key with a character: committed like `commitText`.
+        /// A key with a character (`KeyboardConnection.type`): it finishes
+        /// the composition and goes in at the selection, as a hardware key
+        /// types into a text field.
         fn send_char(&mut self, c: char) {
-            self.commit_text(c.encode_utf8(&mut [0; 4]), 1);
+            if c == '\n' {
+                self.forward(KEYCODE_ENTER);
+                return;
+            }
+
+            self.begin_batch_edit();
+            self.composing = None;
+            self.replace(c.encode_utf8(&mut [0; 4]), 1, false);
+            self.end_batch_edit();
         }
 
+        /// `KeyboardView.forward`: the composition is finished and reported
+        /// (even inside a batch edit), then the key goes to the app, and a
+        /// caret-moving key rebases a mirror that holds text.
+        fn forward(&mut self, code: i32) {
+            self.composing = None;
+            self.send_report();
+            self.key(code);
+
+            if moves(code) && !self.units.is_empty() {
+                self.rebase();
+            }
+        }
+
+        /// A raw `nativeKey`.
         fn key(&mut self, code: i32) {
             self.out.push_back(Message::Key {
                 generation: self.generation,
@@ -851,50 +1054,99 @@ mod tests {
                 .filter(|(start, end)| start < end);
         }
 
+        /// The end of an edit: a report unless a batch edit is open.
         fn report(&mut self) {
-            if self.batch > 0 {
-                return;
+            if self.batch == 0 {
+                self.send_report();
             }
+        }
 
-            let snapshot = (self.units.clone(), self.selection, self.composing);
+        /// `KeyboardView.report`.
+        fn send_report(&mut self) {
+            // A password field never shows a composition: it is reported as
+            // typed text.
+            let composing = if self.secure { None } else { self.composing };
+            let snapshot = (self.units.clone(), self.selection, composing);
 
-            if snapshot == self.reported {
-                return;
-            }
+            if snapshot != self.reported {
+                let index = |index: usize| i32::try_from(index).unwrap();
 
-            let index = |index: usize| i32::try_from(index).unwrap();
-
-            self.out.push_back(Message::State {
-                generation: self.generation,
-                text: String::from_utf16_lossy(&self.units),
-                selection: (index(self.selection.0), index(self.selection.1)),
-                composing: self.composing.map_or((-1, -1), |(start, end)| {
-                    (index(start), index(end))
-                }),
-            });
-            self.reported = snapshot;
-
-            if self.secure
-                || (self.len() > self.cap && self.composing.is_none())
-            {
-                self.clear();
-                self.out.push_back(Message::Rebase {
+                self.out.push_back(Message::State {
                     generation: self.generation,
+                    text: String::from_utf16_lossy(&self.units),
+                    selection: (
+                        index(self.selection.0),
+                        index(self.selection.1),
+                    ),
+                    composing: composing.map_or((-1, -1), |(start, end)| {
+                        (index(start), index(end))
+                    }),
                 });
+                self.reported = snapshot;
             }
+
+            // The keyboard sees where its edit left the cursor, then the
+            // rebase.
+            self.tell();
+
+            let clear = if self.secure {
+                !self.units.is_empty()
+            } else {
+                self.len() > self.cap || self.forgetting
+            };
+
+            if clear && self.composing.is_none() {
+                self.rebase();
+            }
+        }
+
+        /// `KeyboardView.sendSelection`.
+        fn tell(&mut self) {
+            let now = (self.selection, self.composing);
+
+            if now != self.told {
+                self.told = now;
+                self.updates.push(now);
+            }
+        }
+
+        /// `KeyboardView.rebase`: the mirror is emptied, the shell told,
+        /// then the keyboard.
+        fn rebase(&mut self) {
+            self.clear();
+            self.out.push_back(Message::Rebase {
+                generation: self.generation,
+            });
+            self.tell();
         }
 
         fn clear(&mut self) {
             self.units.clear();
             self.selection = (0, 0);
             self.composing = None;
+            self.forgetting = false;
             self.reported = (Vec::new(), (0, 0), None);
         }
 
-        /// `Keyboard.reset(generation)` running on the UI thread.
+        /// `Keyboard.reset(generation)` running on the UI thread: the
+        /// keyboard starts over with the empty mirror.
         fn adopt(&mut self, generation: i32) {
             self.generation = generation;
             self.clear();
+            self.told = ((0, 0), None);
+        }
+
+        /// `Keyboard.forget(generation)` running on the UI thread.
+        fn forget(&mut self, generation: i32) {
+            if generation != self.generation {
+                return;
+            }
+
+            if self.composing.is_some() {
+                self.forgetting = true;
+            } else {
+                self.rebase();
+            }
         }
     }
 
@@ -1018,11 +1270,18 @@ mod tests {
         after: Vec<String>,
         /// The last report the engine applied in this session.
         last: Expected,
-        /// Resets the native side posted that the Java side has not run.
-        posted: VecDeque<i32>,
+        /// What the native side posted that the Java side has not run.
+        posted: VecDeque<Posted>,
         /// The edits given to the app since the last `take`.
         log: Vec<Edit>,
         seen: Seen,
+    }
+
+    /// A call the native side posts to the Java side's UI thread.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Posted {
+        Reset(i32),
+        Forget(i32),
     }
 
     /// What a run went through, so the random runs show they reach every
@@ -1037,12 +1296,16 @@ mod tests {
         revisions: usize,
         /// Messages dropped for their generation.
         dropped: usize,
-        /// Backspace and Delete keys, and keys that asked for a reset.
+        /// Backspace and Delete keys, keys that asked for a reset, and
+        /// keys that moved the caret.
         deletions: usize,
         resets: usize,
-        /// Taps and hardware keys that reset, and rebases.
+        moves: usize,
+        /// Taps and hardware keys that reset, rebases, and requests to
+        /// forget the text.
         interruptions: usize,
         rebases: usize,
+        forgets: usize,
     }
 
     impl Seen {
@@ -1054,8 +1317,10 @@ mod tests {
             self.dropped += other.dropped;
             self.deletions += other.deletions;
             self.resets += other.resets;
+            self.moves += other.moves;
             self.interruptions += other.interruptions;
             self.rebases += other.rebases;
+            self.forgets += other.forgets;
         }
 
         /// Each path but the `skipped` ones was taken `at_least` times.
@@ -1068,8 +1333,10 @@ mod tests {
                 ("dropped", self.dropped),
                 ("deletions", self.deletions),
                 ("resets", self.resets),
+                ("moves", self.moves),
                 ("interruptions", self.interruptions),
                 ("rebases", self.rebases),
+                ("forgets", self.forgets),
             ] {
                 assert!(
                     count >= at_least || skipped.contains(&name),
@@ -1134,12 +1401,12 @@ mod tests {
             | Message::Rebase { generation }) = message;
 
             let mut edits = Vec::new();
-            let reset = self.engine.apply(message.clone(), &mut edits);
+            let request = self.engine.apply(message.clone(), &mut edits);
 
             if generation != current {
                 assert!(
-                    edits.is_empty() && !reset,
-                    "{label}: a message of generation {generation} gave {edits:?} in generation {current}"
+                    edits.is_empty() && request == Request::None,
+                    "{label}: a message of generation {generation} gave {edits:?} and {request:?} in generation {current}"
                 );
                 self.seen.dropped += 1;
                 return;
@@ -1155,9 +1422,22 @@ mod tests {
                     composing,
                     ..
                 } => {
-                    assert!(!reset, "{label}: a report asked for a reset");
+                    assert_ne!(
+                        request,
+                        Request::Reset,
+                        "{label}: a report asked for a reset"
+                    );
                     self.last = Expected::read(&text, selection, composing);
                     self.check();
+
+                    if request == Request::Forget {
+                        assert!(
+                            joins(&self.last.committed),
+                            "{label}: forget without a joining character"
+                        );
+                        self.posted.push_back(Posted::Forget(generation));
+                        self.seen.forgets += 1;
+                    }
 
                     let has =
                         |wanted: fn(&Edit) -> bool| edits.iter().any(wanted);
@@ -1173,13 +1453,13 @@ mod tests {
                 }
                 Message::Key { code, .. } => match code {
                     KEYCODE_DEL => {
-                        assert!(!reset, "{label}: Backspace asked for a reset");
+                        assert_eq!(request, Request::None, "{label}");
                         let _ = self.before.pop();
                         self.check();
                         self.seen.deletions += 1;
                     }
                     KEYCODE_FORWARD_DEL => {
-                        assert!(!reset, "{label}: Delete asked for a reset");
+                        assert_eq!(request, Request::None, "{label}");
                         if !self.after.is_empty() {
                             let _ = self.after.remove(0);
                         }
@@ -1187,11 +1467,10 @@ mod tests {
                         self.seen.deletions += 1;
                     }
                     KEYCODE_ENTER | KEYCODE_NUMPAD_ENTER | KEYCODE_TAB
-                    | KEYCODE_ESCAPE | KEYCODE_DPAD_UP | KEYCODE_DPAD_DOWN
-                    | KEYCODE_DPAD_LEFT | KEYCODE_DPAD_RIGHT
-                    | KEYCODE_MOVE_HOME | KEYCODE_MOVE_END => {
-                        assert!(
-                            reset,
+                    | KEYCODE_ESCAPE => {
+                        assert_eq!(
+                            request,
+                            Request::Reset,
                             "{label}: key {code} did not ask for a reset"
                         );
                         assert_eq!(
@@ -1211,22 +1490,47 @@ mod tests {
                             "{label}: the reset after a key gave edits"
                         );
 
-                        self.posted.push_back(generation);
+                        self.posted.push_back(Posted::Reset(generation));
                         self.restart();
                         self.seen.resets += 1;
                     }
+                    KEYCODE_DPAD_UP | KEYCODE_DPAD_DOWN | KEYCODE_DPAD_LEFT
+                    | KEYCODE_DPAD_RIGHT | KEYCODE_MOVE_HOME
+                    | KEYCODE_MOVE_END => {
+                        assert_eq!(
+                            request,
+                            Request::None,
+                            "{label}: key {code} asked for {request:?}"
+                        );
+                        assert_eq!(
+                            edits.last(),
+                            Some(&Edit::Key(Key::from_code(code).unwrap())),
+                            "{label}"
+                        );
+                        self.check_finished();
+
+                        // The moved caret is the origin: at once when the
+                        // mirror was empty (the engine is idle), else at the
+                        // rebase that follows.
+                        self.restart();
+                        self.seen.moves += 1;
+                    }
                     _ => {
                         assert!(
-                            edits.is_empty() && !reset,
+                            edits.is_empty() && request == Request::None,
                             "{label}: unknown key {code} gave {edits:?}"
                         );
                     }
                 },
                 Message::Rebase { .. } => {
-                    assert!(!reset, "{label}: a rebase asked for a reset");
-                    // The composition is dropped (the Java side rebases a
-                    // secure field even while a keyboard composes) and the
-                    // caret stays where the report put it.
+                    assert_eq!(
+                        request,
+                        Request::None,
+                        "{label}: a rebase asked for {request:?}"
+                    );
+                    // The Java side rebases only once nothing composes; a
+                    // shown preedit would be dropped. The caret stays where
+                    // the report put it.
                     self.last.composing = None;
                     assert_eq!(self.app.preedit, None, "{label}");
                     assert_eq!(
@@ -1333,7 +1637,7 @@ mod tests {
                 self.app.apply(&edits);
                 self.log.extend(edits);
                 self.check_finished();
-                self.posted.push_back(generation);
+                self.posted.push_back(Posted::Reset(generation));
                 self.seen.interruptions += 1;
             }
         }
@@ -1352,10 +1656,16 @@ mod tests {
             self.restart();
         }
 
-        /// The Java side runs the oldest reset the native side posted.
+        /// The Java side runs the oldest call the native side posted.
         fn adopt(&mut self) {
-            if let Some(generation) = self.posted.pop_front() {
-                self.mirror.adopt(generation);
+            match self.posted.pop_front() {
+                Some(Posted::Reset(generation)) => {
+                    self.mirror.adopt(generation);
+                }
+                Some(Posted::Forget(generation)) => {
+                    self.mirror.forget(generation);
+                }
+                None => {}
             }
         }
 
@@ -1407,7 +1717,7 @@ mod tests {
                         code: KEYCODE_ENTER
                     }
                 ),
-                (vec![], false)
+                (vec![], Request::None)
             );
             assert_eq!(
                 edits(
@@ -1736,7 +2046,12 @@ mod tests {
             (KEYCODE_MOVE_END, Key::End),
         ] {
             let mut engine = Engine::new();
-            let resets = !matches!(key, Key::Backspace | Key::Delete);
+            let request = if matches!(key, Key::Enter | Key::Tab | Key::Escape)
+            {
+                Request::Reset
+            } else {
+                Request::None
+            };
 
             assert_eq!(
                 apply(
@@ -1746,7 +2061,7 @@ mod tests {
                         code
                     }
                 ),
-                (vec![Edit::Key(key)], resets),
+                (vec![Edit::Key(key)], request),
                 "code {code}"
             );
         }
@@ -1762,7 +2077,7 @@ mod tests {
                         code
                     }
                 ),
-                (vec![], false),
+                (vec![], Request::None),
                 "code {code}"
             );
         }
@@ -1854,7 +2169,10 @@ mod tests {
                     code: KEYCODE_ENTER
                 }
             ),
-            (vec![clear(), commit("hello"), Edit::Key(Key::Enter)], true)
+            (
+                vec![clear(), commit("hello"), Edit::Key(Key::Enter)],
+                Request::Reset
+            )
         );
 
         let mut edits = Vec::new();
@@ -2041,6 +2359,156 @@ mod tests {
     }
 
     #[test]
+    fn marks_that_join_any_cluster_are_told_apart() {
+        for mark in [
+            "\u{0E35}",          // Thai sara ii
+            "\u{093E}",          // Devanagari vowel sign aa (a spacing mark)
+            "\u{094D}",          // Devanagari virama
+            "\u{0301}",          // combining acute accent
+            "\u{200D}",          // zero width joiner
+            "\u{FE0F}",          // variation selector
+            "\u{1F3FD}",         // emoji modifier
+            "\u{0E35}\u{0E48}x", // the first character counts
+        ] {
+            assert!(joins(mark), "{mark:?}");
+        }
+
+        for text in ["", "a", " ", "\u{0915}", "\u{0E01}", "🇫", "가", "😀"]
+        {
+            assert!(!joins(text), "{text:?}");
+        }
+    }
+
+    /// The keyboard's messages applied in order, as the native side applies
+    /// them, to a field that segments its value again after each turn of
+    /// the event loop, as `text_input` does at `view`. The requests are
+    /// collected, with the generation they name.
+    fn pump(
+        engine: &mut Engine,
+        mirror: &mut Mirror,
+        field: &mut Field,
+    ) -> Vec<(Request, i32)> {
+        let mut requests = Vec::new();
+
+        while let Some(message) = mirror.out.pop_front() {
+            let mut edits = Vec::new();
+            let request = engine.apply(message, &mut edits);
+
+            field.apply(&edits);
+
+            if request != Request::None {
+                requests.push((request, engine.generation()));
+            }
+        }
+
+        field.resegment();
+        requests
+    }
+
+    #[test]
+    fn a_mark_that_joins_the_text_before_the_origin_is_forgotten() {
+        // The field holds "क" and the user tapped after it: the origin. The
+        // keyboard commits a word that starts with a vowel sign, which joins
+        // "क" in the field: "का".
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("क", "");
+
+        mirror.commit_text("\u{093E}म ", 1);
+        assert_eq!(
+            pump(&mut engine, &mut mirror, &mut field),
+            [(Request::Forget, 0)]
+        );
+        assert_eq!(field.text(), "काम ");
+        assert_eq!(field.value, ["का", "म", " "]);
+
+        // The Java side forgets the text, so the keyboard cannot take the
+        // word back into a composition: that would Backspace "का" out of
+        // the field, which the engine cannot put back.
+        mirror.forget(0);
+        assert!(mirror.units.is_empty());
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert!(engine.is_idle());
+
+        mirror.delete_surrounding_text(1, 0);
+        mirror.set_composing_region(-3, 0);
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert_eq!(
+            (field.text().as_str(), field.preedit.clone()),
+            ("काम", None)
+        );
+    }
+
+    #[test]
+    fn a_request_to_forget_always_ends_in_a_rebase() {
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("e", "");
+
+        mirror.commit_text("\u{0301}", 1);
+        assert_eq!(
+            pump(&mut engine, &mut mirror, &mut field),
+            [(Request::Forget, 0)]
+        );
+
+        // The keyboard deleted the mark before the request ran: the empty
+        // mirror is rebased all the same, so the next mark asks again.
+        mirror.send_key(KEYCODE_DEL);
+        mirror.forget(0);
+        assert_eq!(mirror.out.back(), Some(&Message::Rebase { generation: 0 }));
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+
+        mirror.commit_text("\u{0301}", 1);
+        assert_eq!(
+            pump(&mut engine, &mut mirror, &mut field),
+            [(Request::Forget, 0)]
+        );
+    }
+
+    #[test]
+    fn forgetting_waits_for_the_composition_to_end() {
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("ก", "");
+
+        mirror.commit_text("\u{0E35}", 1);
+        assert_eq!(
+            pump(&mut engine, &mut mirror, &mut field),
+            [(Request::Forget, 0)]
+        );
+        assert_eq!(field.value, ["กี"]);
+
+        // The keyboard composes before the request runs: the request waits,
+        // and the engine asks once.
+        mirror.set_composing_text("ab", 1);
+        mirror.forget(0);
+        mirror.set_composing_text("abc", 1);
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert_eq!(mirror.composing_text(), "abc");
+        assert_eq!(field.preedit, Some(("abc".to_owned(), Some(3..3))));
+
+        mirror.finish_composing_text();
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert!(mirror.units.is_empty());
+        assert!(engine.is_idle());
+        assert_eq!(
+            (field.text().as_str(), field.preedit.clone()),
+            ("กีabc", None)
+        );
+
+        // A request that a reset overtook does nothing.
+        mirror.commit_text("\u{0E48}", 1);
+        assert_eq!(
+            pump(&mut engine, &mut mirror, &mut field),
+            [(Request::Forget, 0)]
+        );
+        let generation = engine.reset(&mut Vec::new());
+        mirror.adopt(generation);
+        mirror.forget(0);
+        assert_eq!(mirror.out, []);
+    }
+
+    #[test]
     fn pinyin_composes_and_commits_chinese() {
         let mut harness = Harness::new("", "!");
 
@@ -2078,7 +2546,7 @@ mod tests {
             [clear(), commit("hi"), Edit::Key(Key::Enter)]
         );
         assert_eq!(harness.value(), "hi");
-        assert_eq!(harness.posted, [1]);
+        assert_eq!(harness.posted, [Posted::Reset(1)]);
 
         // A message sent before the keyboard ran the reset is dropped.
         assert_eq!(harness.run(|m| m.commit_text("lost", 1)), []);
@@ -2125,6 +2593,100 @@ mod tests {
     }
 
     #[test]
+    fn a_secure_field_tells_the_keyboard_its_text_is_gone() {
+        let mut harness = Harness::with("", "", true, 4096);
+
+        // AOSP's LatinIME commits each letter of a password and deletes
+        // with deleteSurroundingText, after the text it believes is there.
+        for c in ["p", "a", "s", "s"] {
+            let _ = harness.run(|m| m.commit_text(c, 1));
+        }
+
+        // After each letter, the keyboard saw its cursor after it, then
+        // back at the start of the empty field: its cache is empty.
+        let after = ((1, 1), None);
+        let start = ((0, 0), None);
+        assert_eq!(harness.mirror.updates, [after, start].repeat(4));
+
+        assert_eq!(
+            harness.run(|m| m.delete_surrounding_text(1, 0)),
+            [Edit::Key(Key::Backspace)]
+        );
+        assert_eq!(harness.value(), "pas");
+    }
+
+    #[test]
+    fn a_composition_in_a_secure_field_is_typed_text() {
+        let mut harness = Harness::with("", "", true, 4096);
+
+        // A keyboard that composes in a password field: the field never
+        // shows the composition in clear, and the mirror keeps it only
+        // until it is committed.
+        assert_eq!(
+            harness.run(|m| m.set_composing_text("pw", 1)),
+            [commit("pw")]
+        );
+        assert_eq!(
+            harness.run(|m| m.set_composing_text("pwq", 1)),
+            [commit("q")]
+        );
+        assert_eq!(harness.mirror.composing_text(), "pwq");
+        assert_eq!(
+            harness.run(|m| m.set_composing_text("pwx", 1)),
+            [Edit::Key(Key::Backspace), commit("x")]
+        );
+
+        assert_eq!(harness.run(Mirror::finish_composing_text), []);
+        assert!(harness.mirror.units.is_empty());
+        assert_eq!((harness.value().as_str(), harness.preedit()), ("pwx", ""));
+
+        let _ = harness.run(|m| m.commit_text("1", 1));
+        assert_eq!(harness.value(), "pwx1");
+    }
+
+    #[test]
+    fn backspace_on_the_empty_mirror_reaches_the_text_before_it() {
+        // AOSP's LatinIME and its forks delete before an empty field with
+        // deleteSurroundingText, not with the Backspace key.
+        let mut harness = Harness::new("hello", " world");
+
+        assert_eq!(
+            harness.run(|m| m.delete_surrounding_text(1, 0)),
+            [Edit::Key(Key::Backspace)]
+        );
+        assert_eq!(
+            harness.run(|m| m.delete_surrounding_text_in_code_points(1, 0)),
+            [Edit::Key(Key::Backspace)]
+        );
+        assert_eq!(harness.value(), "hel world");
+
+        // Forward deletion at the end of the mirror is the Delete key.
+        assert_eq!(
+            harness.run(|m| m.delete_surrounding_text(0, 1)),
+            [Edit::Key(Key::Delete)]
+        );
+        assert_eq!(harness.value(), "helworld");
+
+        // With text in the mirror, only the mirror's text is deleted.
+        let _ = harness.run(|m| m.commit_text("p", 1));
+        assert_eq!(
+            harness.run(|m| m.delete_surrounding_text(1, 0)),
+            [Edit::Key(Key::Backspace)]
+        );
+        assert_eq!(harness.mirror.units, []);
+        assert_eq!(harness.value(), "helworld");
+
+        // A selection, or a composition, is not an empty side: the
+        // keyboard edits what it sees.
+        let _ = harness.run(|m| m.set_composing_text("ab", 1));
+        let _ = harness.run(|m| m.delete_surrounding_text(1, 0));
+        assert_eq!(
+            (harness.value().as_str(), harness.preedit()),
+            ("helworld", "ab")
+        );
+    }
+
+    #[test]
     fn the_mirror_cap_rebases_and_typing_goes_on() {
         let mut harness = Harness::with("", "", false, 8);
 
@@ -2158,7 +2720,7 @@ mod tests {
             (harness.value().as_str(), harness.preedit()),
             ("one two thr", "")
         );
-        assert_eq!(harness.posted, [1]);
+        assert_eq!(harness.posted, [Posted::Reset(1)]);
 
         harness.settle();
         let _ = harness.run(|m| m.commit_text(",", 1));
@@ -2179,9 +2741,9 @@ mod tests {
         let mut harness = Harness::new("", "");
 
         let _ = harness.run(|m| m.commit_text("a", 1));
-        // An arrow from the keyboard asks for a reset; the keyboard types on
+        // Tab from the keyboard asks for a reset; the keyboard types on
         // before it runs.
-        harness.mirror.send_key(KEYCODE_DPAD_LEFT);
+        harness.mirror.send_key(KEYCODE_TAB);
         harness.mirror.commit_text("b", 1);
         harness.drain();
         assert_eq!(harness.value(), "a");
@@ -2190,8 +2752,33 @@ mod tests {
         harness.adopt();
         harness.mirror.commit_text("d", 1);
         harness.drain();
-        // The caret moved left of "a" with the arrow.
-        assert_eq!(harness.value(), "da");
+        assert_eq!(harness.value(), "ad");
+    }
+
+    #[test]
+    fn caret_moving_keys_keep_the_generation_and_every_key_counts() {
+        let mut harness = Harness::new("", "!");
+
+        let _ = harness.run(|m| m.set_composing_text("abc", 1));
+        // Two quick arrows, then a letter, all before the event loop turns:
+        // the first finishes the composition and rebases the mirror.
+        harness.mirror.send_key(KEYCODE_DPAD_LEFT);
+        harness.mirror.send_key(KEYCODE_DPAD_LEFT);
+        harness.mirror.send_char('x');
+        harness.drain();
+
+        assert_eq!(harness.value(), "axbc!");
+        assert_eq!(harness.preedit(), "");
+        assert_eq!(harness.posted, []);
+        assert_eq!(harness.engine.generation(), 0);
+
+        // Home and End go on from where the caret is.
+        let _ = harness.run(|m| m.send_key(KEYCODE_MOVE_END));
+        let _ = harness.run(|m| m.send_char('?'));
+        let _ = harness.run(|m| m.send_key(KEYCODE_MOVE_HOME));
+        let _ = harness.run(|m| m.commit_text("> ", 1));
+        assert_eq!(harness.value(), "> axbc!?");
+        assert_eq!(harness.posted, []);
     }
 
     // Random keyboards.
@@ -2449,8 +3036,9 @@ mod tests {
             seen.add(simulate(seed, 300, true, 4096));
         }
 
-        // The mirror is empty after every report: nothing to revise, and
-        // a tap finds the engine idle.
-        seen.assert_reached(20, &["revisions", "interruptions"]);
+        // A composition reaches the app as typed text, never as a preedit
+        // drawn in clear; the mirror keeps it until it is committed.
+        assert_eq!(seen.compositions, 0, "{seen:?}");
+        seen.assert_reached(20, &["compositions"]);
     }
 }

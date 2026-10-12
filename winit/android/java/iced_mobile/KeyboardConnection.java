@@ -193,28 +193,8 @@ final class KeyboardConnection extends BaseInputConnection {
             return false;
         }
 
-        beginBatchEdit();
-
-        try {
-            Editable text = view.mirror();
-            int[] around = around(text);
-
-            if (around != null) {
-                int start = around[0];
-                int end = around[1];
-                int before = (int) Math.max(0L,
-                        (long) start - Math.max(0, beforeLength));
-                int after = (int) Math.min((long) text.length(),
-                        (long) end + Math.max(0, afterLength));
-
-                delete(text, before, start, end, after);
-            }
-        } catch (RuntimeException error) {
-            Keyboard.warn("deleteSurroundingText", error);
-        } finally {
-            endBatchEdit();
-        }
-
+        deleteAround(beforeLength, afterLength, false,
+                "deleteSurroundingText");
         return true;
     }
 
@@ -225,26 +205,8 @@ final class KeyboardConnection extends BaseInputConnection {
             return false;
         }
 
-        beginBatchEdit();
-
-        try {
-            Editable text = view.mirror();
-            int[] around = around(text);
-
-            if (around != null) {
-                int start = around[0];
-                int end = around[1];
-                int before = backward(text, start, beforeLength);
-                int after = forward(text, end, afterLength);
-
-                delete(text, before, start, end, after);
-            }
-        } catch (RuntimeException error) {
-            Keyboard.warn("deleteSurroundingTextInCodePoints", error);
-        } finally {
-            endBatchEdit();
-        }
-
+        deleteAround(beforeLength, afterLength, true,
+                "deleteSurroundingTextInCodePoints");
         return true;
     }
 
@@ -446,6 +408,76 @@ final class KeyboardConnection extends BaseInputConnection {
         } finally {
             endBatchEdit();
         }
+    }
+
+    /**
+     * Deletes {@code beforeLength} UTF-16 units (or code points) before the
+     * selection and the composing region, and {@code afterLength} after
+     * them, as {@link BaseInputConnection} does.
+     *
+     * <p>A side the keyboard asks to delete that is empty, while nothing is
+     * selected or composing, is the Backspace or Delete key instead: the
+     * text there is the field's, before or after the mirror. Keyboards such
+     * as AOSP's LatinIME and its forks delete that way even when their
+     * cursor is at the start of the text, where others send the key.
+     */
+    private void deleteAround(int beforeLength, int afterLength,
+            boolean codePoints, String what) {
+        boolean keyBefore = false;
+        boolean keyAfter = false;
+
+        beginBatchEdit();
+
+        try {
+            Editable text = view.mirror();
+            int[] around = around(text);
+
+            if (around != null) {
+                int start = around[0];
+                int end = around[1];
+                int before;
+                int after;
+
+                if (codePoints) {
+                    before = backward(text, start, beforeLength);
+                    after = forward(text, end, afterLength);
+                } else {
+                    before = (int) Math.max(0L,
+                            (long) start - Math.max(0, beforeLength));
+                    after = (int) Math.min((long) text.length(),
+                            (long) end + Math.max(0, afterLength));
+                }
+
+                boolean bare = isBare(text);
+                keyBefore = bare && beforeLength > 0 && start == 0;
+                keyAfter = bare && afterLength > 0 && end == text.length();
+
+                delete(text, before, start, end, after);
+            }
+        } catch (RuntimeException error) {
+            Keyboard.warn(what, error);
+        } finally {
+            endBatchEdit();
+        }
+
+        // After the edit's report, so the keys come after its text.
+        if (keyBefore) {
+            view.forward(KeyEvent.KEYCODE_DEL);
+        }
+
+        if (keyAfter) {
+            view.forward(KeyEvent.KEYCODE_FORWARD_DEL);
+        }
+    }
+
+    /** Whether nothing is selected and nothing is composing. */
+    private static boolean isBare(Editable text) {
+        int[] selection = selection(text);
+        int start = getComposingSpanStart(text);
+        int end = getComposingSpanEnd(text);
+
+        return selection != null && selection[0] == selection[1]
+                && (start < 0 || end < 0 || start == end);
     }
 
     /**

@@ -34,6 +34,9 @@ final class KeyboardView extends View {
     /** Whether a field wants the keyboard shown. */
     private boolean wanted;
 
+    /** The shell asked to forget the text once nothing composes. */
+    private boolean forgetting;
+
     private int purpose = Keyboard.NORMAL;
     private int generation;
 
@@ -196,6 +199,24 @@ final class KeyboardView extends View {
         manager.hideSoftInputFromWindow(getWindowToken(), 0);
     }
 
+    /**
+     * Forgets the mirror's text, which stays in the field (a rebase), unless
+     * a reset ran since the shell asked at {@code generation}. A composition
+     * is kept until it ends. An empty mirror is rebased too, so the shell
+     * always learns that its request ran.
+     */
+    void forget(int generation) {
+        if (!installed || generation != this.generation) {
+            return;
+        }
+
+        if (composingStart() != -1) {
+            forgetting = true;
+        } else {
+            rebase();
+        }
+    }
+
     void reset(int generation) {
         if (!installed) {
             return;
@@ -257,10 +278,15 @@ final class KeyboardView extends View {
             return;
         }
 
+        boolean secure = purpose == Keyboard.SECURE;
         int selStart = Selection.getSelectionStart(mirror);
         int selEnd = Selection.getSelectionEnd(mirror);
-        int composingStart = composingStart();
-        int composingEnd = composingEnd();
+        boolean composing = composingStart() != -1;
+
+        // A password field never shows a composition: the shell gets it as
+        // typed text, which the field masks.
+        int composingStart = secure ? -1 : composingStart();
+        int composingEnd = secure ? -1 : composingEnd();
 
         boolean changed = selStart != reportedSelStart
                 || selEnd != reportedSelEnd
@@ -279,21 +305,23 @@ final class KeyboardView extends View {
 
             Keyboard.state(generation, text, selStart, selEnd, composingStart,
                     composingEnd);
-
-            // A password is not kept here, and the mirror stays small. A
-            // composition is kept until the keyboard commits it.
-            boolean composing = composingStart != -1;
-            boolean clear = purpose == Keyboard.SECURE
-                    ? text.length() > 0
-                    : text.length() > CAP;
-
-            if (clear && !composing) {
-                rebase();
-                return;
-            }
         }
 
+        // The keyboard sees where its edit left the cursor before a rebase
+        // moves it to the start, so a keyboard that keeps the text before
+        // its cursor learns that it is gone.
         sendSelection();
+
+        // A password is not kept here, the mirror stays small, and the text
+        // the shell asked to forget goes. A composition is kept until the
+        // keyboard commits it.
+        boolean clear = secure
+                ? mirror.length() > 0
+                : mirror.length() > CAP || forgetting;
+
+        if (clear && !composing) {
+            rebase();
+        }
     }
 
     private void finishComposing() {
@@ -316,6 +344,7 @@ final class KeyboardView extends View {
         mirror.clear();
         mirror.clearSpans();
         Selection.setSelection(mirror, 0);
+        forgetting = false;
 
         reportedText = "";
         reportedSelStart = 0;

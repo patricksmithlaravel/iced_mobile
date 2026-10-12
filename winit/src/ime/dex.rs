@@ -27,6 +27,7 @@
 //! | [`SHOW`]: `public void show(int purpose)` | `(I)V` | focuses the view and shows the keyboard for `purpose`; a changed purpose restarts the keyboard (`InputMethodManager.restartInput`). Until `hide`, the window gaining the focus shows the keyboard again |
 //! | [`HIDE`]: `public void hide()` | `()V` | hides the keyboard; the view keeps the focus |
 //! | [`RESET`]: `public void reset(int generation)` | `(I)V` | adopts `generation`, clears the mirror and restarts the keyboard (`InputMethodManager.restartInput`) |
+//! | [`FORGET`]: `public void forget(int generation)` | `(I)V` | unless a reset ran since the shell had `generation`: rebases the mirror (below), an empty one too, at once or, while something composes, once the composition ends; no new generation, no restart |
 //! | [`UNINSTALL`]: `public void uninstall()` | `()V` | hides the keyboard if the view had the focus, removes the view and lets go of the Activity |
 //!
 //! `install` throws `IllegalArgumentException` for a null Activity, and the
@@ -69,16 +70,21 @@
 //!   selected.
 //! - `composingStart`, `composingEnd`: the composing region, with
 //!   `composingStart < composingEnd`, or -1 and -1 when nothing is
-//!   composing.
+//!   composing. Always -1 and -1 for a secure field: a composition there is
+//!   reported as typed text, so the field never draws it in clear, and the
+//!   mirror keeps it until it is committed.
 //!
 //! `nativeKey` sends a key the mirror cannot hold, an Android `KeyEvent`
 //! key code. Right before it, any composition is finished and the mirror
 //! reported, so a key never overtakes the text typed before it:
 //!
 //! - `KEYCODE_DEL` (67) and `KEYCODE_FORWARD_DEL` (112): only when the
-//!   mirror had no selection and nothing to delete on that side, so the
-//!   mirror did not change. Otherwise the key deletes in the mirror (by code
-//!   point) and is reported as a state.
+//!   mirror had no selection, no composition and nothing to delete on that
+//!   side, so the mirror did not change there: for the keyboard's key event,
+//!   and for `deleteSurroundingText` (and its code point form) asking to
+//!   delete on that side, which is how AOSP's LatinIME and its forks press
+//!   Backspace even at the start of the text. Otherwise the key deletes in
+//!   the mirror (by code point) and is reported as a state.
 //! - `KEYCODE_ENTER` (66): the keyboard's key event, its editor action
 //!   (`performEditorAction`), or a commit of exactly `"\n"`.
 //!   `KEYCODE_NUMPAD_ENTER` (160) is sent as it is.
@@ -99,11 +105,15 @@
 //!   its keyboard sees an empty field;
 //! - a report whose text exceeds 4096 UTF-16 units;
 //! - a caret-moving key, as above;
+//! - [`FORGET`];
 //! - a change of purpose while the mirror was not empty: the next field's
 //!   keyboard does not see the last field's text. Only this rebase can drop
 //!   a composition, which the shell then takes away without committing it.
 //!
-//! The first three wait while something is composing.
+//! The first four wait while something is composing. Each report, and each
+//! rebase, tells the keyboard the selection it leaves (`updateSelection`),
+//! so a keyboard that keeps the text before its cursor learns that the
+//! mirror is empty again.
 //!
 //! ## Generations
 //!
@@ -122,7 +132,7 @@
 //! | Purpose | `inputType` | Also |
 //! |---|---|---|
 //! | [`PURPOSE_NORMAL`] (0, and any unknown value) | `TYPE_CLASS_TEXT` | |
-//! | [`PURPOSE_SECURE`] (1) | `TYPE_CLASS_TEXT \| TYPE_TEXT_VARIATION_PASSWORD` | `IME_FLAG_NO_PERSONALIZED_LEARNING`; a rebase after every report |
+//! | [`PURPOSE_SECURE`] (1) | `TYPE_CLASS_TEXT \| TYPE_TEXT_VARIATION_PASSWORD` | `IME_FLAG_NO_PERSONALIZED_LEARNING`; a composition reported as typed text; a rebase after every report once nothing composes |
 //! | [`PURPOSE_TERMINAL`] (2) | `TYPE_CLASS_TEXT \| TYPE_TEXT_FLAG_NO_SUGGESTIONS \| TYPE_TEXT_VARIATION_VISIBLE_PASSWORD` | |
 //!
 //! ## Failures
@@ -169,6 +179,12 @@ pub(crate) const HIDE: Method = Method {
 /// `public void reset(int generation)`.
 pub(crate) const RESET: Method = Method {
     name: "reset",
+    signature: "(I)V",
+};
+
+/// `public void forget(int generation)`.
+pub(crate) const FORGET: Method = Method {
+    name: "forget",
     signature: "(I)V",
 };
 
@@ -351,7 +367,7 @@ mod tests {
 
         assert_eq!(method(INSTALL) & (PUBLIC | STATIC), PUBLIC | STATIC);
 
-        for called in [SHOW, HIDE, RESET, UNINSTALL] {
+        for called in [SHOW, HIDE, RESET, FORGET, UNINSTALL] {
             assert_eq!(
                 method(called) & (PUBLIC | STATIC),
                 PUBLIC,
