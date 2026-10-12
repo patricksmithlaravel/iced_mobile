@@ -161,6 +161,14 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - **iOS:** `icm stop ios-device` compares a listed executable with the app's bundle only after
   decoding its file URL once, never as raw text. So a bundle named `100%25.app` is not taken for
   the app `100%.app`, which the device lists as `100%25.app/…`.
+- **iOS:** `icm stop ios-device` ends the recorded app pid only while the device lists it running
+  the app's executable in the directory devicectl installed the app in (`app.install_url` in the
+  record, from the install output's `installationURL`). Before, only the last two path components
+  (`<bundle>/<binary>`) were compared, so a copy of an app with the same bundle name, in another
+  container and under the reused pid, was terminated and reported as terminated. A record with no
+  install URL, or an install output that does not name the app, leaves the pid unconfirmed: nothing
+  is terminated and the record stays. (Fake tools only; the `installationURL` field is not seen on
+  a phone.)
 - `icm stop ios-device` keeps the record when the device lists the recorded app pid with no usable
   executable path (none, an empty one, or one that does not decode). That is not proof the app is
   gone: nothing is terminated, `ios.device.stop_unconfirmed` warns, the device is listed as

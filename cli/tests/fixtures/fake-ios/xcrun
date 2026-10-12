@@ -266,7 +266,14 @@ devicectl)
   done
   case "$1 $2" in
   "list devices") cp "$S/devicectl-devices.json" "$json" ;;
-  "device install") printf '{"info":{"outcome":"success"},"result":{"installedApplications":[{"bundleID":"com.acme.fixture"}]}}\n' > "$json" ;;
+  "device install")
+    # The app is installed in container X, in the bundle directory
+    # $S/install-dir names (`Fixture.app` unless the test renamed it), and the
+    # output gives that directory as devicectl's `installationURL`.
+    dir=Fixture.app
+    [ -f "$S/install-dir" ] && dir=$(cat "$S/install-dir")
+    printf '{"info":{"outcome":"success"},"result":{"installedApplications":[{"bundleID":"com.acme.fixture","installationURL":"file:///private/var/containers/Bundle/Application/X/%s/"}]}}\n' "$dir" > "$json"
+    ;;
   "device process")
     case "$3" in
     launch)

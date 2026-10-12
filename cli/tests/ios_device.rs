@@ -275,7 +275,8 @@ impl Device {
             .collect()
     }
 
-    /// Names the app `name` (its bundle is `<name>.app`).
+    /// Names the app `name` (its bundle is `<name>.app`), installed in the
+    /// directory devicectl's URL spells that way.
     fn rename_app(&self, name: &str) {
         let config = self.dir().join("icm.toml");
         let text = std::fs::read_to_string(&config).unwrap();
@@ -283,6 +284,11 @@ impl Device {
         std::fs::write(
             &config,
             text.replace("name = \"Fixture\"", &format!("name = \"{name}\"")),
+        )
+        .unwrap();
+        std::fs::write(
+            self.state().join("install-dir"),
+            format!("{}.app", url_path_name(name)),
         )
         .unwrap();
     }
@@ -303,6 +309,19 @@ const APP_EXECUTABLE: &str =
 
 fn process(pid: i64, executable: &str) -> Value {
     json!({"executable": executable, "processIdentifier": pid})
+}
+
+/// `name` as a file URL's path spells it: every byte outside the unreserved
+/// set is `%XX`, so `My App` is `My%20App` and `100%25` is `100%2525`.
+fn url_path_name(name: &str) -> String {
+    name.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                char::from(byte).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 /// The `devicectl` calls of a `stop` that found the recorded pid running the
@@ -577,6 +596,62 @@ fn stop_leaves_a_process_that_took_the_apps_pid_alone() {
         assert_eq!(stop["checks"]["failed"], json!([]), "{case}: {stop}");
         assert!(!device.session_path().exists(), "{case}");
     }
+}
+
+/// The app icm installed is in container `X`. After the app exited, its pid
+/// may be reused by a copy of an app with the same bundle name installed in
+/// another container (`OTHER-UUID`). That copy's executable ends in the same
+/// `Fixture.app/release-app`, and matching the last two components alone took
+/// it for the app: `stop` ran the terminate command and said the app was
+/// terminated. Nothing is terminated, and the record is removed as for any
+/// other process under the pid. The control is the app itself, under the same
+/// pid, which is terminated.
+#[test]
+fn a_same_named_app_in_another_container_is_not_the_app() {
+    let other =
+        "file:///private/var/containers/Bundle/Application/OTHER-UUID/Fixture.app/release-app";
+    let device = Device::new();
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(run["process"]["pid"], 4242, "{run}");
+    device.list_processes(&[process(4242, other)]);
+
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    let xcrun = device.log("xcrun.log");
+    assert!(
+        xcrun.contains(&format!("devicectl device info processes --device {UDID} ")),
+        "the device was not asked: {xcrun}"
+    );
+    assert!(
+        !device.terminated(),
+        "the recorded command ended a copy of the app in another container: {xcrun}"
+    );
+    assert_eq!(stop["stopped"][0]["app"], "not_running", "{stop}");
+    let note = stop["stopped"][0]["app_note"].as_str().unwrap();
+    assert!(
+        note.contains(&format!(
+            "pid 4242 is {} on the device now, not the app",
+            other.trim_start_matches("file://")
+        )),
+        "{note}"
+    );
+    assert_eq!(stop["stopped"][0]["commands"], json!([]), "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
+    assert!(!device.session_path().exists());
+
+    // The control: the app icm installed, under the same pid, is terminated.
+    let device = Device::new();
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(device.terminated(), "{}", device.log("xcrun.log"));
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
 }
 
 /// devicectl lists a process's executable as a file URL, and Foundation

@@ -180,7 +180,7 @@ pub fn parse_devices(text: &str) -> Result<Vec<Device>, String> {
 pub enum Match {
     /// The executable is the app's binary, inside its bundle.
     Same,
-    /// It is another program, or this binary in another bundle.
+    /// It is another program, or this binary in another bundle or install.
     Different,
     /// The text does not settle it (see [`match_app_executable`]), so
     /// nothing may be concluded from it.
@@ -201,26 +201,72 @@ pub enum Match {
 /// host or no path, a raw `?` or `#` (Foundation escapes both in a path, so
 /// a URL that has one does not say where its path ends), or an escape that
 /// is not two hex digits, or bytes that are not UTF-8 once decoded.
+///
+/// Only the last two components are compared, so a copy of the app in another
+/// container matches as well. That is good enough to find the app's processes
+/// for the readiness probe, which ends nothing. What `stop` ends is decided by
+/// [`match_installed_executable`], which compares the whole path.
 pub fn match_app_executable(executable: &str, bundle: &str, binary: &str) -> Match {
-    let path = if executable.starts_with("file://") {
-        match file_url_path(executable) {
-            Some(path) => path,
-            None => return Match::Unknown,
-        }
-    } else if has_scheme(executable) {
+    match executable_path(executable) {
+        Some(path) if path.ends_with(&format!("/{bundle}/{binary}")) => Match::Same,
+        Some(_) => Match::Different,
+        None => Match::Unknown,
+    }
+}
+
+/// How `executable`, as devicectl lists it, compares with `binary` in the app
+/// installed at `install`: the bundle directory's file URL, as devicectl's
+/// install output gives it (`installationURL`, with a trailing slash or
+/// without). Both are read as [`match_app_executable`] reads a listed
+/// executable, and the whole path is compared, container directory included:
+/// a copy of the same app installed in another container is
+/// [`Match::Different`], however its path ends. Anything that does not read
+/// as a path, and an install that names no absolute directory, is
+/// [`Match::Unknown`].
+pub fn match_installed_executable(executable: &str, install: &str, binary: &str) -> Match {
+    let (Some(path), Some(dir)) = (executable_path(executable), executable_path(install)) else {
         return Match::Unknown;
-    } else {
-        executable.to_string()
     };
-    if path.ends_with(&format!("/{bundle}/{binary}")) {
+    let dir = dir.trim_end_matches('/');
+    if !dir.starts_with('/') {
+        return Match::Unknown;
+    }
+    if path == format!("{dir}/{binary}") {
         Match::Same
     } else {
         Match::Different
     }
 }
 
+/// The bundle directory `devicectl device install app` installed `bundle_id`
+/// in, as its output names it (`installationURL`, a file URL), or `None` when
+/// the output names no such app or gives it no such field.
+pub fn installation_url(text: &str, bundle_id: &str) -> Option<String> {
+    let json: Value = serde_json::from_str(text).ok()?;
+    json.pointer("/result/installedApplications")?
+        .as_array()?
+        .iter()
+        .find(|app| app.get("bundleID").and_then(Value::as_str) == Some(bundle_id))?
+        .get("installationURL")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The path a listed executable or an install's URL names: a `file://` URL's
+/// decoded path, or a plain path as it stands. `None` for another scheme, or
+/// a file URL [`file_url_path`] cannot read.
+fn executable_path(text: &str) -> Option<String> {
+    if text.starts_with("file://") {
+        file_url_path(text)
+    } else if has_scheme(text) {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
 /// The decoded path of a `file://` URL whose host is empty or `localhost`,
-/// or `None` when [`match_app_executable`] cannot read one.
+/// or `None` when [`executable_path`] cannot read one.
 fn file_url_path(url: &str) -> Option<String> {
     let rest = url.strip_prefix("file://")?;
     if rest.contains(['?', '#']) {
@@ -270,8 +316,10 @@ fn hex_value(byte: u8) -> Option<u8> {
 }
 
 /// The pids of the running processes whose executable is `<bundle>/<executable>`
-/// (`devicectl device info processes`). Only a [`Match::Same`] executable
-/// counts: one that does not read as the app's is not taken for it.
+/// (`devicectl device info processes`), for the readiness probe. Only a
+/// [`Match::Same`] executable counts: one that does not read as the app's is
+/// not taken for it. The probe ends nothing, so the tail match is enough here;
+/// `stop` uses [`match_installed_executable`].
 pub fn app_pids(text: &str, bundle: &str, executable: &str) -> Vec<i64> {
     let Ok(json) = serde_json::from_str::<Value>(text) else {
         return Vec::new();
@@ -683,5 +731,152 @@ mod tests {
             match_app_executable("/private/a:b/My App.app/my-app", "My App.app", "my-app"),
             Match::Same
         );
+    }
+
+    /// The app icm installed is in container `X`. A copy of an app with the
+    /// same bundle name in container `OTHER-UUID` ends in the same
+    /// `Fixture.app/release-app`: the whole path decides, so it is another
+    /// process, and the readiness probe's tail match does not decide it.
+    #[test]
+    fn an_installed_app_is_the_whole_path_and_no_copy_in_another_container() {
+        let install = "file:///private/var/containers/Bundle/Application/X/Fixture.app/";
+        assert_eq!(
+            match_installed_executable(&at("Fixture.app", "release-app"), install, "release-app"),
+            Match::Same
+        );
+        let other =
+            "file:///private/var/containers/Bundle/Application/OTHER-UUID/Fixture.app/release-app";
+        assert_eq!(
+            match_installed_executable(other, install, "release-app"),
+            Match::Different
+        );
+        // The same container with another binary, or another bundle, is not it.
+        assert_eq!(
+            match_installed_executable(&at("Fixture.app", "other"), install, "release-app"),
+            Match::Different
+        );
+        assert_eq!(
+            match_installed_executable(&at("Other.app", "release-app"), install, "release-app"),
+            Match::Different
+        );
+        // A directory that only ends the same way is not the install either.
+        assert_eq!(
+            match_installed_executable(
+                &at("OLD-Fixture.app", "release-app"),
+                install,
+                "release-app"
+            ),
+            Match::Different
+        );
+        // The install's trailing slash is optional.
+        assert_eq!(
+            match_installed_executable(
+                &at("Fixture.app", "release-app"),
+                install.trim_end_matches('/'),
+                "release-app"
+            ),
+            Match::Same
+        );
+    }
+
+    /// The install is compared as a listed executable is: its escapes are
+    /// decoded once, so the app named `My App` installed as `My%20App.app`
+    /// runs `My App.app/my-app`, and the app named `100%25` (installed as
+    /// `100%2525.app`) is not the app `100%.app` listed as `100%25.app`.
+    #[test]
+    fn an_installed_app_is_compared_decoded_once() {
+        let spaced = "file:///private/var/containers/Bundle/Application/X/My%20App.app/";
+        assert_eq!(
+            match_installed_executable(&at("My%20App.app", "my-app"), spaced, "my-app"),
+            Match::Same
+        );
+        // A URL with a raw space names the same directory.
+        let raw = spaced.replace("%20", " ");
+        assert_eq!(
+            match_installed_executable(&at("My%20App.app", "my-app"), &raw, "my-app"),
+            Match::Same
+        );
+        let percent = "file:///private/var/containers/Bundle/Application/X/100%2525.app/";
+        assert_eq!(
+            match_installed_executable(&at("100%25.app", "my-app"), percent, "my-app"),
+            Match::Different
+        );
+        assert_eq!(
+            match_installed_executable(&at("100%2525.app", "my-app"), percent, "my-app"),
+            Match::Same
+        );
+        // A listing that spells `100%.app` has a bad escape, so it says nothing.
+        assert_eq!(
+            match_installed_executable(&at("100%.app", "my-app"), percent, "my-app"),
+            Match::Unknown
+        );
+    }
+
+    /// Where the listing or the install does not say what path it names,
+    /// nothing is concluded: a malformed escape, another scheme, a `?` or `#`
+    /// in the listing, or an install that names no absolute directory.
+    #[test]
+    fn an_installed_app_compared_with_what_does_not_read_is_unknown() {
+        let install = "file:///private/var/containers/Bundle/Application/X/Fixture.app/";
+        for executable in [
+            "https://example.com/private/Fixture.app/release-app",
+            "file:///private/var/containers/Bundle/Application/X/Fixture%G1.app/release-app",
+            "file:///private/var/containers/Bundle/Application/X/Fixture.app/release-app?x",
+            "file:///private/var/containers/Bundle/Application/X/Fixture.app/release-app#x",
+        ] {
+            assert_eq!(
+                match_installed_executable(executable, install, "release-app"),
+                Match::Unknown,
+                "{executable}"
+            );
+        }
+        for install in [
+            "https://example.com/Fixture.app/",
+            "file://other-host/private/Fixture.app/",
+            "file:///",
+            "file:///%G1/",
+            "Fixture.app/",
+            "",
+        ] {
+            assert_eq!(
+                match_installed_executable(
+                    &at("Fixture.app", "release-app"),
+                    install,
+                    "release-app"
+                ),
+                Match::Unknown,
+                "{install}"
+            );
+        }
+    }
+
+    /// The bundle directory is read from the install output's entry for the
+    /// app's bundle id, and only when that entry names one.
+    #[test]
+    fn the_install_output_names_the_installed_app_directory() {
+        let text = json!({"info": {"outcome": "success"}, "result": {"installedApplications": [
+            {"bundleID": "com.example.other", "installationURL": "file:///private/var/containers/Bundle/Application/Y/Other.app/"},
+            {"bundleID": "com.acme.fixture", "installationURL": "file:///private/var/containers/Bundle/Application/X/Fixture.app/"}
+        ]}})
+        .to_string();
+        assert_eq!(
+            installation_url(&text, "com.acme.fixture").as_deref(),
+            Some("file:///private/var/containers/Bundle/Application/X/Fixture.app/")
+        );
+        assert_eq!(installation_url(&text, "com.acme.missing"), None);
+        // An entry with no installation URL, and an output with no entries,
+        // name no directory.
+        assert_eq!(
+            installation_url(
+                r#"{"result":{"installedApplications":[{"bundleID":"com.acme.fixture"}]}}"#,
+                "com.acme.fixture"
+            ),
+            None
+        );
+        assert_eq!(
+            installation_url(r#"{"result":{}}"#, "com.acme.fixture"),
+            None
+        );
+        assert_eq!(installation_url("not json", "com.acme.fixture"), None);
     }
 }

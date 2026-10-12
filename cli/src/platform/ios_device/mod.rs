@@ -871,28 +871,32 @@ pub enum AppProcess {
 }
 
 /// Whether the recorded app pid, listed by the device, is the app: the pid
-/// must run `<bundle>/<executable>`. A process of the app under another pid
-/// is not what icm launched, so it is not the one to end. A listed pid whose
-/// executable icm cannot read is unconfirmed, not another process: a missing
-/// answer is no proof that the app is gone.
+/// must run `<install>/<binary>`, the app's executable in the directory it was
+/// installed in, container included. A copy of the app installed elsewhere is
+/// another process, and a process of the app under another pid is not what
+/// icm launched, so neither is the one to end. A listed pid whose executable
+/// icm cannot read is unconfirmed, not another process: a missing answer is no
+/// proof that the app is gone. Without the install's directory nothing can be
+/// the app, so a listed pid is unconfirmed.
 fn judge_app_process(
     listing: &[devicectl::Listed],
-    bundle: &str,
-    executable: &str,
+    install: Option<&str>,
+    binary: &str,
     pid: i64,
 ) -> AppProcess {
     // A process with no executable named does not run the app's binary.
-    let compare = |process: &devicectl::Listed| {
-        process
-            .executable
-            .as_deref()
-            .map_or(devicectl::Match::Different, |path| {
-                devicectl::match_app_executable(path, bundle, executable)
-            })
+    let compare = |process: &devicectl::Listed| match (process.executable.as_deref(), install) {
+        (None, _) => devicectl::Match::Different,
+        (Some(path), Some(dir)) => devicectl::match_installed_executable(path, dir, binary),
+        (Some(_), None) => devicectl::Match::Unknown,
     };
     match listing.iter().find(|process| process.pid == pid) {
         Some(process) if process.usable_program().is_none() => AppProcess::Unconfirmed(format!(
             "the device lists pid {pid} without a usable executable path, so icm cannot tell whether that process is the app"
+        )),
+        Some(process) if install.is_none() => AppProcess::Unconfirmed(format!(
+            "the record does not say where the app is installed, so icm cannot tell whether pid {pid} ({}) is the app",
+            process.program()
         )),
         Some(process) => match compare(process) {
             devicectl::Match::Same => AppProcess::Running,
@@ -948,9 +952,12 @@ pub fn app_process(ctx: &Ctx, session: &Session) -> AppProcess {
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
     };
-    let (Some(bundle), Some(executable)) = (app("bundle"), app("bin")) else {
-        return unconfirmed("the record does not name the app's bundle and executable".into());
+    let Some(executable) = app("bin") else {
+        return unconfirmed("the record does not name the app's executable".into());
     };
+    // Where devicectl installed the app (`install_url`, from the install
+    // output): the listed executable must run from there.
+    let install = app("install_url");
     // The stored command is the one for this device and pid: a record that
     // says otherwise would end a process the check below did not look at.
     let expected = terminate_argv(&device.id, pid);
@@ -975,7 +982,7 @@ pub fn app_process(ctx: &Ctx, session: &Session) -> AppProcess {
         Err(error) => return unconfirmed(error.detail),
     };
     match devicectl::running_processes(&text) {
-        Ok(listing) => judge_app_process(&listing, bundle, executable, pid),
+        Ok(listing) => judge_app_process(&listing, install, executable, pid),
         Err(why) => unconfirmed(why),
     }
 }
@@ -1120,6 +1127,12 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
             &outcome,
         ));
     }
+    // Where devicectl installed the app: the directory its executable runs
+    // from, which `stop` compares a listed executable with. Without it, `stop`
+    // cannot tell the app's process from another's, so it terminates nothing.
+    let install_url = std::fs::read_to_string(run_dir.join("install.json"))
+        .ok()
+        .and_then(|text| devicectl::installation_url(&text, &config.app.id));
 
     // Launch with the console attached, detached from icm.
     let sessions_dir = project.sessions_dir();
@@ -1256,7 +1269,12 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
         started: Some(crate::time::Utc::now().rfc3339()),
         pid: Some(console_pid),
         identity: console_identity,
-        app: Some(json!({"id": config.app.id, "bin": built.bin, "bundle": app_name})),
+        app: Some(json!({
+            "id": config.app.id,
+            "bin": built.bin,
+            "bundle": app_name,
+            "install_url": install_url,
+        })),
         device: Some(SessionDevice {
             kind: "device".into(),
             id: device.udid.clone(),
@@ -1488,8 +1506,9 @@ mod tests {
     #[test]
     fn the_recorded_pid_is_the_app_only_while_it_runs_the_apps_executable() {
         let app = "file:///private/var/containers/Bundle/Application/X/Fixture.app/fixture-app";
+        let install = Some("file:///private/var/containers/Bundle/Application/X/Fixture.app/");
         let judge = |listing: &[devicectl::Listed]| {
-            judge_app_process(listing, "Fixture.app", "fixture-app", 4242)
+            judge_app_process(listing, install, "fixture-app", 4242)
         };
         assert_eq!(
             judge(&[
@@ -1514,10 +1533,31 @@ mod tests {
         assert!(
             matches!(judge(&[]), AppProcess::NotRunning(why) if why.contains("no process has pid 4242"))
         );
-        // Another app's executable of the same name is not this app's.
+        // A copy of the app with the same name, installed in another
+        // container, is another process: its path ends the same way.
+        let copy = "file:///private/var/containers/Bundle/Application/Y/Fixture.app/fixture-app";
+        let AppProcess::NotRunning(why) = judge(&[listed(4242, Some(copy))]) else {
+            panic!("a copy of the app in another container was taken for the app");
+        };
+        assert!(
+            why.contains("pid 4242 is /private/var/containers/Bundle/Application/Y/Fixture.app/fixture-app on the device now"),
+            "{why}"
+        );
+        // Nor is the app's executable the executable of another app's install.
+        let other = Some("file:///private/var/containers/Bundle/Application/X/Other.app/");
         assert!(matches!(
-            judge_app_process(&[listed(4242, Some(app))], "Other.app", "fixture-app", 4242),
+            judge_app_process(&[listed(4242, Some(app))], other, "fixture-app", 4242),
             AppProcess::NotRunning(_)
+        ));
+        // Without the install's directory, nothing listed under the pid can be
+        // the app, but a pid nothing lists is still not running.
+        assert!(matches!(
+            judge_app_process(&[listed(4242, Some(app))], None, "fixture-app", 4242),
+            AppProcess::Unconfirmed(why) if why.contains("does not say where the app is installed")
+        ));
+        assert!(matches!(
+            judge_app_process(&[listed(50, Some(app))], None, "fixture-app", 4242),
+            AppProcess::NotRunning(why) if why.contains("no process has pid 4242")
         ));
     }
 
@@ -1531,7 +1571,7 @@ mod tests {
             "file:///private/var/containers/Bundle/Application/X/Fixture%G1.app/fixture-app";
         let AppProcess::Unconfirmed(why) = judge_app_process(
             &[listed(4242, Some(malformed))],
-            "Fixture%G1.app",
+            Some("file:///private/var/containers/Bundle/Application/X/Fixture%G1.app/"),
             "fixture-app",
             4242,
         ) else {
@@ -1542,7 +1582,12 @@ mod tests {
         assert!(why.contains("pid 4242"), "{why}");
         assert!(why.contains("cannot tell"), "{why}");
         assert!(matches!(
-            judge_app_process(&[listed(5000, Some(malformed))], "Fixture.app", "fixture-app", 4242),
+            judge_app_process(
+                &[listed(5000, Some(malformed))],
+                Some("file:///private/var/containers/Bundle/Application/X/Fixture.app/"),
+                "fixture-app",
+                4242
+            ),
             AppProcess::NotRunning(why) if why.contains("no process has pid 4242")
         ));
     }
@@ -1553,8 +1598,9 @@ mod tests {
     /// executables all count.
     #[test]
     fn a_listed_pid_without_a_usable_executable_is_unconfirmed() {
+        let install = Some("file:///private/var/containers/Bundle/Application/X/Fixture.app/");
         let judge = |listing: &[devicectl::Listed]| {
-            judge_app_process(listing, "Fixture.app", "fixture-app", 4242)
+            judge_app_process(listing, install, "fixture-app", 4242)
         };
         // Missing: the entry names no executable at all.
         let AppProcess::Unconfirmed(why) = judge(&[listed(4242, None)]) else {
@@ -1592,8 +1638,9 @@ mod tests {
     /// reason.
     #[test]
     fn a_readable_other_executable_or_an_unlisted_pid_is_not_running() {
+        let install = Some("file:///private/var/containers/Bundle/Application/X/Fixture.app/");
         let judge = |listing: &[devicectl::Listed]| {
-            judge_app_process(listing, "Fixture.app", "fixture-app", 4242)
+            judge_app_process(listing, install, "fixture-app", 4242)
         };
         let backboardd = "file:///usr/libexec/backboardd";
         let AppProcess::NotRunning(why) = judge(&[listed(4242, Some(backboardd))]) else {
@@ -1620,24 +1667,26 @@ mod tests {
         ] {
             let app =
                 format!("file:///private/var/containers/Bundle/Application/X/{listed}/my-app");
-            let judge = |listing: &[devicectl::Listed], bundle: &str| {
-                judge_app_process(listing, bundle, "my-app", 4242)
+            // The app is installed in the directory its name is listed as.
+            let install = format!("file:///private/var/containers/Bundle/Application/X/{listed}/");
+            let judge = |listing: &[devicectl::Listed], dir: &str| {
+                judge_app_process(listing, Some(dir), "my-app", 4242)
             };
             assert_eq!(
-                judge(&[listed_process(4242, &app)], bundle),
+                judge(&[listed_process(4242, &app)], &install),
                 AppProcess::Running,
                 "{bundle} listed as {listed}"
             );
             // Not for another app, whatever it is called.
-            let AppProcess::NotRunning(why) = judge(&[listed_process(4242, &app)], "Other.app")
-            else {
+            let other = "file:///private/var/containers/Bundle/Application/X/Other.app/";
+            let AppProcess::NotRunning(why) = judge(&[listed_process(4242, &app)], other) else {
                 panic!("{listed} was taken for Other.app");
             };
             // The reason names the path as it is, not as it is escaped.
             assert!(why.contains(&format!("/{bundle}/my-app")), "{why}");
             // The app under another pid: not the one icm launched, and
             // found all the same.
-            let AppProcess::NotRunning(why) = judge(&[listed_process(5000, &app)], bundle) else {
+            let AppProcess::NotRunning(why) = judge(&[listed_process(5000, &app)], &install) else {
                 panic!("{bundle}: the app under another pid was taken for the recorded one");
             };
             assert!(why.contains("the app runs as pid 5000"), "{why}");
