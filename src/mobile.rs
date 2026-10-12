@@ -411,7 +411,9 @@
 //!   (`text_input::focus`, `focus_next`, `unfocus`, `move_cursor_to`,
 //!   `select_all`) while the keyboard types ends what it typed there: a
 //!   focus moved away drops the word being composed, and a caret moved in
-//!   the field commits it first.
+//!   the field commits it where it was typed first, then moves (so a
+//!   position counts the word, and `select_all` selects it too). What the
+//!   keyboard typed before the operation reaches the field before it runs.
 //! - If the user hides the keyboard while a field keeps the focus, a tap on
 //!   the field brings it back.
 //!

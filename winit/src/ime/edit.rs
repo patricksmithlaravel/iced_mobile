@@ -160,9 +160,11 @@ pub(crate) enum Edit {
 /// the edits to the window that has the input method, and does what `apply`
 /// [requests](Request) before it applies another message. It calls
 /// [`Engine::reset`] (then hands the new generation to the Java side) when
-/// the user moves the caret some other way too: a tap, or a hardware key,
-/// unless the engine [is idle](Engine::is_idle). Messages queued before such
-/// an event belong before it, so the caller applies them first.
+/// the caret moves some other way too: a tap, a hardware key, or the
+/// application moving it from code, unless the engine [is
+/// idle](Engine::is_idle). Messages queued before such an event belong
+/// before it, so the caller applies them first, and a composition is
+/// committed before the caret moves.
 #[derive(Debug, Default)]
 pub(crate) struct Engine {
     /// The generation of the last reset; messages of any other are stale.
@@ -276,6 +278,11 @@ impl Engine {
         }
 
         Some(self.reset(&mut Vec::new()))
+    }
+
+    /// Whether a preedit is shown: the keyboard composes.
+    pub(crate) fn is_composing(&self) -> bool {
+        self.preedit.is_some()
     }
 
     /// Nothing to reset: no text typed since the last reset and no preedit.

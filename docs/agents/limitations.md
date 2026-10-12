@@ -47,7 +47,10 @@ this file in the commit that fixes or finds a limitation.
     composes a word, the word is dropped, and so is a word the keyboard had
     taken back from the field after a Backspace into it.
     Moving the caret from code (`move_cursor_to`, `select_all`) commits the
-    word first. Let the user's tap or Enter move the focus where it can.
+    word where it was typed first, then moves the caret, so a position
+    counts the word. What the keyboard typed before such an operation
+    reaches the field before it runs. Let the user's tap or Enter move the
+    focus where it can.
   - `text_input` deletes by character cluster, as on the desktop: a
     combining mark or vowel sign typed right after the place the user
     tapped joins the character before it, and Backspace then deletes both

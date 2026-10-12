@@ -34,12 +34,20 @@
 //!   `text_editor` take it whatever their focus).
 //! - A widget operation (`text_input::focus`, `focus_next`, `unfocus`,
 //!   `move_cursor_to`, `select_all`, ...) can move the focus or the caret
-//!   while the keyboard has typed into the field. The event loop runs it
-//!   through a [`Watch`](super::Watch), which records that, and [`operated`]
-//!   then ends the session:
-//!   a focus moved to another widget is handled as [`disable`] handles it,
-//!   and a caret moved in the field as a tap is, so the composition is
-//!   committed where the caret now is.
+//!   while the keyboard has typed into the field. What the keyboard sent
+//!   before it belongs before it, so [`operate`] applies the queue first;
+//!   when that gives the field edits, the operation waits: the event loop
+//!   replays an `AboutToWait`, which hands the field the edits and builds
+//!   the views again, then runs it, and the operations made meanwhile after
+//!   it ([`schedule`], [`deferred`]). The operation then runs through a
+//!   [`Watch`](super::Watch), which records what it moves, and [`operated`]
+//!   ends the session: a focus moved to another widget is handled as
+//!   [`disable`] handles it, and a caret moved in the field as a tap is.
+//!   While the keyboard composes, the watch holds the caret moves back, so
+//!   that the composition is committed where it was typed, and they are
+//!   made once the field has it, deferred the same way; a `select_all`
+//!   then selects the word too, instead of the word replacing the
+//!   selection.
 //! - From the first `show` to the next `hide`, the queue holds the window, so
 //!   that a native call can wake the event loop: it pushes its message and
 //!   requests a redraw (winit's Android loop ignores a bare wake). Native
@@ -77,6 +85,7 @@
 use super::dex::{self, Method};
 use super::edit::{Edit, Engine, Message, Request};
 use crate::conversion;
+use crate::core::widget::Operation;
 use crate::core::{self, input_method, theme, window};
 use crate::graphics::Compositor;
 use crate::program::Program;
@@ -144,22 +153,77 @@ pub(crate) fn disable(window: winit::window::WindowId) -> bool {
     SESSION.with_borrow_mut(|session| session.disable(window))
 }
 
-/// Whether a widget operation is to be [watched](super::Watch): the keyboard
-/// is shown for a field and has typed or composes something there.
-pub(crate) fn is_typing() -> bool {
-    let typing = SESSION.with_borrow(|session| {
-        session.is_installed()
-            && session.shown.is_some()
-            && !session.engine.is_idle()
-    });
-
-    typing || !queue().messages.is_empty()
+/// How a widget operation runs on the window whose field has the keyboard,
+/// as [`operate`] decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Typing {
+    /// The window: the operation runs on its interface through a
+    /// [`Watch`](super::Watch).
+    pub(crate) window: window::Id,
+    /// Whether the watch holds caret moves back: the keyboard composes.
+    pub(crate) hold: bool,
 }
 
-/// A watched widget operation ran on `window`: ends the keyboard's session
-/// if it moved the focus or the caret (see the module's documentation).
+/// Before a widget operation runs (see the module's documentation): what
+/// the keyboard sent before it is applied first. Returns the operation, and
+/// how to run it when the keyboard has typed or composes in a field; none
+/// when it waits for the field to take edits first, until the event loop
+/// takes it from [`deferred`].
+pub(crate) fn operate<P, C>(
+    operation: Box<dyn Operation>,
+    windows: &mut WindowManager<P, C>,
+    events: &mut Vec<(window::Id, core::Event)>,
+) -> Option<(Box<dyn Operation>, Option<Typing>)>
+where
+    P: Program,
+    C: Compositor<Renderer = P::Renderer>,
+    P::Theme: theme::Base,
+{
+    // Operations run in the order the application made them.
+    if SESSION.with_borrow(|session| !session.deferred.is_empty()) {
+        defer(operation);
+        return None;
+    }
+
+    let Some(window) = windows
+        .iter_mut()
+        .find(|(_id, window)| window.ime_requested())
+        .map(|(id, _window)| id)
+    else {
+        return Some((operation, None));
+    };
+
+    let edits = SESSION.with_borrow_mut(|session| {
+        let mut edits = Vec::new();
+
+        if session.is_shown() {
+            session.apply_queue(&mut edits);
+        }
+
+        edits
+    });
+
+    if deliver(edits, windows, events) {
+        defer(operation);
+        return None;
+    }
+
+    let typing = SESSION.with_borrow(|session| {
+        (session.is_shown() && !session.engine.is_idle()).then(|| Typing {
+            window,
+            hold: session.engine.is_composing(),
+        })
+    });
+
+    Some((operation, typing))
+}
+
+/// A widget operation ran on the window `typing` names, watched: ends the
+/// keyboard's session if it moved the focus or the caret, and defers the
+/// caret moves it held back until the field has the composition (see the
+/// module's documentation).
 pub(crate) fn operated<P, C>(
-    window: window::Id,
+    typing: Typing,
     moved: super::Moved,
     windows: &mut WindowManager<P, C>,
     events: &mut Vec<(window::Id, core::Event)>,
@@ -172,14 +236,44 @@ pub(crate) fn operated<P, C>(
         SESSION.with_borrow_mut(Session::abandon);
 
         events.push((
-            window,
+            typing.window,
             core::Event::InputMethod(input_method::Event::Closed),
         ));
-    } else if moved.caret {
+    } else if moved.caret || !moved.held.is_empty() {
         let edits = SESSION.with_borrow_mut(Session::finish);
 
         let _ = deliver(edits, windows, events);
     }
+
+    if !moved.held.is_empty() {
+        defer(Box::new(super::Replay::new(moved.held)));
+    }
+}
+
+/// Whether the event loop is to run the deferred operations: true once
+/// for them, then the event loop replays an `AboutToWait`, which hands the
+/// field the edits they wait for, and takes them from [`deferred`].
+pub(crate) fn schedule() -> bool {
+    SESSION.with_borrow_mut(|session| {
+        let due = !session.deferred.is_empty() && !session.scheduled;
+
+        session.scheduled |= due;
+        due
+    })
+}
+
+/// The deferred operations, in order, for the event loop to run now, each
+/// through [`operate`] again.
+pub(crate) fn deferred() -> Vec<Box<dyn Operation>> {
+    SESSION.with_borrow_mut(|session| {
+        session.scheduled = false;
+        session.deferred.drain(..).collect()
+    })
+}
+
+/// Puts `operation` behind the deferred ones.
+fn defer(operation: Box<dyn Operation>) {
+    SESSION.with_borrow_mut(|session| session.deferred.push_back(operation));
 }
 
 /// The shell's side of the run's session: what the event loop calls, and
@@ -315,6 +409,11 @@ struct Session {
     /// The window whose field lost the keyboard, which gets
     /// `input_method::Event::Closed`.
     closed: Option<winit::window::WindowId>,
+    /// The widget operations that wait for the field to take the keyboard's
+    /// edits, in order.
+    deferred: VecDeque<Box<dyn Operation>>,
+    /// The event loop is to run them after its next `AboutToWait`.
+    scheduled: bool,
 }
 
 /// The Java side for the run's Activity.
@@ -408,10 +507,10 @@ impl Session {
         }
     }
 
-    /// The user or the application moved the caret: applies what the
+    /// The user or the application moves the caret: applies what the
     /// keyboard sent, then, unless the engine is idle, resets it, which
-    /// commits a composition where it is, and has the Java side forget its
-    /// text. Returns the edits for the field.
+    /// commits a composition at the field's caret, and has the Java side
+    /// forget its text. Returns the edits for the field.
     fn finish(&mut self) -> Vec<Edit> {
         let mut edits = Vec::new();
 
@@ -431,6 +530,11 @@ impl Session {
 
     fn is_installed(&self) -> bool {
         matches!(self.keyboard, Keyboard::Installed(_))
+    }
+
+    /// Whether the installed Java side is shown for a field.
+    fn is_shown(&self) -> bool {
+        self.is_installed() && self.shown.is_some()
     }
 
     /// Installs the Java side the first time; whether it is installed.
@@ -538,6 +642,8 @@ impl Session {
         self.shown = None;
         self.touch = Touch::None;
         self.closed = None;
+        self.deferred.clear();
+        self.scheduled = false;
         self.app = None;
     }
 }

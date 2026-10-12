@@ -873,6 +873,11 @@ enum Event<Message: 'static> {
     /// Not a user event, so it takes no slot of the proxy.
     #[cfg(any(target_os = "android", target_os = "ios"))]
     SystemTheme(theme::Mode),
+    /// Android (NativeActivity): run the widget operations that waited for
+    /// the field to take the keyboard's edits (see `ime::operate`). Never
+    /// sent: the event loop replays it. Takes no slot of the proxy.
+    #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+    Deferred,
 }
 
 #[derive(Debug)]
@@ -966,6 +971,17 @@ async fn run_instance<P>(
     log::info!("System theme: {system_theme:?}");
 
     'next_event: loop {
+        // Android (NativeActivity): widget operations that wait for the
+        // keyboard's edits run after an `AboutToWait` that hands them to the
+        // field, ahead of anything else to replay (see `ime::operate`).
+        #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+        if ime::schedule() {
+            replay.push_front(Event::Deferred);
+            replay.push_front(Event::EventLoopAwakened(
+                event::Event::AboutToWait,
+            ));
+        }
+
         #[cfg(all(target_os = "android", feature = "android-native-activity"))]
         let replayed = replay.pop_front();
         #[cfg(not(all(
@@ -1884,6 +1900,33 @@ async fn run_instance<P>(
                 }
             }
             Event::Exit => break,
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            Event::Deferred => {
+                for operation in ime::deferred() {
+                    run_action(
+                        Action::Widget(operation),
+                        &program,
+                        &mut runtime,
+                        &mut compositor,
+                        &mut events,
+                        &mut messages,
+                        &mut clipboard,
+                        &mut control_sender,
+                        &mut user_interfaces,
+                        &mut window_manager,
+                        &mut ui_caches,
+                        &mut is_window_opening,
+                        &mut system_theme,
+                    );
+                }
+
+                for (_id, window) in window_manager.iter_mut() {
+                    window.raw.request_redraw();
+                }
+            }
             #[cfg(any(target_os = "android", target_os = "ios"))]
             Event::SystemTheme(mode) => {
                 log::info!("System theme: {mode:?}");
@@ -2418,22 +2461,20 @@ fn run_action<'a, P, C>(
             }
         },
         Action::Widget(operation) => {
-            // Android (NativeActivity): an operation that moves the focus or
-            // the caret while the keyboard types ends what it typed (see
-            // `ime`), so the one on the window that has the keyboard is
-            // watched.
+            // Android (NativeActivity): what the keyboard sent before the
+            // operation comes first, and the operation waits when that gives
+            // the field edits. One that moves the focus or the caret while
+            // the keyboard types ends what it typed (see `ime`), so the one
+            // on the window that has the keyboard is watched.
             #[cfg(all(
                 target_os = "android",
                 feature = "android-native-activity"
             ))]
-            let typing = ime::is_typing()
-                .then(|| {
-                    window_manager
-                        .iter_mut()
-                        .find(|(_id, window)| window.ime_requested())
-                        .map(|(id, _window)| id)
-                })
-                .flatten();
+            let Some((operation, typing)) =
+                ime::operate(operation, window_manager, events)
+            else {
+                return;
+            };
             #[cfg(all(
                 target_os = "android",
                 feature = "android-native-activity"
@@ -2449,12 +2490,15 @@ fn run_action<'a, P, C>(
                             target_os = "android",
                             feature = "android-native-activity"
                         ))]
-                        if typing == Some(*id) {
+                        if let Some(typing) = typing
+                            && typing.window == *id
+                        {
                             ui.operate(
                                 &window.renderer,
                                 &mut ime::Watch::new(
                                     operation.as_mut(),
                                     &mut moved,
+                                    typing.hold,
                                 ),
                             );
 
@@ -2478,8 +2522,8 @@ fn run_action<'a, P, C>(
                 target_os = "android",
                 feature = "android-native-activity"
             ))]
-            if let Some(id) = typing {
-                ime::operated(id, moved, window_manager, events);
+            if let Some(typing) = typing {
+                ime::operated(typing, moved, window_manager, events);
             }
         }
         Action::Image(action) => match action {
