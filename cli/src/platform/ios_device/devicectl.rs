@@ -7,6 +7,7 @@
 //! `connectionProperties` that older devicectl versions write.
 
 use serde_json::Value;
+use unicode_normalization::UnicodeNormalization;
 
 /// One physical device.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,19 +197,25 @@ pub enum Match {
 /// The path of a file URL is decoded once, and only the decoded path is
 /// compared: `100%25.app` is listed as `100%2525.app`, and the listed text
 /// `100%25.app` denotes the app `100%.app`, not `100%25.app`. A plain path,
-/// with no scheme, is compared as it stands. Anything else is
+/// with no scheme, is not decoded. Anything else is
 /// [`Match::Unknown`]: a URL with another scheme, a file URL with another
 /// host or no path, a raw `?` or `#` (Foundation escapes both in a path, so
 /// a URL that has one does not say where its path ends), or an escape that
 /// is not two hex digits, or bytes that are not UTF-8 once decoded.
+///
+/// Both are compared in Unicode NFC (see [`executable_path`]): the file system
+/// finds one directory under the NFC and the NFD spelling of a name, so the
+/// listing `Cafe%CC%81.app` is the app `Café.app` whichever spelling the
+/// recorded name has.
 ///
 /// Only the last two components are compared, so a copy of the app in another
 /// container matches as well. That is good enough to find the app's processes
 /// for the readiness probe, which ends nothing. What `stop` ends is decided by
 /// [`match_installed_executable`], which compares the whole path.
 pub fn match_app_executable(executable: &str, bundle: &str, binary: &str) -> Match {
+    let suffix = format!("/{bundle}/{binary}").nfc().collect::<String>();
     match executable_path(executable) {
-        Some(path) if path.ends_with(&format!("/{bundle}/{binary}")) => Match::Same,
+        Some(path) if path.ends_with(&suffix) => Match::Same,
         Some(_) => Match::Different,
         None => Match::Unknown,
     }
@@ -220,9 +227,10 @@ pub fn match_app_executable(executable: &str, bundle: &str, binary: &str) -> Mat
 /// without). Both are read as [`match_app_executable`] reads a listed
 /// executable, and the whole path is compared, container directory included:
 /// a copy of the same app installed in another container is
-/// [`Match::Different`], however its path ends. Anything that does not read
-/// as a path, and an install that names no absolute directory, is
-/// [`Match::Unknown`].
+/// [`Match::Different`], however its path ends. Both are compared in NFC
+/// (see [`executable_path`]), so the same name in another Unicode
+/// normalisation form is the same app. Anything that does not read as a path,
+/// and an install that names no absolute directory, is [`Match::Unknown`].
 pub fn match_installed_executable(executable: &str, install: &str, binary: &str) -> Match {
     let (Some(path), Some(dir)) = (executable_path(executable), executable_path(install)) else {
         return Match::Unknown;
@@ -231,6 +239,7 @@ pub fn match_installed_executable(executable: &str, install: &str, binary: &str)
     if !dir.starts_with('/') {
         return Match::Unknown;
     }
+    let binary: String = binary.nfc().collect();
     if path == format!("{dir}/{binary}") {
         Match::Same
     } else {
@@ -253,16 +262,20 @@ pub fn installation_url(text: &str, bundle_id: &str) -> Option<String> {
 }
 
 /// The path a listed executable or an install's URL names: a `file://` URL's
-/// decoded path, or a plain path as it stands. `None` for another scheme, or
-/// a file URL [`file_url_path`] cannot read.
+/// decoded path, or a plain path as it stands, in Unicode NFC. The file system
+/// finds a name under its NFC and its NFD spelling alike, and devicectl may
+/// list an app's directory in the other form than the install recorded, so
+/// the two are compared as one. `None` for another scheme, or a file URL
+/// [`file_url_path`] cannot read.
 fn executable_path(text: &str) -> Option<String> {
-    if text.starts_with("file://") {
-        file_url_path(text)
+    let path = if text.starts_with("file://") {
+        file_url_path(text)?
     } else if has_scheme(text) {
-        None
+        return None;
     } else {
-        Some(text.to_string())
-    }
+        text.to_string()
+    };
+    Some(path.nfc().collect())
 }
 
 /// The decoded path of a `file://` URL whose host is empty or `localhost`,
@@ -698,6 +711,55 @@ mod tests {
         );
         assert_eq!(
             match_app_executable(&listed, "Cafe.app", "my-app"),
+            Match::Different
+        );
+    }
+
+    /// The same name in another Unicode normalisation form is the same file:
+    /// `Café` is `Cafe` and U+0301 in NFD, and the file system finds one
+    /// directory under either spelling. A listing in NFD therefore runs the
+    /// app recorded in NFC, and the reverse, both for the readiness probe and
+    /// for `stop`'s whole-path comparison. A different letter stays different.
+    #[test]
+    fn a_name_in_another_normalisation_form_is_the_same_app() {
+        let install_nfc = "file:///private/var/containers/Bundle/Application/X/Caf%C3%A9.app/";
+        let install_nfd = "file:///private/var/containers/Bundle/Application/X/Cafe%CC%81.app/";
+        assert_eq!(
+            match_app_executable(&at("Cafe%CC%81.app", "my-app"), "Caf\u{e9}.app", "my-app"),
+            Match::Same
+        );
+        assert_eq!(
+            match_app_executable(&at("Caf%C3%A9.app", "my-app"), "Cafe\u{301}.app", "my-app"),
+            Match::Same
+        );
+        assert_eq!(
+            match_installed_executable(&at("Cafe%CC%81.app", "my-app"), install_nfc, "my-app"),
+            Match::Same
+        );
+        assert_eq!(
+            match_installed_executable(&at("Caf%C3%A9.app", "my-app"), install_nfd, "my-app"),
+            Match::Same
+        );
+        let text = json!({"result": {"runningProcesses": [
+            {"executable": at("Cafe%CC%81.app", "my-app"), "processIdentifier": 814}
+        ]}})
+        .to_string();
+        assert_eq!(app_pids(&text, "Caf\u{e9}.app", "my-app"), [814]);
+        // Not the same letters: an unaccented e, or a grave accent.
+        assert_eq!(
+            match_app_executable(&at("Cafe%CC%81.app", "my-app"), "Cafe.app", "my-app"),
+            Match::Different
+        );
+        assert_eq!(
+            match_app_executable(&at("Cafe%CC%81.app", "my-app"), "Caf\u{e8}.app", "my-app"),
+            Match::Different
+        );
+        assert_eq!(
+            match_installed_executable(
+                &at("Cafe%CC%81.app", "my-app"),
+                "/private/var/containers/Bundle/Application/X/Cafe.app/",
+                "my-app"
+            ),
             Match::Different
         );
     }

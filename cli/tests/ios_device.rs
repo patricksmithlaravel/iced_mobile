@@ -763,6 +763,33 @@ fn a_listed_executable_is_the_app_once_decoded_and_no_other() {
     assert!(!device.session_path().exists());
 }
 
+/// devicectl may list an app's executable in another Unicode normalisation
+/// form than the install recorded: `Café` is `Cafe` and U+0301 in NFD, and the
+/// file system finds one directory under either. The recorded app is `Café`
+/// (NFC), the listed pid runs `Cafe` + U+0301 in its bundle, so it is the app:
+/// stop ends it and keeps no record of it. Read as another process, it would
+/// report the app not running and drop the record while the app runs. Only
+/// fake devicectl output is used; no device is involved.
+#[test]
+fn a_listed_executable_in_another_normalisation_form_is_the_app() {
+    let device = Device::new();
+    device.rename_app("Caf\u{e9}");
+    let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_eq!(device.session()["app"]["bundle"], "Caf\u{e9}.app", "{run}");
+    device.list_processes(&[process(
+        4242,
+        "file:///private/var/containers/Bundle/Application/X/Cafe%CC%81.app/release-app",
+    )]);
+    let stop = device.json(&["stop", "ios-device"]);
+    assert_eq!(stop["exit"], 0, "{stop}");
+    assert!(device.terminated(), "{}", device.log("xcrun.log"));
+    assert_eq!(stop["stopped"][0]["app"], "terminated", "{stop}");
+    assert_eq!(stop["unverified"], json!([]), "{stop}");
+    assert_eq!(stop["warnings"], json!([]), "{stop}");
+    assert!(!device.session_path().exists());
+}
+
 /// When the device cannot be asked (not connected, locked, devicectl
 /// failing), whose process the recorded pid is cannot be told either, so
 /// nothing is terminated: a WARN says so, the result lists the device as

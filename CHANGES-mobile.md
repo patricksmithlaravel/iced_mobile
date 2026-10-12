@@ -161,6 +161,12 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
 - **iOS:** `icm stop ios-device` compares a listed executable with the app's bundle only after
   decoding its file URL once, never as raw text. So a bundle named `100%25.app` is not taken for
   the app `100%.app`, which the device lists as `100%25.app/…`.
+- **iOS:** `icm stop ios-device` compares the listed executable and the app's install in Unicode
+  NFC, as the file system does, since it finds one name under its NFC and its NFD spelling alike.
+  A listing in the other form (`Cafe` and U+0301 for `Café`) is the app, not another process.
+  Before, the byte comparison took it for another process, so `stop` said the app was not running
+  and removed the record while it ran. icm now depends on the `unicode-normalization` crate for
+  this. (Fake tools only; not seen on a phone.)
 - **iOS:** `icm stop ios-device` ends the recorded app pid only while the device lists it running
   the app's executable in the directory devicectl installed the app in (`app.install_url` in the
   record, from the install output's `installationURL`). Before, only the last two path components
