@@ -31,13 +31,34 @@ fn encoded(text: &str, keep: &str, space: &str, lower: bool) -> String {
     out
 }
 
+/// `bytes` in standard base64, padded, as a `Basic` header or an encoded
+/// field carries them.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for group in bytes.chunks(3) {
+        let word = group.iter().enumerate().fold(0u32, |word, (i, &byte)| {
+            word | u32::from(byte) << (16 - 8 * i)
+        });
+        for i in 0..4 {
+            if i <= group.len() {
+                out.push(char::from(ALPHABET[(word >> (18 - 6 * i)) as usize & 63]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// Logs the secret it was given (`ICM_TEST_API_TOKEN`) as apps do: plain,
 /// in a JSON line, in an `ICM_EVENT` warning, in URLs (form-urlencoded as
-/// the `form_urlencoded` crate writes it, and with lowercase hex) and as
-/// JSON with `\u` escapes after a log prefix.
+/// the `form_urlencoded` crate writes it, and with lowercase hex), as JSON
+/// with `\u` escapes after a log prefix and in base64.
 fn log_token() -> Option<String> {
     let token = std::env::var("ICM_TEST_API_TOKEN").ok()?;
     println!("signed in with {token}");
+    println!("basic {}", base64(token.as_bytes()));
     eprintln!("{{\"token\":\"{}\"}}", escaped(&token));
     eprintln!(
         "GET https://api.example.com/v1?token={}&lower={}",

@@ -47,7 +47,9 @@ fn escaped(text: &str) -> String {
 
 /// The forms a file could hold the secret in: raw, JSON-escaped (with `/`
 /// as `\/` too), escaped twice (a JSON line in a JSON record),
-/// percent-encoded (a URL's query), and any other that keeps [`TAIL`].
+/// percent-encoded (a URL's query), base64 (of the raw and the JSON-escaped
+/// text, in either alphabet, padded or not), and any other that keeps
+/// [`TAIL`].
 pub fn forms() -> Vec<String> {
     forms_of(TOKEN, TAIL)
 }
@@ -70,14 +72,47 @@ fn forms_of(value: &str, tail: &str) -> Vec<String> {
             }
         })
         .collect();
-    vec![
+    // The base64 of the raw and the JSON-escaped text: an app that encodes
+    // a secret for a header or a field writes one of these.
+    let mut encoded = Vec::new();
+    for bytes in [value.as_bytes(), once.as_bytes()] {
+        for (url, pad) in [(false, true), (false, false), (true, true), (true, false)] {
+            encoded.push(base64(bytes, url, pad));
+        }
+    }
+    let mut forms = vec![
         value.to_string(),
         once.replace('/', "\\/"),
         escaped(&once),
         once,
         percent,
         tail.to_string(),
-    ]
+    ];
+    forms.extend(encoded);
+    forms
+}
+
+/// `bytes` in base64, in the standard alphabet or the URL-safe one (`url`),
+/// padded with `=` or not (`pad`). The same encoding as the library's test
+/// encoder, which integration tests cannot reach.
+fn base64(bytes: &[u8], url: bool, pad: bool) -> String {
+    const STANDARD: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let alphabet = if url { URL } else { STANDARD };
+    let mut out = String::new();
+    for group in bytes.chunks(3) {
+        let word = group.iter().enumerate().fold(0u32, |word, (i, &byte)| {
+            word | u32::from(byte) << (16 - 8 * i)
+        });
+        for i in 0..4 {
+            if i <= group.len() {
+                out.push(char::from(alphabet[(word >> (18 - 6 * i)) as usize & 63]));
+            } else if pad {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// The files under `dir` (recursively) that hold the secret, with the form
