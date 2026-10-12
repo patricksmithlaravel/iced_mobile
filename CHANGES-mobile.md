@@ -241,6 +241,14 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   ios-sim` does, where it still listed a pid another process had taken as the running app when the
   session file had been rewritten since (`shot`, `run --attach`).
 - `icm stop android --dry-run` states the rules the stop follows for the app and the emulator.
+- `icm doctor --fix --yes` in a new app on a machine without the toolchain the app's
+  `rust-toolchain.toml` pins now finishes the job in one run. It installs the toolchain, then
+  resolves the app again and checks what needs it: the app's `Cargo.lock` and the wasm-bindgen CLI
+  it names, `deps.skew` and the AVD's API level. Before, the app's first failure (`cargo metadata`
+  could not run without the toolchain) stayed the result after the fix: exit 4
+  (`env.rust_toolchain_missing`) under the summary `ready`, with no lock and no wasm-bindgen CLI, so
+  `icm release web` could not run until a second `doctor`. Seen on the first run of the web
+  workflow on GitHub's Linux runner.
 
 ## Changes in v0.14.1-mobile.2
 

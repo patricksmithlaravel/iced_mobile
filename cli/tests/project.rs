@@ -907,6 +907,132 @@ fn doctor_web_installs_the_wasm_bindgen_of_the_apps_lock() {
     );
 }
 
+/// A new app on a machine without the toolchain its rust-toolchain.toml
+/// pins: `cargo metadata` fails, so the project does not resolve until
+/// `--fix --yes` installs the toolchain. The project is then resolved again
+/// and checked. Before, its failure stayed the result (exit 4 with the
+/// summary "ready") and the wasm-bindgen CLI of its lock was never
+/// installed, as on GitHub's Linux runner.
+#[test]
+fn doctor_installs_the_projects_toolchain_then_checks_the_project() {
+    let mut sandbox = Sandbox::with_fixture("checkapp");
+    let sysroot = sandbox.path("sysroot");
+    std::fs::create_dir_all(sysroot.join("lib/rustlib/wasm32-unknown-unknown/lib")).unwrap();
+    let installed = sandbox.path("toolchain-installed");
+    let missing = "error: toolchain '1.98.0-fake' is not installed";
+    let log = sandbox.path("tools.log");
+    let bin = sandbox.path("fakebin");
+    // rustup's proxies fail until `rustup toolchain install` has run.
+    write_exe(
+        &bin.join("rustc"),
+        &format!(
+            "#!/bin/sh\n[ -f '{installed}' ] || {{ echo \"{missing}\" >&2; exit 1; }}\ncase \"$*\" in\n  *sysroot*) echo '{sysroot}' ;;\n  *--version*) echo 'rustc 1.98.0 (fake 2026-08-18)' ;;\n  *) exit 1 ;;\nesac\n",
+            installed = installed.display(),
+            sysroot = sysroot.display()
+        ),
+    );
+    write_exe(
+        &bin.join("rustup"),
+        &format!(
+            "#!/bin/sh\necho \"rustup $*\" >> '{log}'\nif [ \"$1 $2\" = 'toolchain install' ]; then touch '{installed}'; exit 0; fi\n[ -f '{installed}' ] || {{ echo \"{missing}\" >&2; exit 1; }}\nif [ \"$1 $2\" = 'show active-toolchain' ]; then echo '1.98.0-fake (overridden by rust-toolchain.toml)'; exit 0; fi\nexit 1\n",
+            log = log.display(),
+            installed = installed.display()
+        ),
+    );
+    sandbox.set("ICM_TOOL_RUSTC", bin.join("rustc"));
+    sandbox.set("ICM_TOOL_RUSTUP", bin.join("rustup"));
+    let chrome = sandbox.path("chrome");
+    write_exe(&chrome, "#!/bin/sh\n");
+    sandbox.set("ICM_CHROME", &chrome);
+    std::fs::write(
+        sandbox.cwd.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"check-app\"\nversion = \"0.2.0\"\n\n[[package]]\nname = \"iced\"\nversion = \"0.14.1\"\n\n[[package]]\nname = \"wasm-bindgen\"\nversion = \"0.2.100\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+    )
+    .unwrap();
+    // A cargo that fails as rustup's proxy does while the toolchain is
+    // missing, whose install makes a fake wasm-bindgen, and which runs the
+    // real cargo for everything else.
+    let real_cargo = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v cargo"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let cargo = bin.join("cargo");
+    write_exe(
+        &cargo,
+        &format!(
+            "#!/bin/sh\n[ -f '{installed}' ] || {{ echo \"{missing}\" >&2; exit 1; }}\nif [ \"$1\" = install ]; then echo \"cargo $*\" >> '{log}'; root=''; while [ $# -gt 0 ]; do [ \"$1\" = --root ] && {{ shift; root=\"$1\"; }}; shift; done; mkdir -p \"$root/bin\"; printf '#!/bin/sh\\necho wasm-bindgen 0.2.100\\n' > \"$root/bin/wasm-bindgen\"; chmod +x \"$root/bin/wasm-bindgen\"; exit 0; fi\nexec '{real_cargo}' \"$@\"\n",
+            installed = installed.display(),
+            log = log.display()
+        ),
+    );
+    sandbox.set("ICM_TOOL_CARGO", &cargo);
+
+    let requirement = |result: &Value, key: &str| -> Value {
+        result["requirements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["key"] == key)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {key}: {result}"))
+    };
+
+    // Without --fix: the toolchain is missing, and with no project there is
+    // no lock to name the wasm-bindgen CLI.
+    let before = sandbox.json(&["doctor", "web"]);
+    assert_eq!(before["exit"], 4, "{before}");
+    assert!(
+        ids(&before, "errors").contains(&"env.rust_toolchain_missing".to_string()),
+        "{before}"
+    );
+    assert!(before["app"].is_null(), "{before}");
+    assert_eq!(requirement(&before, "web.wasm_bindgen")["status"], "skip");
+    assert!(!installed.exists());
+
+    // --fix --yes installs the toolchain, resolves the project again and
+    // installs the wasm-bindgen CLI of its lock in the next round.
+    let fixed = sandbox.json(&["doctor", "web", "--fix", "--yes"]);
+    assert_eq!(fixed["exit"], 0, "{fixed}");
+    assert!(fixed["errors"].as_array().unwrap().is_empty(), "{fixed}");
+    assert_eq!(fixed["checks"]["fail"], 0, "{fixed}");
+    assert_eq!(fixed["app"]["id"], "com.acme.check", "{fixed}");
+    assert_eq!(requirement(&fixed, "rust.toolchain")["status"], "pass");
+    assert_eq!(requirement(&fixed, "web.wasm_bindgen")["status"], "pass");
+    let applied: Vec<&str> = fixed["fixed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    assert!(
+        applied
+            .iter()
+            .any(|f| f.contains("toolchain install 1.98.0-fake")),
+        "{fixed}"
+    );
+    assert!(
+        applied
+            .iter()
+            .any(|f| f.contains("install wasm-bindgen-cli --version 0.2.100")),
+        "{fixed}"
+    );
+    assert!(
+        sandbox
+            .path("cache/tools/wasm-bindgen/0.2.100/bin/wasm-bindgen")
+            .is_file()
+    );
+
+    // A later doctor finds nothing to do.
+    let again = sandbox.json(&["doctor", "web"]);
+    assert_eq!(again["exit"], 0, "{again}");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn doctor_ios_sim_creates_the_managed_simulator_with_fake_xcode() {
