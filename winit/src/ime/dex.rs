@@ -83,12 +83,15 @@
 //! reported, so a key never overtakes the text typed before it:
 //!
 //! - `KEYCODE_DEL` (67) and `KEYCODE_FORWARD_DEL` (112): only when the
-//!   mirror had no selection, no composition and nothing to delete on that
-//!   side, so the mirror did not change there: for the keyboard's key event,
-//!   and for `deleteSurroundingText` (and its code point form) asking to
-//!   delete on that side, which is how AOSP's LatinIME and its forks press
-//!   Backspace even at the start of the text. Otherwise the key deletes in
-//!   the mirror (by code point) and is reported as a state.
+//!   mirror had nothing to delete on that side, so its text did not change
+//!   there. For the keyboard's key event: nothing is selected and the
+//!   cursor is at that end of the mirror, whether or not something
+//!   composes; a composition is committed and reported first, as above.
+//!   For `deleteSurroundingText` (and its code point form) asking to delete
+//!   on that side, which is how AOSP's LatinIME and its forks press
+//!   Backspace even at the start of the text: nothing is selected, nothing
+//!   composes and that side of the cursor is empty. Otherwise the key
+//!   deletes in the mirror (by code point) and is reported as a state.
 //! - `KEYCODE_ENTER` (66): the keyboard's key event, its editor action
 //!   (`performEditorAction`), or a commit of only `"\n"`, `"\r"` or
 //!   `"\r\n"`. `KEYCODE_NUMPAD_ENTER` (160) is sent as it is.

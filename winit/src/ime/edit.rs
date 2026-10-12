@@ -2491,6 +2491,45 @@ mod tests {
     }
 
     #[test]
+    fn backspace_and_delete_key_events_commit_a_composition_at_the_edge() {
+        // The keyboard's key event, unlike deleteSurroundingText, reaches
+        // the field's text past a composition at that end of the mirror:
+        // the composition is committed where it was and reported, then the
+        // key deletes there, as in an `EditText`.
+        let mut harness = Harness::new("ab", "cd");
+        let _ = harness.run(|m| m.set_composing_text("xyz", 1));
+        assert_eq!(harness.preedit(), "xyz");
+
+        assert_eq!(
+            harness.run(|m| m.send_key(KEYCODE_FORWARD_DEL)),
+            [clear(), commit("xyz"), Edit::Key(Key::Delete)]
+        );
+        assert_eq!(
+            (harness.value().as_str(), harness.preedit()),
+            ("abxyzd", "")
+        );
+
+        // With the cursor before the composition.
+        let mut harness = Harness::new("ab", "cd");
+        let _ = harness.run(|m| m.set_composing_text("xyz", 0));
+        assert_eq!(harness.mirror.selection, (0, 0));
+
+        assert_eq!(
+            harness.run(|m| m.send_key(KEYCODE_DEL)),
+            [
+                vec![clear(), commit("xyz")],
+                keys(Key::Previous, 3),
+                vec![Edit::Key(Key::Backspace)]
+            ]
+            .concat()
+        );
+        assert_eq!(
+            (harness.value().as_str(), harness.preedit()),
+            ("axyzcd", "")
+        );
+    }
+
+    #[test]
     fn a_key_that_yields_commits_the_composition_first() {
         let mut engine = Engine::new();
         let _ = edits(&mut engine, state(0, "hello", (5, 5), (0, 5)));
