@@ -17,27 +17,34 @@
 //! can come out wrong there.
 //!
 //! The app segments its whole value into clusters, so a character that joins
-//! the cluster before it (a combining mark, a vowel sign, a zero width
-//! joiner, an emoji modifier) right after the origin joins the app's text
-//! before the origin, which the engine cannot see. The engine then asks the
-//! Java side to rebase ([`Request::Forget`]): the mirror forgets its text,
-//! the origin moves to the app's caret, and the keyboard never edits across
-//! that join (it would otherwise take back, and lose, the character before
-//! the origin).
+//! the cluster before it right after the origin joins the app's text before
+//! the origin. The engine then asks the Java side to rebase
+//! ([`Request::Forget`]): the mirror forgets its text, the origin moves to
+//! the app's caret, and the keyboard never edits across that join (it would
+//! otherwise take back, and lose, the app's text it joined). The engine
+//! knows the text before the origin only where the keyboard typed it before
+//! a rebase moved the origin past it (a request to forget, a password
+//! field's, the cap's), and keeps the end of it. There, a character that
+//! joins only certain clusters is found too: a consonant after a virama,
+//! which Indic scripts join into a conjunct (Unicode's GB9c), or a regional
+//! indicator after an unpaired one. Elsewhere (the focus, a tap, the
+//! keyboard's Enter, Tab, Escape or arrows, its Backspace into the field's
+//! text) the text before the origin is taken to end in an ordinary letter,
+//! which only a character that joins any cluster joins (a combining mark, a
+//! vowel sign or virama, a zero width joiner, an emoji modifier): a field
+//! that ends in a virama there rarely gets a consonant typed after it,
+//! while forgetting every session that starts with a consonant would cost
+//! the keyboard its context in Indic scripts.
 //!
 //! The end of the session's text can join the app's text after it in the
 //! same way, and nothing handles that: in Indic scripts a consonant and
 //! virama typed right before a consonant of the field make one conjunct
-//! with it (Unicode's GB9c). The engine still counts the virama's cluster
-//! as its own, so a revision of it (the keyboard's Backspace on the virama,
-//! or another consonant after it) Backspaces the whole conjunct out of the
-//! app, the field's consonant with it, and text committed there lands
-//! after the conjunct, where `text_input` puts its caret. The engine cannot
-//! see the text after the session's, and a rebase whenever the text ends
-//! in a virama would only move the join to the start of the next session's
-//! text, which the engine cannot see either, and would break typing a
-//! conjunct at the end of the text, which works. `docs/agents/limitations.md`
-//! lists it.
+//! with it. The engine still counts the virama's cluster as its own, so a
+//! revision of it (the keyboard's Backspace on the virama, or another
+//! consonant after it) Backspaces the whole conjunct out of the app, the
+//! field's consonant with it, and text committed there lands after the
+//! conjunct, where `text_input` puts its caret. The engine cannot see the
+//! text after the session's. `docs/agents/limitations.md` lists both.
 //!
 //! Line breaks and tabs are never part of the text the engine compares or
 //! commits: Enter and Tab reach the app as keys (the Java side turns a commit
@@ -177,12 +184,11 @@ pub(crate) enum Edit {
 /// The caller applies every message in order with [`Engine::apply`], gives
 /// the edits to the window that has the input method, and does what `apply`
 /// [requests](Request) before it applies another message. It calls
-/// [`Engine::reset`] (then hands the new generation to the Java side) when
-/// the caret moves some other way too: a tap, a hardware key, or the
-/// application moving it from code, unless the engine [is
-/// idle](Engine::is_idle). Messages queued before such an event belong
-/// before it, so the caller applies them first, and a composition is
-/// committed before the caret moves.
+/// [`Engine::interrupt`] (then hands a new generation to the Java side)
+/// when the caret moves some other way too: a tap, a hardware key, or the
+/// application moving it from code ([`Engine::follows_caret`]). Messages
+/// queued before such an event belong before it, so the caller applies
+/// them first, and a composition is committed before the caret moves.
 #[derive(Debug, Default)]
 pub(crate) struct Engine {
     /// The generation of the last reset; messages of any other are stale.
@@ -196,6 +202,11 @@ pub(crate) struct Engine {
     preedit: Option<(String, usize)>,
     /// A [`Request::Forget`] was made and its rebase has not arrived.
     forgetting: bool,
+    /// The end of the app's text before the origin, as far as the engine
+    /// knows it: the last cluster of what the keyboard typed there before
+    /// a rebase moved the origin past it (see [`context`]). Empty when
+    /// unknown.
+    context: String,
 }
 
 impl Engine {
@@ -239,7 +250,7 @@ impl Engine {
 
                 self.state(&text, selection, composing, edits);
 
-                if !self.forgetting && joins(&self.base) {
+                if !self.forgetting && joins(&self.context, &self.base) {
                     self.forgetting = true;
 
                     Request::Forget
@@ -257,6 +268,12 @@ impl Engine {
             Message::Rebase { generation } => {
                 if generation == self.generation {
                     self.clear_preedit(edits);
+
+                    // The origin moves past what the app's caret follows,
+                    // which the keyboard typed.
+                    let typed = prefix(&self.base, self.caret);
+                    self.context = context(&self.context, typed);
+
                     self.base.clear();
                     self.caret = 0;
                     self.forgetting = false;
@@ -277,6 +294,7 @@ impl Engine {
         self.base.clear();
         self.caret = 0;
         self.forgetting = false;
+        self.context.clear();
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
@@ -292,11 +310,32 @@ impl Engine {
     /// until it is applied, while the keyboard's mirror and composition
     /// already hold its text, which would otherwise reach the next field.
     pub(crate) fn abandon(&mut self, dropped: &[Message]) -> Option<i32> {
+        self.context.clear();
+
         if dropped.is_empty() && self.is_idle() {
             return None;
         }
 
         Some(self.reset(&mut Vec::new()))
+    }
+
+    /// The app's caret moves some other way than through the keyboard (a
+    /// tap, a hardware key, the application moving it): unless the engine
+    /// is idle, it is [reset](Engine::reset), which commits a composition,
+    /// and the new generation to give the keyboard is returned. Either way
+    /// the origin moves with the caret, and what the engine knew of the
+    /// text before it no longer holds.
+    pub(crate) fn interrupt(&mut self, edits: &mut Vec<Edit>) -> Option<i32> {
+        self.context.clear();
+
+        (!self.is_idle()).then(|| self.reset(edits))
+    }
+
+    /// Whether a caret the application moves must reach the engine
+    /// ([`Engine::interrupt`]): it is not idle, or it knows the end of the
+    /// text before the origin.
+    pub(crate) fn follows_caret(&self) -> bool {
+        !self.is_idle() || !self.context.is_empty()
     }
 
     /// Whether a preedit is shown: the keyboard composes.
@@ -393,12 +432,14 @@ impl Engine {
             Key::Backspace => {
                 // The keyboard presses Backspace only when the mirror has
                 // nothing before its cursor, so what it deletes is before the
-                // origin, wherever the caret rests (normally right there).
+                // origin, wherever the caret rests (normally right there):
+                // the text there is no longer the one the engine knew.
                 let caret = self.caret;
 
                 self.move_to(0, edits);
                 edits.push(Edit::Key(Key::Backspace));
                 self.move_to(caret, edits);
+                self.context.clear();
 
                 Request::None
             }
@@ -425,9 +466,14 @@ impl Engine {
                 // The rebase that follows a non-empty mirror, or the empty
                 // one, makes the app's caret after the key the origin: no
                 // new generation, so the keys and text the keyboard sends
-                // meanwhile count.
+                // meanwhile count. The engine knows nothing of the text
+                // before it, and starts over at once.
                 self.commit_preedit(edits);
                 edits.push(Edit::Key(key));
+
+                self.base.clear();
+                self.caret = 0;
+                self.context.clear();
 
                 if matches!(key, Key::Enter | Key::Tab | Key::Escape) {
                     Request::Yield
@@ -562,26 +608,77 @@ fn byte_offset(text: &str, index: i32) -> usize {
     text.len()
 }
 
-/// Whether the first character of `text` joins the cluster before it,
-/// whatever that cluster is: a combining or spacing mark (accents, Thai and
-/// Indic vowel signs and viramas), a zero width joiner, an emoji modifier or
-/// a variation selector.
+/// What stands for the app's text before what the engine knows of it: a
+/// Devanagari consonant. It is an ordinary letter to every character that
+/// joins any cluster, and when the known text starts with characters that
+/// join it (a virama typed first), the consonant before them makes it the
+/// worst case: a consonant typed after that virama joins.
+const UNKNOWN: char = '\u{915}';
+
+/// The most characters [`context`] keeps: more than any cluster typed in
+/// practice holds.
+const CONTEXT: usize = 32;
+
+/// Whether the first character of `text` joins the last cluster of the
+/// app's text before it, of which `before` is the end the engine knows
+/// (none: an ordinary letter).
 ///
-/// Characters that join only certain clusters (a regional indicator after
-/// another, a Hangul vowel jamo after a leading one, a consonant after a
-/// virama) are left out: text before the origin rarely ends in the first
-/// half of such a pair, while the second half is typed all the time. The
-/// end of the text is never checked against the app's text after it (see
-/// the module's documentation).
-fn joins(text: &str) -> bool {
+/// With nothing known, that is a character that joins any cluster: a
+/// combining or spacing mark (accents, Thai and Indic vowel signs and
+/// viramas), a zero width joiner, an emoji modifier or a variation selector.
+/// With `before` known, also one that joins only certain clusters: a
+/// consonant after a virama, a regional indicator after an unpaired one, a
+/// Hangul vowel jamo after a leading one. The end of the text is never
+/// checked against the app's text after it (see the module's
+/// documentation).
+fn joins(before: &str, text: &str) -> bool {
     let Some(first) = text.chars().next() else {
         return false;
     };
 
-    let mut probe = String::from("a");
+    let mut probe = String::from(UNKNOWN);
+    probe.push_str(before);
+    let clusters = probe.graphemes(true).count();
+
     probe.push(first);
 
-    probe.graphemes(true).count() == 1
+    probe.graphemes(true).count() == clusters
+}
+
+/// What the engine knows of the app's text before the origin once the
+/// origin moves past `typed`, with `before` known before it: the last
+/// cluster of the two, without the part that joins the unknown text before
+/// them, and at most its last [`CONTEXT`] characters. When the whole of it
+/// joins that unknown text, [`joins`] puts [`UNKNOWN`] back before it.
+fn context(before: &str, typed: &str) -> String {
+    if typed.is_empty() {
+        return before.to_owned();
+    }
+
+    let mut probe = String::from(UNKNOWN);
+    probe.push_str(before);
+    probe.push_str(typed);
+
+    let start = probe
+        .grapheme_indices(true)
+        .next_back()
+        .map_or(0, |(start, _)| start)
+        .max(UNKNOWN.len_utf8());
+
+    let last = &probe[start..];
+    let skipped = last.chars().count().saturating_sub(CONTEXT);
+
+    last.chars().skip(skipped).collect()
+}
+
+/// The first `clusters` grapheme clusters of `text`.
+fn prefix(text: &str, clusters: usize) -> &str {
+    let end = text
+        .grapheme_indices(true)
+        .nth(clusters)
+        .map_or(text.len(), |(start, _)| start);
+
+    &text[..end]
 }
 
 /// Appends `text` without its line breaks and tabs.
@@ -1386,6 +1483,10 @@ mod tests {
         forgets: usize,
         /// Requests to forget run inside a batch edit.
         batched_forgets: usize,
+        /// Requests to forget for a character that joins only the text the
+        /// engine knows before the origin (a consonant after a virama, a
+        /// regional indicator after an unpaired one).
+        known_joins: usize,
     }
 
     impl Seen {
@@ -1402,6 +1503,7 @@ mod tests {
             self.rebases += other.rebases;
             self.forgets += other.forgets;
             self.batched_forgets += other.batched_forgets;
+            self.known_joins += other.known_joins;
         }
 
         /// Each path but the `skipped` ones was taken `at_least` times.
@@ -1419,6 +1521,7 @@ mod tests {
                 ("rebases", self.rebases),
                 ("forgets", self.forgets),
                 ("batched forgets", self.batched_forgets),
+                ("known joins", self.known_joins),
             ] {
                 assert!(
                     count >= at_least || skipped.contains(&name),
@@ -1482,6 +1585,7 @@ mod tests {
             | Message::Key { generation, .. }
             | Message::Rebase { generation }) = message;
 
+            let context = self.engine.context.clone();
             let mut edits = Vec::new();
             let request = self.engine.apply(message.clone(), &mut edits);
 
@@ -1514,11 +1618,13 @@ mod tests {
 
                     if request == Request::Forget {
                         assert!(
-                            joins(&self.last.committed),
+                            joins(&context, &self.last.committed),
                             "{label}: forget without a joining character"
                         );
                         self.posted.push_back(Posted::Forget(generation));
                         self.seen.forgets += 1;
+                        self.seen.known_joins +=
+                            usize::from(!joins("", &self.last.committed));
                     }
 
                     let has =
@@ -1666,6 +1772,11 @@ mod tests {
                 app.tail,
                 self.after.len(),
             );
+            assert!(
+                self.before.concat().ends_with(&self.engine.context),
+                "{label}: the engine's context {:?} does not end the text before the origin",
+                self.engine.context,
+            );
 
             let preedit = last
                 .composing
@@ -1698,22 +1809,30 @@ mod tests {
         fn interrupt(&mut self) {
             self.drain();
 
-            if self.engine.is_idle() {
-                assert!(
-                    self.last.committed.is_empty()
-                        && self.last.composing.is_none(),
-                    "{}: idle with text",
-                    self.label
-                );
-            } else {
-                let mut edits = Vec::new();
-                let generation = self.engine.reset(&mut edits);
+            let idle = self.engine.is_idle();
+            let mut edits = Vec::new();
+            let generation = self.engine.interrupt(&mut edits);
 
-                self.app.apply(&edits);
-                self.log.extend(edits);
-                self.check_finished();
-                self.posted.push_back(Posted::Reset(generation));
-                self.seen.interruptions += 1;
+            assert_eq!(generation.is_none(), idle, "{}", self.label);
+            assert_eq!(self.engine.context, "", "{}", self.label);
+
+            match generation {
+                None => {
+                    assert!(
+                        self.last.committed.is_empty()
+                            && self.last.composing.is_none()
+                            && edits.is_empty(),
+                        "{}: idle with text",
+                        self.label
+                    );
+                }
+                Some(generation) => {
+                    self.app.apply(&edits);
+                    self.log.extend(edits);
+                    self.check_finished();
+                    self.posted.push_back(Posted::Reset(generation));
+                    self.seen.interruptions += 1;
+                }
             }
         }
 
@@ -2448,12 +2567,32 @@ mod tests {
             "\u{1F3FD}",         // emoji modifier
             "\u{0E35}\u{0E48}x", // the first character counts
         ] {
-            assert!(joins(mark), "{mark:?}");
+            assert!(joins("", mark), "{mark:?}");
+            assert!(joins("x", mark), "{mark:?}");
         }
 
+        // With nothing known before the origin, the characters that join
+        // only certain clusters are taken not to.
         for text in ["", "a", " ", "\u{0915}", "\u{0E01}", "🇫", "가", "😀"]
         {
-            assert!(!joins(text), "{text:?}");
+            assert!(!joins("", text), "{text:?}");
+        }
+
+        // With the text before it known, they are told apart too.
+        for (before, text, joined) in [
+            ("\u{0915}\u{094D}", "\u{0924}", true), // क् + त: a conjunct
+            ("\u{094D}", "\u{0924}", true),         // ् after unknown text
+            ("\u{094D}\u{0924}", "\u{093E}", true), // a vowel sign
+            ("\u{0915}", "\u{0924}", false),        // no virama
+            ("\u{0915}\u{093F}", "\u{0924}", false), // कि + त
+            ("a\u{094D}", "\u{0924}", false),       // no consonant before it
+            ("🇫", "🇷", true),                       // an unpaired indicator
+            ("🇩🇪", "🇫", false),                     // a paired one
+            ("\u{1100}", "\u{1161}", true),         // Hangul L + V
+            ("x", "\u{0924}", false),
+            ("x", "", false),
+        ] {
+            assert_eq!(joins(before, text), joined, "{before:?} {text:?}");
         }
     }
 
@@ -2515,6 +2654,191 @@ mod tests {
             (field.text().as_str(), field.preedit.clone()),
             ("काम", None)
         );
+    }
+
+    /// Runs the requests to forget `pump` collected, as the Java side runs
+    /// them, then delivers the rebases they send.
+    fn forget(
+        engine: &mut Engine,
+        mirror: &mut Mirror,
+        field: &mut Field,
+        requests: Vec<(Request, i32)>,
+    ) {
+        for (request, generation) in requests {
+            assert_eq!(request, Request::Forget);
+            mirror.forget(generation);
+        }
+
+        assert_eq!(pump(engine, mirror, field), []);
+    }
+
+    #[test]
+    fn a_consonant_after_a_virama_the_keyboard_typed_joins_it() {
+        // The field holds "क" and the origin is after it (a tap). A keyboard
+        // that commits each letter types a virama, which joins "क": the
+        // engine forgets it, and knows that the origin now follows it.
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("क", "");
+
+        for (typed, value) in [
+            ("\u{094D}", "क\u{094D}"),
+            // The consonant joins the conjunct in the field (GB9c): it is
+            // forgotten too, so no edit reaches back into the conjunct.
+            ("\u{0924}", "क\u{094D}\u{0924}"),
+            ("\u{093E}", "क\u{094D}\u{0924}\u{093E}"),
+            ("म", "क\u{094D}\u{0924}\u{093E}म"),
+        ] {
+            mirror.commit_text(typed, 1);
+            let requests = pump(&mut engine, &mut mirror, &mut field);
+            assert_eq!(
+                requests.len(),
+                usize::from(typed != "म"),
+                "{typed:?} {requests:?}"
+            );
+            forget(&mut engine, &mut mirror, &mut field, requests);
+            assert_eq!(field.text(), value, "{typed:?}");
+        }
+
+        // "म" starts no conjunct: the keyboard keeps it, and revises it in
+        // place.
+        assert_eq!(field.value, ["क\u{094D}\u{0924}\u{093E}", "म"]);
+        mirror.commit_text("\u{093F}", 1);
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert_eq!(field.text(), "क\u{094D}\u{0924}\u{093E}मि");
+    }
+
+    #[test]
+    fn a_word_composed_after_a_virama_the_keyboard_typed_is_kept_whole() {
+        // As before, but the keyboard composes the word after the virama,
+        // commits it with a space, then Backspace takes it back into a
+        // composition: the field keeps the conjunct.
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("क", "");
+
+        mirror.commit_text("\u{094D}", 1);
+        let requests = pump(&mut engine, &mut mirror, &mut field);
+        forget(&mut engine, &mut mirror, &mut field, requests);
+
+        for word in ["ष", "ष\u{093E}"] {
+            mirror.set_composing_text(word, 1);
+            assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        }
+
+        mirror.begin_batch_edit();
+        mirror.commit_text("ष\u{093E}", 1);
+        mirror.commit_text(" ", 1);
+        mirror.end_batch_edit();
+        let requests = pump(&mut engine, &mut mirror, &mut field);
+        assert_eq!(requests, [(Request::Forget, 0)]);
+        forget(&mut engine, &mut mirror, &mut field, requests);
+        assert_eq!(field.text(), "क\u{094D}ष\u{093E} ");
+
+        mirror.delete_surrounding_text(1, 0);
+        mirror.set_composing_region(-2, 0);
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert_eq!(
+            (field.text().as_str(), field.preedit.clone()),
+            ("क\u{094D}ष\u{093E}", None)
+        );
+    }
+
+    #[test]
+    fn the_context_is_the_last_cluster_before_the_origin() {
+        assert_eq!(context("", ""), "");
+        assert_eq!(context("x", ""), "x");
+        assert_eq!(context("", "abc"), "c");
+        assert_eq!(context("ab", "c"), "c");
+        // Text that joins the unknown text before it is kept whole.
+        assert_eq!(context("", "\u{094D}"), "\u{094D}");
+        assert_eq!(context("\u{094D}", "\u{0924}"), "\u{094D}\u{0924}");
+        assert_eq!(context("\u{094D}\u{0924}", "\u{093E}म"), "म");
+        assert_eq!(context("🇩", "🇪"), "🇩🇪");
+        assert_eq!(context("🇩🇪", "🇫"), "🇫");
+
+        // A cluster is kept up to its last characters.
+        let marks = "\u{0301}".repeat(100);
+        assert_eq!(context("", &format!("e{marks}")), "\u{0301}".repeat(32));
+        assert!(joins(&"\u{0301}".repeat(32), "\u{0301}"));
+
+        assert_eq!(prefix("a\u{0301}bc", 0), "");
+        assert_eq!(prefix("a\u{0301}bc", 1), "a\u{0301}");
+        assert_eq!(prefix("a\u{0301}bc", 9), "a\u{0301}bc");
+    }
+
+    #[test]
+    fn the_origin_known_is_forgotten_where_the_field_changes() {
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("क", "");
+
+        mirror.commit_text("\u{094D}", 1);
+        let requests = pump(&mut engine, &mut mirror, &mut field);
+        forget(&mut engine, &mut mirror, &mut field, requests);
+        assert_eq!(engine.context, "\u{094D}");
+
+        // Idle, but a caret the application moves must reach it.
+        assert!(engine.is_idle() && engine.follows_caret());
+
+        // The keyboard's Backspace deletes the conjunct's start in the field:
+        // nothing is known before the origin any more.
+        mirror.send_key(KEYCODE_DEL);
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+        assert_eq!(engine.context, "");
+        assert!(!engine.follows_caret());
+
+        // Nor after a key that moves the caret, a key that may submit the
+        // field, or a reset.
+        for code in [KEYCODE_DPAD_LEFT, KEYCODE_ENTER] {
+            mirror.commit_text("a\u{094D}", 1);
+            let _ = pump(&mut engine, &mut mirror, &mut field);
+            mirror.forget(engine.generation());
+            let _ = pump(&mut engine, &mut mirror, &mut field);
+            assert_eq!(engine.context, "a\u{094D}");
+
+            mirror.send_key(code);
+            let _ = pump(&mut engine, &mut mirror, &mut field);
+            assert_eq!(engine.context, "", "{code}");
+        }
+
+        mirror.commit_text("b", 1);
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+        mirror.forget(engine.generation());
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+        assert_eq!(engine.context, "b");
+        let generation = engine.reset(&mut Vec::new());
+        assert_eq!(engine.context, "");
+        mirror.adopt(generation);
+
+        // A tap or a caret moved from code with the engine idle: no reset,
+        // and nothing known.
+        mirror.commit_text("d", 1);
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+        mirror.forget(engine.generation());
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+        assert_eq!(engine.context, "d");
+        assert_eq!(engine.interrupt(&mut Vec::new()), None);
+        assert_eq!(engine.context, "");
+        assert_eq!(engine.generation(), generation);
+
+        // The field losing the keyboard too.
+        mirror.commit_text("e", 1);
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+        mirror.forget(engine.generation());
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+        assert_eq!(engine.context, "e");
+
+        // A rebase with the caret at the origin leaves it as it was.
+        mirror.commit_text("c", 1);
+        mirror.set_selection(0, 0);
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+        mirror.forget(engine.generation());
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+        assert_eq!(engine.context, "e");
+
+        assert_eq!(engine.abandon(&[]), None);
+        assert_eq!(engine.context, "");
     }
 
     #[test]
@@ -3408,9 +3732,12 @@ mod tests {
             seen.add(simulate(seed, 400, false, cap));
         }
 
-        // A request to forget meets an open batch edit more rarely.
-        seen.assert_reached(100, &["batched forgets"]);
-        seen.assert_reached(20, &[]);
+        // A request to forget meets an open batch edit more rarely, and a
+        // character that joins only the text the engine knows before the
+        // origin (after the cap's rebase) more rarely still.
+        seen.assert_reached(100, &["batched forgets", "known joins"]);
+        seen.assert_reached(20, &["known joins"]);
+        seen.assert_reached(1, &[]);
     }
 
     #[test]
@@ -3424,6 +3751,7 @@ mod tests {
         // A composition reaches the app as typed text, never as a preedit
         // drawn in clear; the mirror keeps it until it is committed.
         assert_eq!(seen.compositions, 0, "{seen:?}");
-        seen.assert_reached(20, &["compositions"]);
+        seen.assert_reached(20, &["compositions", "known joins"]);
+        seen.assert_reached(1, &["compositions"]);
     }
 }

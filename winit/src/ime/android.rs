@@ -34,7 +34,10 @@
 //!   `text_editor` take it whatever their focus).
 //! - A widget operation (`operation::focus`, `focus_next`, `unfocus`,
 //!   `move_cursor_to`, `select_all`, ...) can move the focus or the caret
-//!   while the keyboard has typed into the field. What the keyboard sent
+//!   while the keyboard has typed into the field, or while the engine knows
+//!   the end of the field's text before the origin, which a caret moved
+//!   elsewhere would make wrong ([`Engine::follows_caret`]). What the
+//!   keyboard sent
 //!   before it belongs before it, so [`operate`] applies the queue first;
 //!   when that gives the field edits, the operation waits: the event loop
 //!   replays an `AboutToWait`, which hands the field the edits and builds
@@ -210,9 +213,10 @@ pub(crate) struct Typing {
 
 /// Before a widget operation runs (see the module's documentation): what
 /// the keyboard sent before it is applied first. Returns the operation, and
-/// how to run it when the keyboard has typed or composes in a field; none
-/// when it waits for the field to take edits first, until the event loop
-/// takes it from [`deferred`].
+/// how to run it when the keyboard has typed or composes in a field, or the
+/// engine knows the text before its origin; none when it waits for the
+/// field to take edits first, until the event loop takes it from
+/// [`deferred`].
 pub(crate) fn operate<P, C>(
     operation: Box<dyn Operation>,
     windows: &mut WindowManager<P, C>,
@@ -256,7 +260,7 @@ where
     }
 
     let typing = SESSION.with_borrow(|session| {
-        (session.is_shown() && !session.engine.is_idle()).then(|| Typing {
+        (session.is_shown() && session.engine.follows_caret()).then(|| Typing {
             window,
             hold: session.engine.is_composing(),
         })
@@ -534,7 +538,8 @@ impl Session {
     /// The user or the application moves the caret: applies all the
     /// keyboard sent, then, unless the engine is idle, resets it, which
     /// commits a composition at the field's caret, and has the Java side
-    /// forget its text. Returns the edits for the field.
+    /// forget its text ([`Engine::interrupt`]). Returns the edits for the
+    /// field.
     fn finish(&mut self) -> Vec<Edit> {
         let mut edits = Vec::new();
 
@@ -546,8 +551,7 @@ impl Session {
         // stop after an Enter, Tab or Escape.
         while self.apply_queue(&mut edits) {}
 
-        if !self.engine.is_idle() {
-            let generation = self.engine.reset(&mut edits);
+        if let Some(generation) = self.engine.interrupt(&mut edits) {
             self.call(dex::RESET, &[JValue::Int(generation)]);
         }
 

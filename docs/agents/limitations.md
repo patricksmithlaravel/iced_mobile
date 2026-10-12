@@ -66,8 +66,9 @@ this file in the commit that fixes or finds a limitation.
     (moving the cursor with the space bar sends arrows); after a caret
     move from code or a change between a password field and another
     field; once its text passes 4096 UTF-16 units; when what it typed
-    starts with a character that joins the one before it (a combining mark
-    or vowel sign typed first); and, in a password field, after every
+    starts with a character that joins the one before it (a combining mark,
+    vowel sign or virama typed first, or a consonant right after a virama
+    it typed before it started over); and, in a password field, after every
     edit. The field asks it for no automatic capitals.
   - The Android keyboard keeps its own copy of the text it typed and takes
     it that the field has all of it. When `on_input` refuses that text or
@@ -94,20 +95,29 @@ this file in the commit that fixes or finds a limitation.
     reaches the field before it runs. Let the user's tap or Enter move the
     focus where it can.
   - `text_input` deletes by character cluster, as on the desktop: a
-    combining mark or vowel sign typed right after the place the user
-    tapped joins the character before it, and Backspace then deletes both
+    combining mark, vowel sign or virama typed right after the place the
+    user tapped joins the character before it, and Backspace then deletes
+    both, or the whole conjunct once a consonant follows a virama
     (`text_input` may also put its caret one character further when that
     happens in the middle of the text). `text_editor`'s Backspace can delete
     by character instead, so a combining sequence the Android keyboard
     revises can come out wrong there.
-  - In the middle of the text, what the Android keyboard types can join the
-    field's text after it into one cluster, which the keyboard does not
-    know: in Indic scripts, a consonant and virama typed right before a
-    consonant of the field make one conjunct with it (स् before त gives
-    स्त). A Backspace or another consonant from the keyboard right after
+  - In Indic scripts a consonant and virama make one conjunct with the
+    consonant after them (स् before त gives स्त), also when the Android
+    keyboard typed one side of the virama and the field held the other,
+    which the keyboard does not know. In the middle of the text, a
+    consonant and virama it types right before a consonant of the field
+    join it: a Backspace or another consonant from the keyboard right after
     that virama then replaces the whole conjunct, the field's consonant
-    with it, and the caret ends up after the conjunct. Typing at the end of
-    the text is not affected.
+    with it, and the caret ends up after the conjunct. Where the keyboard
+    starts over right after a virama the field holds (a tap there, the
+    focus, its Enter or arrows), a consonant it types joins that virama:
+    its next change to that consonant (a vowel sign from a keyboard that
+    commits each letter, or its Backspace taking the word back into a
+    composition) replaces the whole conjunct, the field's consonant and
+    virama with it. Typing on after a virama the keyboard typed itself is
+    not affected, also when it started over by itself in between (at the
+    points above that depend on what it typed).
   - On Android, an on-screen keyboard's keys reach a field only as text,
     Backspace, Delete, Enter, Tab, Escape, the arrows, Home and End. Its
     Ctrl and Meta shortcuts (Ctrl+C, X, V and A on keyboards that have a
