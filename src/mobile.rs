@@ -552,14 +552,16 @@
 //! the keyboard then has no emoji or dictation key, and it switches to and
 //! from that keyboard as the focus moves between the secure field and
 //! another (a physical iPhone has not been tried). When the focus moves
-//! straight from a secure field that was typed into to another field, that
-//! field's keyboard can label its numbers key ".?123" instead of "123"
-//! until its numbers are shown once or it is hidden and shown again; it
-//! types as usual. The iOS keyboard shows no suggestions in any field
-//! anyway. On both, when a `text_editor` focused from code also takes the
-//! keyboard ([Known limitations](#known-limitations)), the keyboard is
-//! still set up for the secure field: iced asks for a secure keyboard when
-//! any field that wants it is secure.
+//! straight from a secure field to another field, with the keyboard up,
+//! that field's keyboard can label its numbers key ".?123" instead of
+//! "123" until its numbers are shown once or it is hidden and shown again;
+//! it types as usual. A keyboard shown while none was up is set up for its
+//! field at once, without that label. The iOS keyboard shows no
+//! suggestions in any field anyway. On both, when a `text_editor` focused
+//! from code also takes the keyboard ([Known
+//! limitations](#known-limitations)), the keyboard is still set up for the
+//! secure field: iced asks for a secure keyboard when any field that wants
+//! it is secure.
 //!
 //! # Events for launchers
 //!
@@ -917,8 +919,9 @@
 //!   GameActivity, what the keyboard commits does not reach fields at all.
 //! - **Text input on iOS** ([Text input](#text-input)). The keyboard shows
 //!   no predictions, capitalises nothing by itself and does not compose
-//!   CJK: the app's view takes key input only. Right after a secure field
-//!   that was typed into, the next field's numbers key can read ".?123".
+//!   CJK: the app's view takes key input only. When the focus moves
+//!   straight from a secure field to another field, that field's numbers
+//!   key can read ".?123".
 //! - **`text_editor` ignores touch.** A tap neither focuses a `text_editor`
 //!   nor takes the focus from one, so one focused from code goes on taking
 //!   the keyboard's text alongside a `text_input` the user taps, a password

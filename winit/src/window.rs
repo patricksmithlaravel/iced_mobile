@@ -308,6 +308,15 @@ where
         let keyboard = false;
 
         if self.ime_state.is_none() && !keyboard {
+            // iOS: allowing the input method makes the view the first
+            // responder, and UIKit sets the keyboard up from the traits the
+            // view answers then. The view gets this field's purpose first:
+            // it still answers the last field's, and the purpose set after
+            // would reload the keyboard just set up (from a password
+            // keyboard to a normal one after a password field).
+            #[cfg(target_os = "ios")]
+            self.raw.set_ime_purpose(conversion::ime_purpose(purpose));
+
             self.raw.set_ime_allowed(true);
         }
 

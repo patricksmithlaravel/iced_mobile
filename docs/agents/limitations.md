@@ -188,13 +188,15 @@ this file in the commit that fixes or finds a limitation.
     entry: on the iOS 27.0 Simulator the keyboard then has no emoji or
     dictation key, and it switches to and from that keyboard as the focus
     moves between a password field and another (a physical iPhone has not
-    been tried). When the focus moves straight from a password field that
-    was typed into to another field, that field's keyboard can label its
-    numbers key ".?123" instead of "123" until its numbers are shown once
-    or it is hidden and shown again; it types as usual. The iOS keyboard
-    shows no suggestions in any field anyway (above). On both, a
-    `text_editor` focused from code that also takes the keyboard (see
-    `text_editor` below) leaves the keyboard set up for the password field.
+    been tried). When the focus moves straight from a password field to
+    another field, with the keyboard up, that field's keyboard can label
+    its numbers key ".?123" instead of "123" until its numbers are shown
+    once or it is hidden and shown again; it types as usual. A keyboard
+    shown while none was up is set up for its field at once, without that
+    label. The iOS keyboard shows no suggestions in any field anyway
+    (above). On both, a `text_editor` focused from code that also takes the
+    keyboard (see `text_editor` below) leaves the keyboard set up for the
+    password field.
   - The keyboard covers fields in the lower half of the screen unless the
     root is padded with `SafeArea::padding` from `iced::mobile::safe_area()`,
     whose bottom rises with it, as the template's is. On Android it rises

@@ -348,16 +348,18 @@ Text input on Android, and secure fields on Android and iOS:
   `Window::set_ime_purpose` (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers
   `isSecureTextEntry` and turns off autocorrection, spell checking, auto-capitalisation and smart
   punctuation for a password, the terminal purpose turns off the same without secure entry, and a
-  changed purpose reloads the keyboard that is shown. On the iOS 27.0 Simulator the password
+  changed purpose reloads the keyboard that is shown. `iced_winit` gives the view a field's
+  purpose before it makes the view the first responder, so a keyboard shown while none was up is
+  set up for its field at once, with no reload. On the iOS 27.0 Simulator the password
   keyboard has no emoji or dictation key, and the keyboard switches to and from it as the focus
   moves between a password field and another; a physical iPhone has not been tried. When the
-  focus moves from a password field that was typed into to another field, the keyboard there can
-  label its numbers key ".?123" instead of "123" until its numbers are shown once; it types as
-  usual. The iOS keyboard shows no suggestions in any field anyway. Before,
-  the keyboard was not told that a field held a password. When a `text_editor` focused from code
-  also takes the keyboard next to a password field (a tap does not take its focus), the keyboard is
-  set up for the password field: on Android and iOS, `InputMethod::merge` makes the merged request
-  secure when any of the requests is.
+  focus moves straight from a password field to another field, with the keyboard up, the keyboard
+  there can label its numbers key ".?123" instead of "123" until its numbers are shown once or it
+  is hidden and shown again; it types as usual. The iOS keyboard shows no suggestions in any field
+  anyway. Before, the keyboard was not told that a field held a password. When a `text_editor`
+  focused from code also takes the keyboard next to a password field (a tap does not take its
+  focus), the keyboard is set up for the password field: on Android and iOS, `InputMethod::merge`
+  makes the merged request secure when any of the requests is.
 - On Android and iOS, `text_editor` draws no placeholder while it shows a preedit, as `text_input`
   does, so a word the Android keyboard composes into an empty editor is not drawn over its
   placeholder (iOS sends no preedit). The desktop and the web draw it as upstream does.
