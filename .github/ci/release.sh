@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # CI's release job for one desktop target (design §17 item 11 and §18 phase
-# 5): a new app from the template, pinned to this checkout by path, released
-# with `--sign none`, verified, and installed or started the way a user
-# would. Nothing is signed, notarized or sent anywhere: icm never does that,
-# and the owner runs the release's UPLOAD.md.
+# 5): a new app from the template, pinned to this checkout by path, made
+# ready the way an owner does (`icm check desktop` resolves its Cargo.lock,
+# and the app is committed with it, so the release is built from a clean
+# commit), released with `--sign none`, verified, and installed or started
+# the way a user would. Nothing is signed, notarized or sent anywhere: icm
+# never does that, and the owner runs the release's UPLOAD.md.
 #
 #   .github/ci/release.sh <macos|windows|linux> <work dir>
 #
@@ -77,7 +79,9 @@ one_file() {
 release() {
     local name=$1
     shift
-    icm_json "$name" release "$target" --sign none --allow-dirty --yes "$@"
+    # No --allow-dirty: the app is committed, so `release.dirty_tree`
+    # passes, and a release that changed a tracked file fails here.
+    icm_json "$name" release "$target" --sign none --yes "$@"
     dist=$(result_path "$name" '.release.dist')
     [ -d "$dist" ] || fail "the release reported no dist directory"
     echo "dist: $dist"
@@ -177,6 +181,24 @@ cd "$app"
 group "icm doctor desktop --fix --yes"
 # The template's toolchain, and on Linux the pinned appimagetool.
 icm_json doctor doctor desktop --fix --yes
+
+group "icm check desktop (resolves Cargo.lock)"
+# A new app has no Cargo.lock until its first cargo call, and a release
+# builds the committed lock with --locked (`release.lock_missing`). This is
+# the fix that check names: `icm check desktop` resolves the lock (and
+# compiles the app).
+icm_json check check desktop
+[ -f Cargo.lock ] || fail "icm check desktop left no Cargo.lock in $(native "$app")"
+
+group "git commit (the app and its Cargo.lock)"
+# Then the owner commits it (icm new made the repository), so the release
+# names the commit that rebuilds it. A throwaway identity, and no signing
+# or hooks from the machine's git configuration.
+git add -A
+git -c user.name="icm CI" -c user.email="ci@icm.invalid" -c commit.gpgsign=false \
+    commit --no-verify -q -m "A new app from the template, with its Cargo.lock"
+git ls-files --error-unmatch Cargo.lock >/dev/null
+git log --oneline -1
 
 case "$target" in
 macos)
