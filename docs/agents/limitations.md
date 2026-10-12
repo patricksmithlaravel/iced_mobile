@@ -32,17 +32,30 @@ this file in the commit that fixes or finds a limitation.
 - **Text input differs from the desktop** (iOS, Android).
   - On Android (NativeActivity, the default, Android 8 and later) the
     keyboard composes, suggests, autocorrects and swipe-types, and accented
-    letters and CJK arrive whole. The word being composed shows underlined
-    at the caret and is not part of the value until the keyboard commits it
-    (a space, a suggestion, Enter, or a tap anywhere): `on_input` sees the
-    text without it until then. With GameActivity (`android-game-activity`)
-    the keyboard reaches the app through key events only, without
-    composition or suggestions. iOS has no marked text, so CJK input
-    methods do not compose there.
+    letters and CJK arrive whole. Whether it composes is the keyboard's
+    choice: Gboard commits each letter as it is typed in Latin-script
+    languages, so `on_input` sees every letter and nothing is underlined,
+    while CJK input methods and some other keyboards compose. A word being
+    composed shows underlined at the caret and is not part of the value
+    until the keyboard commits it (a space, a suggestion, Enter, or a tap
+    anywhere): `on_input` sees the text without it until then. Do not count
+    on `on_input` seeing whole words. With GameActivity
+    (`android-game-activity`) the keyboard reaches the app through key
+    events only, without composition or suggestions. iOS has no marked
+    text, so CJK input methods do not compose there.
   - The Android keyboard sees only the text typed since the field got the
     focus or since the last tap, so its suggestions and auto-capitalisation
     do not see the field's earlier text.
-  - When the app moves the focus itself (`text_input::focus`, `focus_next`,
+  - The Android keyboard keeps its own copy of the text it typed and takes
+    it that the field has all of it. When `on_input` refuses that text or
+    changes its length (a length limit, digits only), a later edit that
+    reaches back into it, such as a Backspace into the previous word or an
+    autocorrection the user undoes, can delete or replace characters the
+    field shows. Typing and single Backspaces stay in step. With such a
+    field, return a caret move from code with the refusal
+    (`operation::move_cursor_to_end`): it starts the keyboard over from
+    what the field shows.
+  - When the app moves the focus itself (`operation::focus`, `focus_next`,
     `unfocus`, or the field leaving the view) while the Android keyboard
     composes a word, the word is dropped, and so is a word the keyboard had
     taken back from the field after a Backspace into it.
@@ -89,7 +102,11 @@ this file in the commit that fixes or finds a limitation.
   fill most of each list row and keep its buttons small, as the template's
   list does, or leave gaps between rows.
 - **`text_editor`, rich-text links and `pick_list` menus ignore touch.** A
-  tap cannot focus a `text_editor` (focusing it from code works), links in
+  tap cannot focus a `text_editor` (focusing it from code works), nor take
+  the focus away from one: a `text_editor` focused from code stays focused
+  when the user taps a `text_input`, and both then take what is typed. Move
+  the focus away from it from code (`operation::focus` on another widget
+  unfocuses the rest), for example from a Done button. Links in
   `rich_text` and `markdown` cannot be tapped, and `pick_list` and
   `combo_box` menus select on touch-down, so a long menu cannot be
   scrolled. Use `text_input`, buttons for links, and short menus.

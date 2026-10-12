@@ -250,8 +250,9 @@ Text input on Android, and secure fields on Android and iOS:
   (`winit/android/classes.dex`, built from `winit/android/java/` by `winit/android/build-dex.sh`)
   and loads it at run time, so APKs still have no Java code: its view gives the keyboard an input
   connection, and the shell turns what the keyboard does to that view's text into key presses,
-  commits and preedits for the focused field. The word being composed shows underlined at the
-  caret and joins the value once the keyboard commits it. The keyboard sees only the text typed
+  commits and preedits for the focused field. A word the keyboard composes (CJK input methods and
+  some other keyboards; Gboard commits each letter in Latin-script languages) shows underlined at
+  the caret and joins the value once the keyboard commits it. The keyboard sees only the text typed
   since the field got the focus or since the last tap. Before, the keyboard could only send key
   events: no composition, suggestions or swipe typing, and characters outside the key map were lost.
   On older Android versions, when the view cannot be added, and with GameActivity, nothing changes.
@@ -265,7 +266,7 @@ Text input on Android, and secure fields on Android and iOS:
 - **Android:** a tap, a hardware key or the window losing the focus commits the word being composed,
   and the app takes the commit, and builds its view again, before the tap: a Send button enabled
   only once the field holds text takes the tap that finished the word.
-- **Android:** when the app moves the focus from code (`text_input::focus`, `focus_next`,
+- **Android:** when the app moves the focus from code (`operation::focus`, `focus_next`,
   `unfocus`) or the field leaves the view, the word being composed is dropped and the field's
   preedit cleared: the window gets `input_method::Event::Closed`, as winit's desktop backends send
   it when the input method is turned off. The next field's keyboard starts with no text. A caret

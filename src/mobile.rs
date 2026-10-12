@@ -387,9 +387,13 @@
 //! suggest, autocorrect and swipe-type, and accented letters and CJK arrive
 //! whole:
 //!
-//! - The word being composed is a preedit: drawn underlined at the caret,
-//!   not part of the value until the keyboard commits it (a space, a
-//!   suggestion, Enter). `on_input` sees the value without it until then.
+//! - Whether the keyboard composes is its choice: Gboard commits each
+//!   letter as it is typed in Latin-script languages, so `on_input` sees
+//!   every letter and nothing is underlined, while CJK input methods and
+//!   some other keyboards compose. A word being composed is a preedit:
+//!   drawn underlined at the caret, not part of the value until the
+//!   keyboard commits it (a space, a suggestion, Enter). `on_input` sees
+//!   the value without it until then.
 //!   A tap anywhere, a hardware key, or the window losing the focus commits
 //!   it first, and the application handles the commit, and builds its view
 //!   again, before the tap: a Send button that is enabled only once the
@@ -398,6 +402,14 @@
 //!   since the last tap, never the field's earlier text, so its suggestions
 //!   and auto-capitalisation do not see what was there before. Backspace and
 //!   the arrow keys still reach that text.
+//! - The keyboard keeps its own copy of the text it typed and takes it that
+//!   the field has all of it. An `on_input` that refuses that text or
+//!   changes its length (a length limit, digits only) puts it out of step:
+//!   a later edit that reaches back into it (a Backspace into the previous
+//!   word, an autocorrection undone) can delete or replace characters the
+//!   field shows. Return a caret move from code with the refusal
+//!   (`operation::move_cursor_to_end`), which starts the keyboard over from
+//!   what the field shows.
 //! - The keyboard's Enter (its key, its action button, or a commit of a
 //!   lone line break) reaches the application as the Enter key, after the
 //!   text typed before it, and submits a `text_input`; Tab (its key, or a
@@ -408,7 +420,7 @@
 //!   character instead, so a combining sequence the keyboard revises can
 //!   come out wrong there.
 //! - An application that moves the focus or the caret from code
-//!   (`text_input::focus`, `focus_next`, `unfocus`, `move_cursor_to`,
+//!   (`operation::focus`, `focus_next`, `unfocus`, `move_cursor_to`,
 //!   `select_all`) while the keyboard types ends what it typed there: a
 //!   focus moved away drops the word being composed, and a caret moved in
 //!   the field commits it where it was typed first, then moves (so a
@@ -755,8 +767,14 @@
 //!   tap; a word being composed is dropped when the application moves the
 //!   focus itself; and a combining mark or vowel sign typed right after the
 //!   place the user tapped joins the character before it, which
-//!   `text_input` then deletes with it, as it does on the desktop.
-//!   GameActivity, and Android before 8, get key events only.
+//!   `text_input` then deletes with it, as it does on the desktop. An
+//!   `on_input` that refuses or shortens the keyboard's text puts the
+//!   keyboard out of step until the caret moves. GameActivity, and Android
+//!   before 8, get key events only.
+//! - **`text_editor` ignores touch.** A tap neither focuses a `text_editor`
+//!   nor takes the focus from one, so one focused from code goes on taking
+//!   the keyboard's text alongside a `text_input` the user taps: move the
+//!   focus away from it from code.
 //! - **Line breaks in inserted text on iOS.** UIKit hands over text one
 //!   insertion at a time. An insertion that is only a line break (`"\n"`,
 //!   `"\r"`, or `"\r\n"` counted once) is one Return, as from the

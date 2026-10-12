@@ -32,7 +32,7 @@
 //!   `input_method::Event::Closed` at the next drain or interrupt, which
 //!   clears the preedit every text widget keeps (`text_input` and
 //!   `text_editor` take it whatever their focus).
-//! - A widget operation (`text_input::focus`, `focus_next`, `unfocus`,
+//! - A widget operation (`operation::focus`, `focus_next`, `unfocus`,
 //!   `move_cursor_to`, `select_all`, ...) can move the focus or the caret
 //!   while the keyboard has typed into the field. What the keyboard sent
 //!   before it belongs before it, so [`operate`] applies the queue first;
