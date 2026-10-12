@@ -257,9 +257,11 @@ Text input on Android, and secure fields on Android and iOS:
   On older Android versions, when the view cannot be added, and with GameActivity, nothing changes.
 - **Android:** the keyboard's Enter, from its key, its action button or a commit of a lone line
   break, reaches the app as the Enter key after the text typed before it, and submits a
-  `text_input`. Backspace and Delete reach the field's text before and after what the keyboard
-  typed, also from keyboards that delete with `deleteSurroundingText` (AOSP's keyboard and its
-  forks), and so do the arrow, Home and End keys, without dropping keys sent in quick succession.
+  `text_input`; its Tab, from its key or a commit of a lone tab, is the Tab key. Line breaks and
+  tabs inside longer committed text are dropped. Backspace and Delete reach the field's text
+  before and after what the keyboard typed, also from keyboards that delete with
+  `deleteSurroundingText` (AOSP's keyboard and its forks), and so do the arrow, Home and End keys,
+  without dropping keys sent in quick succession.
 - **Android:** a tap, a hardware key or the window losing the focus commits the word being composed,
   and the app takes the commit, and builds its view again, before the tap: a Send button enabled
   only once the field holds text takes the tap that finished the word.

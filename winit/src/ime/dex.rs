@@ -61,9 +61,11 @@
 //! keyboard's outermost batch edit ends, and only when something changed
 //! since the last report, reset or rebase:
 //!
-//! - `text`: the mirror, the composing text included. A newline the
-//!   keyboard commits alone is an Enter key instead (below), but one inside
-//!   longer committed text is in `text`.
+//! - `text`: the mirror, the composing text included. It never holds a
+//!   line break or a tab: a commit of only a line break or only a tab is a
+//!   key instead (below), and they are dropped from longer text the
+//!   keyboard commits or composes, so every character of the mirror is in
+//!   the field.
 //! - `selStart`, `selEnd`: the selection in UTF-16 units, as Android's
 //!   `Selection` has it: `selStart` is the anchor and `selEnd` the cursor,
 //!   so `selEnd` may be less than `selStart`. Equal when nothing is
@@ -86,9 +88,10 @@
 //!   Backspace even at the start of the text. Otherwise the key deletes in
 //!   the mirror (by code point) and is reported as a state.
 //! - `KEYCODE_ENTER` (66): the keyboard's key event, its editor action
-//!   (`performEditorAction`), or a commit of exactly `"\n"`.
-//!   `KEYCODE_NUMPAD_ENTER` (160) is sent as it is.
-//! - `KEYCODE_TAB` (61) and `KEYCODE_ESCAPE` (111).
+//!   (`performEditorAction`), or a commit of only `"\n"`, `"\r"` or
+//!   `"\r\n"`. `KEYCODE_NUMPAD_ENTER` (160) is sent as it is.
+//! - `KEYCODE_TAB` (61): the key event, or a commit of only `"\t"`.
+//! - `KEYCODE_ESCAPE` (111).
 //! - `KEYCODE_DPAD_UP` (19), `KEYCODE_DPAD_DOWN` (20), `KEYCODE_DPAD_LEFT`
 //!   (21), `KEYCODE_DPAD_RIGHT` (22), `KEYCODE_MOVE_HOME` (122) and
 //!   `KEYCODE_MOVE_END` (123). The app's caret moves where the mirror cannot
@@ -96,7 +99,8 @@
 //!
 //! Other keys with a character, unless pressed with Ctrl or Meta and
 //! unless a dead key, are typed into the mirror at the cursor after any
-//! composition is finished; the rest are ignored, as are key releases.
+//! composition is finished (a line break or a tab as the key above); the
+//! rest are ignored, as are key releases.
 //!
 //! `nativeRebase` says the mirror is now empty while the text it had stays
 //! in the field: the app's caret is where the next text goes. It follows:

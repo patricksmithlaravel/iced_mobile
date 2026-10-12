@@ -10,8 +10,9 @@ import android.view.inputmethod.BaseInputConnection;
 /**
  * What the keyboard does to the view's mirror. The editing itself is
  * {@link BaseInputConnection}'s; this class counts batch edits, has the view
- * report the mirror when the outermost one ends, and handles the keys and
- * the Enter the keyboard sends.
+ * report the mirror when the outermost one ends, handles the keys the
+ * keyboard sends and the Enter and Tab it commits, and keeps line breaks and
+ * tabs out of the mirror.
  *
  * <p>A connection edits nothing once the view restarted the keyboard, was
  * uninstalled, or the system closed the connection. Everything here runs on
@@ -92,16 +93,19 @@ final class KeyboardConnection extends BaseInputConnection {
             return false;
         }
 
-        // What keyboards commit for Enter: a key for the app, not text.
-        if (TextUtils.equals(text, "\n")) {
-            view.forward(KeyEvent.KEYCODE_ENTER);
+        // What keyboards commit for Enter or Tab: a key for the app, not
+        // text.
+        int key = key(text);
+
+        if (key != 0) {
+            view.forward(key);
             return true;
         }
 
         beginBatchEdit();
 
         try {
-            super.commitText(text, newCursorPosition);
+            super.commitText(plain(text), newCursorPosition);
         } catch (RuntimeException error) {
             Keyboard.warn("commitText", error);
         } finally {
@@ -120,7 +124,7 @@ final class KeyboardConnection extends BaseInputConnection {
         beginBatchEdit();
 
         try {
-            super.setComposingText(text, newCursorPosition);
+            super.setComposingText(plain(text), newCursorPosition);
         } catch (RuntimeException error) {
             Keyboard.warn("setComposingText", error);
         } finally {
@@ -329,8 +333,16 @@ final class KeyboardConnection extends BaseInputConnection {
      * as a hardware key types into a text field.
      */
     private void type(String characters) {
-        if (characters.equals("\n")) {
-            view.forward(KeyEvent.KEYCODE_ENTER);
+        int key = key(characters);
+
+        if (key != 0) {
+            view.forward(key);
+            return;
+        }
+
+        CharSequence text = plain(characters);
+
+        if (text.length() == 0) {
             return;
         }
 
@@ -338,10 +350,57 @@ final class KeyboardConnection extends BaseInputConnection {
 
         try {
             removeComposingSpans(view.mirror());
-            super.commitText(characters, 1);
+            super.commitText(text, 1);
         } finally {
             endBatchEdit();
         }
+    }
+
+    /**
+     * The key a text that is only a line break or a tab stands for, as on
+     * iOS: Enter for {@code "\n"}, {@code "\r"} and {@code "\r\n"} (what
+     * keyboards commit for Enter), Tab for {@code "\t"}; else 0.
+     */
+    private static int key(CharSequence text) {
+        if (TextUtils.equals(text, "\n") || TextUtils.equals(text, "\r")
+                || TextUtils.equals(text, "\r\n")) {
+            return KeyEvent.KEYCODE_ENTER;
+        }
+
+        if (TextUtils.equals(text, "\t")) {
+            return KeyEvent.KEYCODE_TAB;
+        }
+
+        return 0;
+    }
+
+    /**
+     * The text without its line breaks and tabs, which the app never gets
+     * inside longer text: the mirror then holds only what the field has, and
+     * every Backspace over it deletes in the field.
+     */
+    private static CharSequence plain(CharSequence text) {
+        if (text == null) {
+            return null;
+        }
+
+        int length = text.length();
+        StringBuilder plain = null;
+
+        for (int index = 0; index < length; index++) {
+            char c = text.charAt(index);
+
+            if (c == '\n' || c == '\r' || c == '\t') {
+                if (plain == null) {
+                    plain = new StringBuilder(length);
+                    plain.append(text, 0, index);
+                }
+            } else if (plain != null) {
+                plain.append(c);
+            }
+        }
+
+        return plain == null ? text : plain.toString();
     }
 
     /**

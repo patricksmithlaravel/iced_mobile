@@ -27,8 +27,11 @@
 //!
 //! Line breaks and tabs are never part of the text the engine compares or
 //! commits: Enter and Tab reach the app as keys (the Java side turns a commit
-//! of exactly `"\n"` into Enter), and inside longer text they are dropped, as
-//! `text_input` drops them from such an insertion on iOS.
+//! of only a line break into Enter and of only a tab into Tab, as iOS does),
+//! and inside longer text they are dropped, as `text_input` drops them from
+//! such an insertion on iOS. The Java side keeps them out of the mirror, so
+//! that the keyboard never deletes a character the app did not get; the
+//! engine drops them from what it reads too.
 
 use std::iter;
 use std::ops::Range;
@@ -260,9 +263,9 @@ impl Engine {
     /// Nothing to reset: no text typed since the last reset and no preedit.
     ///
     /// Precisely: the mirror's committed text, as the engine last applied
-    /// it, is empty (it may hold line breaks and tabs, which the app never
-    /// gets) and no preedit is shown. The app's caret may then move without
-    /// a reset: the session's origin moves with it.
+    /// it without line breaks and tabs, is empty and no preedit is shown.
+    /// The app's caret may then move without a reset: the session's origin
+    /// moves with it.
     pub(crate) fn is_idle(&self) -> bool {
         self.base.is_empty() && self.preedit.is_none()
     }
@@ -722,6 +725,24 @@ mod tests {
     /// region (`InputMethodManager.updateSelection`).
     type Told = ((usize, usize), Option<(usize, usize)>);
 
+    /// The key a text that is only a line break or a tab stands for
+    /// (`KeyboardConnection.key`).
+    fn key_for(text: &str) -> Option<i32> {
+        match text {
+            "\n" | "\r" | "\r\n" => Some(KEYCODE_ENTER),
+            "\t" => Some(KEYCODE_TAB),
+            _ => None,
+        }
+    }
+
+    /// The text without its line breaks and tabs
+    /// (`KeyboardConnection.plain`).
+    fn plain(text: &str) -> String {
+        text.chars()
+            .filter(|c| !matches!(c, '\n' | '\r' | '\t'))
+            .collect()
+    }
+
     /// Whether a key moves the app's caret (`KeyboardView.moves`).
     fn moves(code: i32) -> bool {
         matches!(
@@ -808,18 +829,18 @@ mod tests {
             self.report();
         }
 
-        /// `commitText`. A commit of exactly `"\n"` (what keyboards commit
-        /// for Enter) is the Enter key instead.
+        /// `commitText`. A commit of only a line break (what keyboards
+        /// commit for Enter) or a tab is the key instead, and longer text
+        /// goes in without its line breaks and tabs.
         fn commit_text(&mut self, text: &str, new_cursor: i64) {
-            if text == "\n" {
-                self.forward(KEYCODE_ENTER);
-            } else {
-                self.replace(text, new_cursor, false);
+            match key_for(text) {
+                Some(code) => self.forward(code),
+                None => self.replace(&plain(text), new_cursor, false),
             }
         }
 
         fn set_composing_text(&mut self, text: &str, new_cursor: i64) {
-            self.replace(text, new_cursor, true);
+            self.replace(&plain(text), new_cursor, true);
         }
 
         /// `BaseInputConnection.replaceText`: the composing region, else the
@@ -999,16 +1020,18 @@ mod tests {
 
         /// A key with a character (`KeyboardConnection.type`): it finishes
         /// the composition and goes in at the selection, as a hardware key
-        /// types into a text field.
+        /// types into a text field. A line break or a tab is the key.
         fn send_char(&mut self, c: char) {
-            if c == '\n' {
-                self.forward(KEYCODE_ENTER);
+            let text = c.to_string();
+
+            if let Some(code) = key_for(&text) {
+                self.forward(code);
                 return;
             }
 
             self.begin_batch_edit();
             self.composing = None;
-            self.replace(c.encode_utf8(&mut [0; 4]), 1, false);
+            self.replace(&text, 1, false);
             self.end_batch_edit();
         }
 
@@ -2525,14 +2548,83 @@ mod tests {
 
     #[test]
     fn a_suggestion_with_a_line_break_is_committed_without_it() {
-        let mut harness = Harness::new("", "");
+        let mut harness = Harness::new("x", "");
 
         assert_eq!(
             harness.run(|m| m.commit_text("Dear Sam,\nthanks", 1)),
             [commit("Dear Sam,thanks")]
         );
-        let _ = harness.run(|m| m.send_key(KEYCODE_DEL));
-        assert_eq!(harness.value(), "Dear Sam,thank");
+        // The mirror holds what the field has, so every Backspace deletes
+        // one character there, also across the dropped line break.
+        assert_eq!(harness.mirror.units.len(), "Dear Sam,thanks".len());
+        for expected in ["xDear Sam,thank", "xDear Sam,", "xDear Sam"] {
+            while harness.value().len() > expected.len() {
+                assert_eq!(
+                    harness.run(|m| m.send_key(KEYCODE_DEL)),
+                    [Edit::Key(Key::Backspace)]
+                );
+            }
+            assert_eq!(harness.value(), expected);
+        }
+
+        // A paste from the keyboard's clipboard, deleted with
+        // deleteSurroundingText: no Backspace is lost.
+        let mut harness = Harness::new("x", "");
+        assert_eq!(
+            harness.run(|m| m.commit_text("a\r\nb\t", 1)),
+            [commit("ab")]
+        );
+        for expected in ["xa", "x", ""] {
+            assert_eq!(
+                harness.run(|m| m.delete_surrounding_text(1, 0)),
+                [Edit::Key(Key::Backspace)]
+            );
+            assert_eq!(harness.value(), expected);
+        }
+
+        // A composition keeps none either.
+        let mut harness = Harness::new("", "");
+        assert_eq!(
+            harness.run(|m| m.set_composing_text("a\nb", 1)),
+            [preedit("ab", 2)]
+        );
+        assert_eq!(harness.mirror.composing_text(), "ab");
+    }
+
+    #[test]
+    fn a_lone_tab_or_line_break_is_a_key() {
+        for (text, key) in [
+            ("\t", Key::Tab),
+            ("\n", Key::Enter),
+            ("\r", Key::Enter),
+            ("\r\n", Key::Enter),
+        ] {
+            let mut harness = Harness::new("hello", "");
+
+            let _ = harness.run(|m| m.set_composing_text("wor", 1));
+            // The composition is committed first, and the key asks for a
+            // reset; nothing stays in the mirror.
+            assert_eq!(
+                harness.run(|m| m.commit_text(text, 1)),
+                [clear(), commit("wor"), Edit::Key(key)],
+                "{text:?}"
+            );
+            assert_eq!(harness.posted, [Posted::Reset(1)], "{text:?}");
+            harness.settle();
+            assert!(harness.mirror.units.is_empty(), "{text:?}");
+
+            // The next Backspace deletes in the field.
+            assert_eq!(
+                harness.run(|m| m.send_key(KEYCODE_DEL)),
+                [Edit::Key(Key::Backspace)],
+                "{text:?}"
+            );
+            assert_eq!(harness.value(), "hellowo", "{text:?}");
+        }
+
+        // A key typing a tab (`sendKeyEvent` with its character) too.
+        let mut harness = Harness::new("", "");
+        assert_eq!(harness.run(|m| m.send_char('\t')), [Edit::Key(Key::Tab)]);
     }
 
     #[test]

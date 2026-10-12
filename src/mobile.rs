@@ -400,9 +400,9 @@
 //!   the arrow keys still reach that text.
 //! - The keyboard's Enter (its key, its action button, or a commit of a
 //!   lone line break) reaches the application as the Enter key, after the
-//!   text typed before it, and submits a `text_input`; Tab and Escape are
-//!   keys too. A line break or tab inside longer committed text is dropped,
-//!   as on iOS.
+//!   text typed before it, and submits a `text_input`; Tab (its key, or a
+//!   commit of a lone tab) and Escape are keys too. A line break or tab
+//!   inside longer committed text is dropped, as on iOS.
 //! - The keyboard's edits reach the field as the clusters `text_input`
 //!   moves and deletes by. `text_editor`'s Backspace can delete by
 //!   character instead, so a combining sequence the keyboard revises can
