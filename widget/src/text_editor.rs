@@ -1234,6 +1234,9 @@ impl<Message> Binding<Message> {
                 } else if let keyboard::Key::Named(named_key) = key.as_ref() {
                     let motion = motion(named_key)?;
 
+                    #[cfg(target_os = "android")]
+                    let motion = text_order(motion, physical_key);
+
                     let motion = if modifiers.macos_command() {
                         match motion {
                             Motion::Left => Motion::Home,
@@ -1413,6 +1416,27 @@ fn motion(key: key::Named) -> Option<Motion> {
     }
 }
 
+/// Android: the motion of an arrow key with no physical key, which is how the
+/// shell presses the system keyboard's own caret moves, one grapheme cluster
+/// at a time in the order of the text: [`Motion::Previous`] and
+/// [`Motion::Next`], so they go the same way in a right-to-left line, where
+/// the arrows move on screen. A keyboard's arrow keys, its own and a hardware
+/// keyboard's, have a physical key and move as arrows do.
+#[cfg(any(target_os = "android", test))]
+fn text_order(motion: Motion, physical_key: key::Physical) -> Motion {
+    if physical_key
+        != key::Physical::Unidentified(key::NativeCode::Unidentified)
+    {
+        return motion;
+    }
+
+    match motion {
+        Motion::Left => Motion::Previous,
+        Motion::Right => Motion::Next,
+        _ => motion,
+    }
+}
+
 /// The possible status of a [`TextEditor`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -1532,4 +1556,31 @@ pub(crate) fn convert_macos_shortcut(
     };
 
     Some(keyboard::Key::Named(key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arrows_with_no_physical_key_move_in_the_order_of_the_text() {
+        let unidentified =
+            key::Physical::Unidentified(key::NativeCode::Unidentified);
+
+        assert_eq!(text_order(Motion::Left, unidentified), Motion::Previous);
+        assert_eq!(text_order(Motion::Right, unidentified), Motion::Next);
+
+        for motion in [Motion::Up, Motion::Down, Motion::Home, Motion::End] {
+            assert_eq!(text_order(motion, unidentified), motion);
+        }
+
+        for physical_key in [
+            key::Physical::Code(key::Code::ArrowLeft),
+            key::Physical::Code(key::Code::ArrowRight),
+            key::Physical::Unidentified(key::NativeCode::Android(21)),
+        ] {
+            assert_eq!(text_order(Motion::Left, physical_key), Motion::Left);
+            assert_eq!(text_order(Motion::Right, physical_key), Motion::Right);
+        }
+    }
 }

@@ -636,13 +636,13 @@ mod tests {
         assert_eq!(
             fed.edits,
             [
-                Edit::Key(Key::Left),
-                Edit::Key(Key::Left),
+                Edit::Key(Key::Previous),
+                Edit::Key(Key::Previous),
                 Edit::Key(Key::Backspace),
                 Edit::Key(Key::Backspace),
                 commit("or"),
-                Edit::Key(Key::Right),
-                Edit::Key(Key::Right),
+                Edit::Key(Key::Next),
+                Edit::Key(Key::Next),
             ]
         );
     }

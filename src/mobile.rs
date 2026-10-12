@@ -453,7 +453,14 @@
 //!   takes no typing from the Android keyboard. Its deletions and caret
 //!   moves come as Backspace, Delete and arrow keys, one per cluster
 //!   (`Edit::Backspace`, `Edit::Delete` and `Action::Move` in a
-//!   `text_editor`).
+//!   `text_editor`). The caret moves inside the text it typed go in the
+//!   order of the text: they are ArrowLeft and ArrowRight with no physical
+//!   key (`Physical::Unidentified(NativeCode::Unidentified)`), which a
+//!   `text_editor` takes as `Motion::Previous` and `Motion::Next`, so that
+//!   they go the right way in a right-to-left line too, where its arrows
+//!   move on screen. A `key_binding` that maps the arrows itself should
+//!   hand those two to `Binding::from_key_press`. The keyboard's own arrow
+//!   keys keep their physical key and move as a hardware keyboard's do.
 //! - Those keys are window events, pressed and released, like a hardware
 //!   keyboard's: `keyboard::listen()` and `event::listen` see what the
 //!   field does not capture, such as every release (an autocorrection can

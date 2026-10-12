@@ -854,6 +854,8 @@ fn to_motion(motion: Motion) -> cosmic_text::Motion {
         Motion::PageDown => cosmic_text::Motion::PageDown,
         Motion::DocumentStart => cosmic_text::Motion::BufferStart,
         Motion::DocumentEnd => cosmic_text::Motion::BufferEnd,
+        Motion::Previous => cosmic_text::Motion::Previous,
+        Motion::Next => cosmic_text::Motion::Next,
     }
 }
 
@@ -880,5 +882,56 @@ where
         cosmic_text::BufferRef::Owned(buffer) => buffer,
         cosmic_text::BufferRef::Borrowed(buffer) => buffer,
         cosmic_text::BufferRef::Arc(_buffer) => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::core::text::editor::Editor as _;
+
+    fn text(editor: &Editor) -> String {
+        (0..editor.line_count())
+            .filter_map(|index| editor.line(index))
+            .map(|line| line.text.into_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn previous_and_next_move_in_the_order_of_the_text() {
+        // A period put before the space after a word, then the next word
+        // typed after both, as the Android keyboard's own caret moves do it:
+        // the same in a right-to-left line, where Left and Right move on
+        // screen, and never into the next line.
+        for (word, expected) in [
+            ("hello ", "hello. next"),
+            ("שלום ", "שלום. next"),
+            ("مرحبا ", "مرحبا. next"),
+        ] {
+            for after in ["", "\nabc"] {
+                let mut editor = Editor::with_text(&format!("{word}{after}"));
+
+                editor.move_to(Cursor {
+                    position: Position {
+                        line: 0,
+                        column: word.len(),
+                    },
+                    selection: None,
+                });
+
+                editor.perform(Action::Move(Motion::Previous));
+                editor.perform(Action::Edit(Edit::Paste(Arc::new(
+                    String::from("."),
+                ))));
+                editor.perform(Action::Move(Motion::Next));
+                editor.perform(Action::Edit(Edit::Paste(Arc::new(
+                    String::from("next"),
+                ))));
+
+                assert_eq!(text(&editor), format!("{expected}{after}"));
+            }
+        }
     }
 }

@@ -51,13 +51,19 @@ this file in the commit that fixes or finds a limitation.
     `Edit::Insert` (iOS sends typed text as keys, which are
     `Edit::Insert`). An editor that drops `Edit::Paste` to forbid pasting
     takes no typing from the Android keyboard. Its deletions and caret
-    moves come as Backspace, Delete and arrow keys, one per cluster, pressed
-    and released like a hardware keyboard's: `keyboard::listen()` and
-    `event::listen` see what the field does not capture, such as every
-    release (an autocorrection can be several ArrowLeft, Backspace and
-    ArrowRight releases). When a modifier is held on a hardware keyboard,
-    and for Select all (Ctrl+A), a key comes between two `ModifiersChanged`:
-    the first sets the key's modifiers, the second puts the window's back.
+    moves come as Backspace, Delete and arrow keys, one per cluster. The
+    caret moves inside the text it typed are ArrowLeft and ArrowRight with
+    no physical key (`Physical::Unidentified(NativeCode::Unidentified)`),
+    which a `text_editor` takes as `Motion::Previous` and `Motion::Next`, in
+    the order of the text, so a right-to-left line gets them right; a
+    `key_binding` that maps the arrows itself should hand those two to
+    `Binding::from_key_press`. The keys are pressed and released like a
+    hardware keyboard's: `keyboard::listen()` and `event::listen` see what
+    the field does not capture, such as every release (an autocorrection
+    can be several ArrowLeft, Backspace and ArrowRight releases). When a
+    modifier is held on a hardware keyboard, and for Select all (Ctrl+A), a
+    key comes between two `ModifiersChanged`: the first sets the key's
+    modifiers, the second puts the window's back.
   - When the input connection cannot be installed (before Android 8, or
     after a failure, with one warning in the log), the keyboard reaches the
     app through key events only: no composition, suggestions or swipe

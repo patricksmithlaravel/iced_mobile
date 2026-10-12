@@ -82,6 +82,16 @@ use crate::core::{
 /// key acts; `text_editor` takes Delete only with no text or "\u{7f}", and
 /// moves only on a key without text.
 ///
+/// The engine's own caret moves ([`edit::Key::Previous`] and
+/// [`edit::Key::Next`]) are ArrowLeft and ArrowRight with no physical key,
+/// `Physical::Unidentified(NativeCode::Unidentified)`, which winit's Android
+/// backend never reports (a key it cannot name keeps its Android key code).
+/// They go one cluster in the order of the text: `text_input`'s arrows
+/// always move that way, and `text_editor` takes these two as
+/// `Motion::Previous` and `Motion::Next`, where its arrows move on screen,
+/// backwards in a right-to-left line. The keyboard's own arrow keys keep
+/// their physical key and move as a hardware keyboard's do.
+///
 /// The keys are the engine's, which keep the field in step with the
 /// keyboard's text: a Backspace deletes one cluster and an arrow moves over
 /// one. So they are pressed with no modifier, whatever the hardware
@@ -113,42 +123,54 @@ fn events(
     modifiers: keyboard::Modifiers,
     mut push: impl FnMut(core::Event),
 ) {
-    use keyboard::key::{Code, Named, Physical};
+    use keyboard::key::{Code, Named, NativeCode, Physical};
 
     match edit {
         edit::Edit::Key(pressed) => {
             let named = keyboard::Key::Named;
+            let code = Physical::Code;
+
+            // The engine's own caret moves have no physical key.
+            let none = Physical::Unidentified(NativeCode::Unidentified);
 
             // The key, its physical key and its text.
-            let (key, code, text) = match pressed {
-                edit::Key::Backspace => {
-                    (named(Named::Backspace), Code::Backspace, Some("\u{8}"))
-                }
+            let (key, physical_key, text) = match pressed {
+                edit::Key::Backspace => (
+                    named(Named::Backspace),
+                    code(Code::Backspace),
+                    Some("\u{8}"),
+                ),
                 edit::Key::Delete => {
-                    (named(Named::Delete), Code::Delete, Some("\u{7f}"))
+                    (named(Named::Delete), code(Code::Delete), Some("\u{7f}"))
                 }
+                edit::Key::Previous => (named(Named::ArrowLeft), none, None),
+                edit::Key::Next => (named(Named::ArrowRight), none, None),
                 edit::Key::Left => {
-                    (named(Named::ArrowLeft), Code::ArrowLeft, None)
+                    (named(Named::ArrowLeft), code(Code::ArrowLeft), None)
                 }
                 edit::Key::Right => {
-                    (named(Named::ArrowRight), Code::ArrowRight, None)
+                    (named(Named::ArrowRight), code(Code::ArrowRight), None)
                 }
-                edit::Key::Up => (named(Named::ArrowUp), Code::ArrowUp, None),
+                edit::Key::Up => {
+                    (named(Named::ArrowUp), code(Code::ArrowUp), None)
+                }
                 edit::Key::Down => {
-                    (named(Named::ArrowDown), Code::ArrowDown, None)
+                    (named(Named::ArrowDown), code(Code::ArrowDown), None)
                 }
-                edit::Key::Home => (named(Named::Home), Code::Home, None),
-                edit::Key::End => (named(Named::End), Code::End, None),
+                edit::Key::Home => (named(Named::Home), code(Code::Home), None),
+                edit::Key::End => (named(Named::End), code(Code::End), None),
                 edit::Key::Enter => {
-                    (named(Named::Enter), Code::Enter, Some("\r"))
+                    (named(Named::Enter), code(Code::Enter), Some("\r"))
                 }
-                edit::Key::Tab => (named(Named::Tab), Code::Tab, Some("\t")),
+                edit::Key::Tab => {
+                    (named(Named::Tab), code(Code::Tab), Some("\t"))
+                }
                 edit::Key::Escape => {
-                    (named(Named::Escape), Code::Escape, Some("\u{1b}"))
+                    (named(Named::Escape), code(Code::Escape), Some("\u{1b}"))
                 }
                 edit::Key::SelectAll => (
                     keyboard::Key::Character(SmolStr::new("a")),
-                    Code::KeyA,
+                    code(Code::KeyA),
                     None,
                 ),
             };
@@ -160,7 +182,6 @@ fn events(
                 keyboard::Modifiers::empty()
             };
 
-            let physical_key = Physical::Code(code);
             let changed = with != modifiers;
 
             if changed {
@@ -821,7 +842,7 @@ mod tests {
 
     use crate::core::widget::operation::{focusable, text_input};
 
-    use keyboard::key::{Code, Named, Physical};
+    use keyboard::key::{Code, Named, NativeCode, Physical};
 
     /// A focusable text input's state.
     #[derive(Debug, Default)]
@@ -1564,7 +1585,7 @@ mod tests {
     /// A press and a release of `key` with `modifiers`.
     fn pressed(
         key: keyboard::Key,
-        code: Code,
+        physical_key: Physical,
         text: Option<&str>,
         modifiers: keyboard::Modifiers,
     ) -> [core::Event; 2] {
@@ -1572,7 +1593,7 @@ mod tests {
             core::Event::Keyboard(keyboard::Event::KeyPressed {
                 key: key.clone(),
                 modified_key: key.clone(),
-                physical_key: Physical::Code(code),
+                physical_key,
                 location: keyboard::Location::Standard,
                 modifiers,
                 text: text.map(SmolStr::new),
@@ -1581,7 +1602,7 @@ mod tests {
             core::Event::Keyboard(keyboard::Event::KeyReleased {
                 key: key.clone(),
                 modified_key: key,
-                physical_key: Physical::Code(code),
+                physical_key,
                 location: keyboard::Location::Standard,
                 modifiers,
             }),
@@ -1589,10 +1610,14 @@ mod tests {
     }
 
     /// A press and a release of a named key with no modifiers.
-    fn press(named: Named, code: Code, text: Option<&str>) -> [core::Event; 2] {
+    fn press(
+        named: Named,
+        physical_key: Physical,
+        text: Option<&str>,
+    ) -> [core::Event; 2] {
         pressed(
             keyboard::Key::Named(named),
-            code,
+            physical_key,
             text,
             keyboard::Modifiers::empty(),
         )
@@ -1602,44 +1627,86 @@ mod tests {
         core::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers))
     }
 
+    /// No physical key: the engine's own caret moves.
+    const NONE: Physical = Physical::Unidentified(NativeCode::Unidentified);
+
     /// Every key the engine presses but Select all, its named key, physical
     /// key and text.
-    const KEYS: [(edit::Key, Named, Code, Option<&str>); 11] = [
+    const KEYS: [(edit::Key, Named, Physical, Option<&str>); 13] = [
         (
             edit::Key::Backspace,
             Named::Backspace,
-            Code::Backspace,
+            Physical::Code(Code::Backspace),
             Some("\u{8}"),
         ),
         (
             edit::Key::Delete,
             Named::Delete,
-            Code::Delete,
+            Physical::Code(Code::Delete),
             Some("\u{7f}"),
         ),
-        (edit::Key::Enter, Named::Enter, Code::Enter, Some("\r")),
-        (edit::Key::Tab, Named::Tab, Code::Tab, Some("\t")),
+        (
+            edit::Key::Enter,
+            Named::Enter,
+            Physical::Code(Code::Enter),
+            Some("\r"),
+        ),
+        (
+            edit::Key::Tab,
+            Named::Tab,
+            Physical::Code(Code::Tab),
+            Some("\t"),
+        ),
         (
             edit::Key::Escape,
             Named::Escape,
-            Code::Escape,
+            Physical::Code(Code::Escape),
             Some("\u{1b}"),
         ),
-        (edit::Key::Left, Named::ArrowLeft, Code::ArrowLeft, None),
-        (edit::Key::Right, Named::ArrowRight, Code::ArrowRight, None),
-        (edit::Key::Up, Named::ArrowUp, Code::ArrowUp, None),
-        (edit::Key::Down, Named::ArrowDown, Code::ArrowDown, None),
-        (edit::Key::Home, Named::Home, Code::Home, None),
-        (edit::Key::End, Named::End, Code::End, None),
+        (edit::Key::Previous, Named::ArrowLeft, NONE, None),
+        (edit::Key::Next, Named::ArrowRight, NONE, None),
+        (
+            edit::Key::Left,
+            Named::ArrowLeft,
+            Physical::Code(Code::ArrowLeft),
+            None,
+        ),
+        (
+            edit::Key::Right,
+            Named::ArrowRight,
+            Physical::Code(Code::ArrowRight),
+            None,
+        ),
+        (
+            edit::Key::Up,
+            Named::ArrowUp,
+            Physical::Code(Code::ArrowUp),
+            None,
+        ),
+        (
+            edit::Key::Down,
+            Named::ArrowDown,
+            Physical::Code(Code::ArrowDown),
+            None,
+        ),
+        (
+            edit::Key::Home,
+            Named::Home,
+            Physical::Code(Code::Home),
+            None,
+        ),
+        (edit::Key::End, Named::End, Physical::Code(Code::End), None),
     ];
 
     #[test]
     fn keys_are_a_press_and_a_release_with_desktop_text() {
-        // The arrows, Home and End have none.
-        for (key, named, code, text) in KEYS {
+        // The arrows, Home and End have none. The engine's own caret moves
+        // are arrows with no physical key, which `text_editor` moves by in
+        // the order of the text; the keyboard's arrows keep theirs.
+        for (key, named, physical_key, text) in KEYS {
             assert_eq!(
                 convert(edit::Edit::Key(key)),
-                press(named, code, text),
+                press(named, physical_key, text),
                 "{key:?}"
             );
         }
@@ -1658,8 +1725,8 @@ mod tests {
             keyboard::Modifiers::LOGO,
             keyboard::Modifiers::SHIFT | keyboard::Modifiers::CTRL,
         ] {
-            for (key, named, code, text) in KEYS {
-                let [down, up] = press(named, code, text);
+            for (key, named, physical_key, text) in KEYS {
+                let [down, up] = press(named, physical_key, text);
 
                 assert_eq!(
                     convert_with(edit::Edit::Key(key), held),
@@ -1680,7 +1747,7 @@ mod tests {
         let shortcut = || {
             pressed(
                 keyboard::Key::Character(SmolStr::new("a")),
-                Code::KeyA,
+                Physical::Code(Code::KeyA),
                 None,
                 keyboard::Modifiers::COMMAND,
             )

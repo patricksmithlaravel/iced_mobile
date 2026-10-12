@@ -14,7 +14,11 @@
 //! the app's caret inside that text, counted in grapheme clusters, which is
 //! what `text_input` moves and deletes by. `text_editor`'s Backspace may
 //! delete by character instead, so a combining sequence the keyboard revises
-//! can come out wrong there.
+//! can come out wrong there. The engine moves that caret one cluster at a
+//! time in the order of the text ([`Key::Previous`] and [`Key::Next`], not
+//! the keyboard's arrows): `text_editor`'s arrows move on screen, backwards
+//! in a right-to-left line, so these reach it as moves of their own (see
+//! `events` in the parent module).
 //!
 //! The app segments its whole value into clusters, so a character that joins
 //! the cluster before it right after the origin joins the app's text before
@@ -143,6 +147,12 @@ pub(crate) enum Request {
 pub(crate) enum Key {
     Backspace,
     Delete,
+    /// The engine's own caret move: back one cluster in the order of the
+    /// text, whatever the direction of the line.
+    Previous,
+    /// The engine's own caret move: on one cluster in the order of the text.
+    Next,
+    /// The keyboard's arrow keys, which move as a hardware keyboard's do.
     Left,
     Right,
     Up,
@@ -459,7 +469,10 @@ impl Engine {
 
                 Request::None
             }
-            Key::Left
+            // The engine's own moves come from no key code.
+            Key::Previous
+            | Key::Next
+            | Key::Left
             | Key::Right
             | Key::Up
             | Key::Down
@@ -491,12 +504,13 @@ impl Engine {
         }
     }
 
-    /// Moves the app's caret to `position` (clusters after the origin).
+    /// Moves the app's caret to `position` (clusters after the origin), in
+    /// the order of the text.
     fn move_to(&mut self, position: usize, edits: &mut Vec<Edit>) {
         let key = if position < self.caret {
-            Key::Left
+            Key::Previous
         } else {
-            Key::Right
+            Key::Next
         };
 
         edits.extend(iter::repeat_n(
@@ -769,8 +783,12 @@ mod tests {
         caret: usize,
         preedit: Option<(String, Option<Range<usize>>)>,
         /// All of the value is selected (Select all), which the next text,
-        /// Backspace or Delete replaces and an arrow ends.
+        /// Backspace or Delete replaces and a move ends.
         selected: bool,
+        /// A right-to-left line of a `text_editor`: its arrows move on
+        /// screen, so Left goes on in the order of the text and Right back,
+        /// while the engine's own moves go in that order.
+        rtl: bool,
         /// While the last edits applied: the lowest caret, and the fewest
         /// clusters after it.
         low: usize,
@@ -789,6 +807,7 @@ mod tests {
                 caret,
                 preedit: None,
                 selected: false,
+                rtl: false,
                 low: caret,
             }
         }
@@ -813,11 +832,13 @@ mod tests {
                             self.value.clear();
                             self.caret = 0;
                         }
-                        Edit::Key(Key::Left) => {
+                        // A move ends the selection at its start or end,
+                        // in the order of the text, whatever the line.
+                        Edit::Key(Key::Left | Key::Previous) => {
                             self.caret = 0;
                             continue;
                         }
-                        Edit::Key(Key::Right) => {
+                        Edit::Key(Key::Right | Key::Next) => {
                             self.caret = self.value.len();
                             continue;
                         }
@@ -846,12 +867,12 @@ mod tests {
                             let _ = self.value.remove(self.caret);
                         }
                     }
-                    Edit::Key(Key::Left) => {
-                        self.caret = self.caret.saturating_sub(1);
-                    }
-                    Edit::Key(Key::Right) => {
-                        self.caret = (self.caret + 1).min(self.value.len());
-                    }
+                    Edit::Key(Key::Previous) => self.back(),
+                    Edit::Key(Key::Next) => self.on(),
+                    Edit::Key(Key::Left) if self.rtl => self.on(),
+                    Edit::Key(Key::Right) if self.rtl => self.back(),
+                    Edit::Key(Key::Left) => self.back(),
+                    Edit::Key(Key::Right) => self.on(),
                     Edit::Key(Key::Home) => self.caret = 0,
                     Edit::Key(Key::End) => self.caret = self.value.len(),
                     Edit::Key(
@@ -882,6 +903,16 @@ mod tests {
                 self.low = self.low.min(self.caret);
                 self.tail = self.tail.min(self.value.len() - self.caret);
             }
+        }
+
+        /// The caret back one cluster, in the order of the text.
+        fn back(&mut self) {
+            self.caret = self.caret.saturating_sub(1);
+        }
+
+        /// The caret on one cluster, in the order of the text.
+        fn on(&mut self) {
+            self.caret = (self.caret + 1).min(self.value.len());
         }
 
         /// A character typed on a hardware keyboard: `text_input` inserts it
@@ -1648,6 +1679,13 @@ mod tests {
             }
         }
 
+        /// The field is a right-to-left line of a `text_editor` (see
+        /// [`Field::rtl`]).
+        fn right_to_left(mut self) -> Self {
+            self.app.rtl = true;
+            self
+        }
+
         /// Runs `op` on the keyboard's side, delivers what it sent, and
         /// returns the edits the app got.
         fn run(&mut self, op: impl FnOnce(&mut Mirror)) -> Vec<Edit> {
@@ -2166,11 +2204,11 @@ mod tests {
         assert_eq!(
             edits(&mut engine, state(0, "aXYd", (4, 4), (-1, -1))),
             [
-                Edit::Key(Key::Left),
+                Edit::Key(Key::Previous),
                 Edit::Key(Key::Backspace),
                 Edit::Key(Key::Backspace),
                 commit("XY"),
-                Edit::Key(Key::Right),
+                Edit::Key(Key::Next),
             ]
         );
     }
@@ -2198,29 +2236,29 @@ mod tests {
     }
 
     #[test]
-    fn the_caret_follows_the_selection_with_arrows() {
+    fn the_caret_follows_the_selection_in_the_order_of_the_text() {
         let mut engine = Engine::new();
         let _ = edits(&mut engine, state(0, "hello", (5, 5), (-1, -1)));
 
         assert_eq!(
             edits(&mut engine, state(0, "hello", (2, 2), (-1, -1))),
-            keys(Key::Left, 3)
+            keys(Key::Previous, 3)
         );
         assert_eq!(
             edits(&mut engine, state(0, "hello", (1, 4), (-1, -1))),
-            keys(Key::Right, 2)
+            keys(Key::Next, 2)
         );
         // Inside a cluster, the caret rests before it.
         let mut engine = Engine::new();
         assert_eq!(
             edits(&mut engine, state(0, "e\u{301}", (1, 1), (-1, -1))),
-            [commit("e\u{301}"), Edit::Key(Key::Left)]
+            [commit("e\u{301}"), Edit::Key(Key::Previous)]
         );
         // Inside a surrogate pair too.
         let mut engine = Engine::new();
         assert_eq!(
             edits(&mut engine, state(0, "😀", (1, 1), (-1, -1))),
-            [commit("😀"), Edit::Key(Key::Left)]
+            [commit("😀"), Edit::Key(Key::Previous)]
         );
     }
 
@@ -2297,7 +2335,11 @@ mod tests {
 
         assert_eq!(
             edits(&mut engine, state(0, "abc", (1, 1), (-1, -1))),
-            [commit("abc"), Edit::Key(Key::Left), Edit::Key(Key::Left)]
+            [
+                commit("abc"),
+                Edit::Key(Key::Previous),
+                Edit::Key(Key::Previous)
+            ]
         );
         assert_eq!(edits(&mut engine, Message::Rebase { generation: 0 }), []);
         assert!(engine.is_idle());
@@ -2423,9 +2465,9 @@ mod tests {
                 }
             ),
             [
-                Edit::Key(Key::Left),
+                Edit::Key(Key::Previous),
                 Edit::Key(Key::Backspace),
-                Edit::Key(Key::Right)
+                Edit::Key(Key::Next)
             ]
         );
 
@@ -2440,9 +2482,9 @@ mod tests {
                 }
             ),
             [
-                keys(Key::Right, 3),
+                keys(Key::Next, 3),
                 vec![Edit::Key(Key::Delete)],
-                keys(Key::Left, 3)
+                keys(Key::Previous, 3)
             ]
             .concat()
         );
@@ -2517,7 +2559,7 @@ mod tests {
         // unpaired surrogate.
         assert_eq!(
             edits(&mut engine, state(0, "a\u{FFFD}b", (2, 2), (-1, -1))),
-            [commit("a\u{FFFD}b"), Edit::Key(Key::Left)]
+            [commit("a\u{FFFD}b"), Edit::Key(Key::Previous)]
         );
         assert_eq!(
             edits(&mut engine, state(0, "ab", (1, 1), (-1, -1))),
@@ -2593,13 +2635,48 @@ mod tests {
         assert_eq!(
             edits,
             [
-                Edit::Key(Key::Left),
+                Edit::Key(Key::Previous),
                 Edit::Key(Key::Backspace),
                 Edit::Key(Key::Backspace),
                 commit("he"),
-                Edit::Key(Key::Right),
+                Edit::Key(Key::Next),
             ]
         );
+    }
+
+    #[test]
+    fn the_engines_caret_moves_go_in_the_order_of_the_text() {
+        // A Hebrew line of a `text_editor`, whose arrows move on screen. The
+        // keyboard puts a period before the space it added after a word, in
+        // one batch edit (AOSP's LatinIME and Gboard do, also for a double
+        // space): the caret goes back over the space and on again in the
+        // order of the text, and the next word follows the period.
+        let mut harness = Harness::new("", "").right_to_left();
+
+        let _ = harness.run(|m| m.commit_text("שלום ", 1));
+        let edits = harness.run(|m| {
+            m.begin_batch_edit();
+            m.delete_surrounding_text(1, 0);
+            m.commit_text(". ", 1);
+            m.end_batch_edit();
+        });
+
+        assert_eq!(
+            edits,
+            [Edit::Key(Key::Previous), commit("."), Edit::Key(Key::Next)]
+        );
+        assert_eq!(harness.value(), "שלום. ");
+
+        let _ = harness.run(|m| m.commit_text("עוד", 1));
+        assert_eq!(harness.value(), "שלום. עוד");
+
+        // The keyboard's own arrow keys stay arrows, which move on screen
+        // there, as in an Android `EditText`: Right goes back.
+        assert_eq!(
+            harness.run(|m| m.send_key(KEYCODE_DPAD_RIGHT)),
+            [Edit::Key(Key::Right)]
+        );
+        assert_eq!(harness.app.caret, harness.app.value.len() - 1);
     }
 
     #[test]
@@ -3951,7 +4028,13 @@ mod tests {
         }
     }
 
-    fn simulate(seed: u64, steps: usize, secure: bool, cap: usize) -> Seen {
+    fn simulate(
+        seed: u64,
+        steps: usize,
+        secure: bool,
+        cap: usize,
+        rtl: bool,
+    ) -> Seen {
         let mut rng = Rng::new(seed);
         let before = random_text(&mut rng);
         let after = if rng.chance(50) {
@@ -3960,6 +4043,7 @@ mod tests {
             String::new()
         };
         let mut harness = Harness::with(&before, &after, secure, cap);
+        harness.app.rtl = rtl;
 
         for step in 0..steps {
             harness.label = format!("seed {seed} step {step}");
@@ -4015,7 +4099,7 @@ mod tests {
         for seed in 0..240 {
             let cap = [4096, 24, 64][seed as usize % 3];
 
-            seen.add(simulate(seed, 400, false, cap));
+            seen.add(simulate(seed, 400, false, cap, false));
         }
 
         // A request to forget meets an open batch edit more rarely, and a
@@ -4027,11 +4111,27 @@ mod tests {
     }
 
     #[test]
+    fn random_keyboards_keep_a_right_to_left_editor_in_step() {
+        // A right-to-left line of a `text_editor`, whose arrows move on
+        // screen: the engine's own moves go in the order of the text.
+        let mut seen = Seen::default();
+
+        for seed in 2000..2060 {
+            let cap = [4096, 64][seed as usize % 2];
+
+            seen.add(simulate(seed, 300, false, cap, true));
+        }
+
+        seen.assert_reached(20, &["batched forgets", "known joins"]);
+        seen.assert_reached(1, &["known joins"]);
+    }
+
+    #[test]
     fn random_keyboards_on_a_secure_field_keep_the_app_in_step() {
         let mut seen = Seen::default();
 
         for seed in 1000..1060 {
-            seen.add(simulate(seed, 300, true, 4096));
+            seen.add(simulate(seed, 300, true, 4096, false));
         }
 
         // A composition reaches the app as typed text, never as a preedit
