@@ -201,20 +201,23 @@ pub(crate) fn disable(window: winit::window::WindowId) -> bool {
 /// as `operate` finds it by running an operation on the window's interface,
 /// the next redraw that still asks for the keyboard shows it again, which
 /// brings back a keyboard the user hid. A press elsewhere leaves it hidden:
-/// a `text_input` gives up the focus then, but a `text_editor`, which
-/// ignores touch, keeps it. True when the window is to redraw for that.
+/// the field that had the focus gives it up (a `text_input` does, and a
+/// `text_editor` does on Android and iOS). True when the window is to redraw
+/// for that.
 ///
 /// The focus is the one after the press, which may have moved it to
 /// another field, and the bounds are those the press was hit-tested
 /// against. A press on the focused field holds the keyboard's compositions
 /// back from it until that redraw, since the field may be a password field
-/// (see [`Feed::refocused`]).
+/// (see [`Feed::refocused`]). That holds while the keyboard is hidden too:
+/// the tap decides the field's purpose then as well, so a composition after
+/// it is not held back until a second tap.
 pub(crate) fn touched(
     events: &[core::Event],
     cursor: mouse::Cursor,
     operate: impl FnOnce(&mut dyn Operation),
 ) -> bool {
-    if !SESSION.with_borrow(Session::is_shown) {
+    if !SESSION.with_borrow(Session::is_installed) {
         return false;
     }
 

@@ -87,11 +87,11 @@ impl InputMethod {
     /// Merges two [`InputMethod`] strategies, prioritizing the first one when both open.
     ///
     /// On Android and iOS, the first one becomes [`Purpose::Secure`] when the
-    /// second one is: a `text_editor` ignores touch there, so one focused from
-    /// code keeps the focus when the user taps a password field, and both ask
-    /// for the keyboard. The keyboard is then set up for a password, so that it
-    /// neither suggests nor learns what is typed. Elsewhere the first one is
-    /// kept as it is:
+    /// second one is, while both ask for the keyboard: a `text_editor` focused
+    /// from code gives up the focus when the user taps elsewhere there (a touch
+    /// is the only press), so this covers the frames in which both still ask.
+    /// The keyboard is then set up for a password, so that it neither suggests
+    /// nor learns what is typed. Elsewhere the first one is kept as it is:
     /// ```
     /// # use iced_core::input_method::{InputMethod, Purpose, Preedit};
     /// # use iced_core::{Point, Rectangle, Size};

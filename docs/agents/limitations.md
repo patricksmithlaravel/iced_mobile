@@ -250,8 +250,9 @@ this file in the commit that fixes or finds a limitation.
     it is hidden and shown again; it types as usual. A keyboard shown while
     none was up is set up for its field at once, without that label. The iOS
     keyboard shows no suggestions in any field anyway (above). On both, a
-    `text_editor` focused from code that also takes the keyboard (see
-    `text_editor` below) leaves the keyboard set up for the password field.
+    `text_editor` focused from code gives up its focus when the user taps
+    outside it (see `text_editor` below), so what the keyboard types, a
+    password included, reaches the field that has the focus only.
   - The keyboard covers fields in the lower half of the screen unless the
     root is padded with `SafeArea::padding` from `iced::mobile::safe_area()`,
     whose bottom rises with it, as the template's is. On Android it rises
@@ -272,7 +273,9 @@ this file in the commit that fixes or finds a limitation.
     that text as the last field's keyboard, which may suggest and learn
     words, and what it composed of it reaches the password field as typed
     text, never drawn in clear. A hardware keyboard's Enter, Tab and Escape
-    count the same way. The app may move the focus after such a key later
+    count the same way, and one that waited behind a keyboard key's turn
+    holds even a focus that turn moved, until a tap, since its own message
+    may still move the focus. The app may move the focus after such a key later
     still, from a subscription (`keyboard::listen`, which is how an app takes
     Tab: `text_input` ignores it) or a task, and that message arrives after
     the event loop turned again. So no redraw decides which field a
@@ -308,16 +311,13 @@ this file in the commit that fixes or finds a limitation.
   `mouse_area` and `pick_list` take them. There is no momentum. Let text
   fill most of each list row and keep its buttons small, as the template's
   list does, or leave gaps between rows.
-- **`text_editor`, rich-text links and `pick_list` menus ignore touch.** A
-  tap cannot focus a `text_editor` (focusing it from code works), nor take
-  the focus away from one: a `text_editor` focused from code stays focused
-  when the user taps a `text_input`, and both then take what is typed, so
-  a password typed into a secure field shows in clear in the editor. The
-  keyboard is still set up for the password field, so it neither suggests
-  nor learns the password. Move the focus away from the editor from code
-  (`operation::focus` on another widget unfocuses the rest), for example
-  from a Done button. Links in
-  `rich_text` and `markdown` cannot be tapped, and `pick_list` and
+- **`text_editor`, rich-text links and `pick_list` menus ignore touch,
+  except that a touch takes the focus from a `text_editor`.** A tap cannot
+  focus a `text_editor` (focusing it from code works). A `text_editor`
+  focused from code gives up the focus when the user taps anywhere outside
+  it, as a `text_input` does, so what is typed, a password included, goes to
+  the field that has the focus only. A Done button needs no code for it.
+  Links in `rich_text` and `markdown` cannot be tapped, and `pick_list` and
   `combo_box` menus select on touch-down, so a long menu cannot be
   scrolled. Use `text_input`, buttons for links, and short menus.
 - **Hover sticks after a tap.** A touch moves iced's cursor and nothing moves

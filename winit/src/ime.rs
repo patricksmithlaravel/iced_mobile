@@ -300,9 +300,9 @@ fn presses(events: &[core::Event], cursor: mouse::Cursor) -> Vec<Point> {
 
 /// An operation that finds where the focused widgets are drawn: their
 /// bounds, moved by the scroll offset of each scrollable around them and cut
-/// to what those scrollables show. Every focused widget counts: a
-/// `text_editor` focused from code keeps the focus when the user taps a
-/// `text_input`.
+/// to what those scrollables show. Every focused widget counts, a
+/// `text_editor` focused from code among them, until a press outside it takes
+/// its focus (on Android and iOS, see the widget).
 #[cfg(any(
     all(target_os = "android", feature = "android-native-activity"),
     test

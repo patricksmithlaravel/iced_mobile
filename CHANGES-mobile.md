@@ -401,10 +401,15 @@ Text input on Android, and secure fields on Android and iOS:
   to another field, with the keyboard up, the keyboard there can label its numbers key ".?123"
   instead of "123" until its numbers are shown once or it is hidden and shown again; it types as
   usual. The iOS keyboard shows no suggestions in any field anyway. Before, the keyboard was not
-  told that a field held a password. When a `text_editor` focused from code also takes the keyboard
-  next to a password field (a tap does not take its focus), the keyboard is set up for the password
-  field: on Android and iOS, `InputMethod::merge` makes the merged request secure when any of the
-  requests is.
+  told that a field held a password. A `text_editor` focused from code now gives up its focus when
+  the user taps outside it, on Android and iOS, as a `text_input` does: before, it kept the focus
+  when the user tapped a password field, so what the keyboard typed, the password included, went to
+  the editor in clear. Until that tap, the keyboard is set up for the password field, and on
+  Android and iOS, `InputMethod::merge` makes the merged request secure when any of the requests is.
+  A hardware Enter, Tab or Escape that waited behind a keyboard key's turn holds a focus the turn
+  moved until a tap, as the keyboard's own key does. A tap on the focused field while the keyboard
+  is hidden decides the field's purpose too, so a composition after it is not held back until a
+  second tap.
 - On Android and iOS, `text_editor` draws no placeholder while it shows a preedit, as `text_input`
   does, so a word the Android keyboard composes into an empty editor is not drawn over its
   placeholder (iOS sends no preedit). The desktop and the web draw it as upstream does.
