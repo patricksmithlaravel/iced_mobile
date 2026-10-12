@@ -148,11 +148,14 @@ pub enum Motion {
     /// of the previous line: left in a left-to-right line and right in a
     /// right-to-left one, where [`Motion::Left`] moves left on screen.
     ///
-    /// On Android, `text_editor` moves by this and [`Motion::Next`] for the
+    /// Android only: `text_editor` moves by this and [`Motion::Next`] for the
     /// system keyboard's own caret moves, which go in the order of the text.
+    /// Elsewhere [`Motion`] has upstream's variants only.
+    #[cfg(target_os = "android")]
     Previous,
     /// Move on one grapheme cluster in the order of the text, or to the start
-    /// of the next line (see [`Motion::Previous`]).
+    /// of the next line (see [`Motion::Previous`]). Android only.
+    #[cfg(target_os = "android")]
     Next,
 }
 
@@ -176,15 +179,17 @@ impl Motion {
             | Self::WordLeft
             | Self::Home
             | Self::PageUp
-            | Self::DocumentStart
-            | Self::Previous => Direction::Left,
+            | Self::DocumentStart => Direction::Left,
             Self::Right
             | Self::Down
             | Self::WordRight
             | Self::End
             | Self::PageDown
-            | Self::DocumentEnd
-            | Self::Next => Direction::Right,
+            | Self::DocumentEnd => Direction::Right,
+            #[cfg(target_os = "android")]
+            Self::Previous => Direction::Left,
+            #[cfg(target_os = "android")]
+            Self::Next => Direction::Right,
         }
     }
 }

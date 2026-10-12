@@ -302,15 +302,17 @@ Text input on Android, and secure fields on Android and iOS:
   unless the input method takes them: while a field asks for the keyboard, one that composes a
   hardware keyboard's letters (CJK input methods) types them into the field as commits and
   preedits, not `KeyPressed` events.
-- `text::editor::Motion` has two new variants, `Previous` and `Next`: one grapheme cluster back and
-  on in the order of the text, or across a line break, whatever the direction of the line, where
-  `Left` and `Right` move on screen. An exhaustive `match` on `Motion` needs arms for them. On
-  Android, the shell presses the keyboard's caret moves inside the text it typed as ArrowLeft and
-  ArrowRight with no physical key (`Physical::Unidentified(NativeCode::Unidentified)`), and
-  `text_editor` (`Binding::from_key_press`) takes those as `Previous` and `Next`, so an edit the
-  keyboard makes before the caret, such as the period it puts before the space after a word, lands
-  in the right place in a Hebrew or Arabic line too. `text_input` moves in the order of the text
-  for any arrow. The keyboard's own arrow keys keep their physical key and move on screen.
+- **Android:** `text::editor::Motion` has two new variants there, `Previous` and `Next`: one
+  grapheme cluster back and on in the order of the text, or across a line break, whatever the
+  direction of the line, where `Left` and `Right` move on screen. An exhaustive `match` on `Motion`
+  in an Android build needs arms for them; on every other target `Motion` is upstream's, so code
+  written against crates.io `iced_core` 0.14 builds there unchanged. The shell presses the
+  keyboard's caret moves inside the text it typed as ArrowLeft and ArrowRight with no physical key
+  (`Physical::Unidentified(NativeCode::Unidentified)`), and `text_editor`
+  (`Binding::from_key_press`) takes those as `Previous` and `Next`, so an edit the keyboard makes
+  before the caret, such as the period it puts before the space after a word, lands in the right
+  place in a Hebrew or Arabic line too. `text_input` moves in the order of the text for any arrow.
+  The keyboard's own arrow keys keep their physical key and move on screen.
 - **Android:** the keyboard's editing panel (Gboard's text editing tools) works in fields: Select all
   selects the field's text, as the field's own Ctrl+A does, and Paste inserts the clipboard's text
   at the caret without its line breaks and tabs. Cut and Copy take what the keyboard selected in the

@@ -854,7 +854,9 @@ fn to_motion(motion: Motion) -> cosmic_text::Motion {
         Motion::PageDown => cosmic_text::Motion::PageDown,
         Motion::DocumentStart => cosmic_text::Motion::BufferStart,
         Motion::DocumentEnd => cosmic_text::Motion::BufferEnd,
+        #[cfg(target_os = "android")]
         Motion::Previous => cosmic_text::Motion::Previous,
+        #[cfg(target_os = "android")]
         Motion::Next => cosmic_text::Motion::Next,
     }
 }
@@ -899,6 +901,36 @@ mod tests {
             .join("\n")
     }
 
+    /// One cluster back or on in the order of the text: `Motion::Previous`
+    /// and `Motion::Next` on Android, where they exist; elsewhere the
+    /// cosmic-text motions they become, as `Action::Move` performs them with
+    /// no selection.
+    fn step(editor: &mut Editor, forward: bool) {
+        #[cfg(target_os = "android")]
+        editor.perform(Action::Move(if forward {
+            Motion::Next
+        } else {
+            Motion::Previous
+        }));
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut font_system =
+                text::font_system().write().expect("Write font system");
+
+            editor.with_internal_mut(|internal| {
+                internal.editor.action(
+                    font_system.raw(),
+                    cosmic_text::Action::Motion(if forward {
+                        cosmic_text::Motion::Next
+                    } else {
+                        cosmic_text::Motion::Previous
+                    }),
+                );
+            });
+        }
+    }
+
     #[test]
     fn previous_and_next_move_in_the_order_of_the_text() {
         // A period put before the space after a word, then the next word
@@ -921,11 +953,11 @@ mod tests {
                     selection: None,
                 });
 
-                editor.perform(Action::Move(Motion::Previous));
+                step(&mut editor, false);
                 editor.perform(Action::Edit(Edit::Paste(Arc::new(
                     String::from("."),
                 ))));
-                editor.perform(Action::Move(Motion::Next));
+                step(&mut editor, true);
                 editor.perform(Action::Edit(Edit::Paste(Arc::new(
                     String::from("next"),
                 ))));
