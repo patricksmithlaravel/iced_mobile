@@ -159,6 +159,17 @@ smoke_linux() {
     chmod +x "$appimage"
     Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >"$results/xvfb.log" 2>&1 &
     xvfb=$!
+    # The app opens the display as it starts: wait until Xvfb listens.
+    local waited=0
+    while [ ! -S /tmp/.X11-unix/X99 ]; do
+        if ! kill -0 "$xvfb" 2>/dev/null; then
+            cat "$results/xvfb.log"
+            fail "Xvfb exited before it listened on :99"
+        fi
+        [ "$waited" -lt 30 ] || fail "Xvfb did not listen on :99 within 30s"
+        sleep 1
+        waited=$((waited + 1))
+    done
     # No FUSE in a container: the runtime extracts itself and runs AppRun.
     # setsid gives the app its own process group, ended as a whole below
     # (--wait keeps $! alive as long as the app, should setsid fork); both
