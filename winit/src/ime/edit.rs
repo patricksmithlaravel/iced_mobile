@@ -236,11 +236,10 @@ impl Engine {
     /// preedit, so a field submitted by Enter has the word being composed,
     /// and yields. An arrow, Home or End key, and Select all, commit it too.
     /// After any of them the Java side rebases when the mirror held text,
-    /// and an empty
-    /// mirror leaves the engine idle, so either way the origin follows the
-    /// app's caret, with no new generation: what the keyboard sends after
-    /// the key counts. A message of another generation predates a reset the
-    /// caller made: it is dropped.
+    /// and an empty mirror leaves the engine idle, so either way the origin
+    /// follows the app's caret, with no new generation: what the keyboard
+    /// sends after the key counts. A message of another generation predates
+    /// a reset the caller made: it is dropped.
     pub(crate) fn apply(
         &mut self,
         message: Message,
@@ -278,8 +277,8 @@ impl Engine {
                 if generation == self.generation {
                     self.clear_preedit(edits);
 
-                    // The origin moves past what the app's caret follows,
-                    // which the keyboard typed.
+                    // The origin moves to the app's caret, past what the
+                    // keyboard typed before it.
                     let typed = prefix(&self.base, self.caret);
                     self.context = context(&self.context, typed);
 

@@ -37,12 +37,11 @@
 //!   while the keyboard has typed into the field, or while the engine knows
 //!   the end of the field's text before the origin, which a caret moved
 //!   elsewhere would make wrong ([`Engine::follows_caret`]). What the
-//!   keyboard sent
-//!   before it belongs before it, so [`operate`] applies the queue first;
-//!   when that gives the field edits, the operation waits: the event loop
-//!   replays an `AboutToWait`, which hands the field the edits and builds
-//!   the views again, then runs it, and the operations made meanwhile after
-//!   it ([`schedule`], [`deferred`]). The operation then runs through a
+//!   keyboard sent before it belongs before it, so [`operate`] applies the
+//!   queue first; when that gives the field edits, the operation waits: the
+//!   event loop replays an `AboutToWait`, which hands the field the edits
+//!   and builds the views again, then runs it, and the operations made
+//!   meanwhile after it ([`schedule`], [`deferred`]). The operation then runs through a
 //!   [`Watch`](super::Watch), which records what it moves of the focus and
 //!   of the carets of the fields that have it, and [`operated`] ends the
 //!   session: a focus moved to another widget is handled as [`disable`]
