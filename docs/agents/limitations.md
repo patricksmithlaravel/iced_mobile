@@ -150,22 +150,28 @@ this file in the commit that fixes or finds a limitation.
   `icm run ios-sim` and `icm run android`.
 - **iced's `sysinfo` feature breaks iOS builds** once libc is 0.2.190 or
   newer (sysinfo 0.33 calls macOS-only functions). Leave it off for iOS.
-- **`icm run desktop` redacts only the secrets it knows.** A desktop app's
-  output goes through a log collector that redacts the values of the
-  secret-named variables the app started with, and of its `--env` pairs, as it
-  writes the live files. A secret the app gets some other way (a file, a
-  request) and logs is not known to icm, and is written as the app wrote it,
-  as on every platform. Hand such a secret to `icm run desktop --env NAME=…`.
+- **`icm run desktop` redacts only the secrets it knows.** A desktop app's output goes through a log
+  collector that redacts the values of the secret-named variables the app started with, and of its
+  `--env` pairs, as it writes the live files. That holds when the app replaces itself with the same
+  program and another value of an inherited variable: the original value was redacted when the app
+  logged it, and so is a rotated value the app inherited too. A secret the app gets some other way
+  (a file, a request, a value it makes itself) and logs is not known to icm, and is written as the
+  app wrote it, as on every platform. Hand such a secret to `icm run desktop --env NAME=…`. The
+  collector also misses a secret that the app writes with JSON `\u` escapes inside a JSON string
+  that is still open when the collector writes part of its line (after its idle wait, or past 64
+  KiB), if more text follows the secret in that line than the collector holds back.
 - **`icm` finds a base64 encoding of a secret only within one run of base64 characters.** A line
   break, a space or any other character outside base64 ends a run, and so does a percent escape
   other than `%2B`, `%2F` or `%3D`. An encoding that a line wrap splits (MIME or PEM output, 64 or
   76 characters a line) is written as the app wrote it.
 - **A desktop session from before the log collector cannot redact every
   inherited secret.** Its live `app.stdout` and `app.stderr` hold the app's
-  output raw. `icm logs desktop` learns the secret-named variables the app
-  inherited from `icm run desktop`'s shell by reading the running app's
-  environment, and a variable counts as known by its name. An app that
-  replaces itself with the same program and another value of that variable
-  makes `logs` print the original value, and after `icm stop` the raw files
-  keep a token icm never learned. Hand a secret the app logs to `icm run
-  desktop --env NAME=…`, which every later command redacts from any shell.
+  output raw. While the app runs, `icm logs desktop` learns the secret-named
+  variables the app inherited from `icm run desktop`'s shell by reading the
+  running app's environment, and a variable counts as known by its name. An
+  app that replaces itself with the same program and another value of that
+  variable makes `logs`, from a shell without the variable, print the original
+  value from those files, and after `icm stop` they keep it. Once such an app
+  has ended, `logs` warns `desktop.logs.secret_unknown` and prints neither
+  value. Hand a secret the app logs to `icm run desktop --env NAME=…`, which
+  every later command redacts from any shell.

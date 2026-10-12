@@ -16,9 +16,15 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   output while it ran, so a `logs` from a shell that could not learn the value printed it, and an
   app that had ended by itself kept it in them. `logs` of such a session warns nothing about
   inherited secrets, and reads its live files as they are. A session from before this change keeps
-  the old guard, and
-  `docs/agents/limitations.md` says what the collector does not redact. `icm stop` ends the
-  collector with its app, after it has written the app's last output.
+  the old guard, and `docs/agents/limitations.md` says what the collector does not redact. `icm
+  stop` ends the collector with its app, after it has written the app's last output.
+- `icm logs` (with or without `--raw`), `icm shot` and `icm stop` from a shell without an
+  inherited secret no longer print or keep its value when the app logged it, then replaced its
+  process with the same program and another value of the variable. The collector wrote the original
+  value redacted, and a rotated value the app inherited is redacted too. Before, `logs` learned the
+  new value from the running app and printed the original one from the raw live files. A session
+  from before the collector keeps that gap while its app runs; once the app has ended, `logs` warns
+  and prints neither value.
 - `icm` redacts the base64 of a secret as it redacts the secret. Before, the base64 of an inherited
   or handed secret reached the desktop live files, `app.log`, `logs.ndjson`, `result.json`,
   `events.ndjson` and `logs` output unredacted: a whole value, a `Basic` header's (the secret after
@@ -90,10 +96,11 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   `result.json` and `events.ndjson` with no warning. Now an inherited secret counts as known only
   when the read returned a variable of its name, and a process that runs another program than the
   one `icm run` launched is not read at all; the others warn `desktop.logs.secret_unknown` and
-  `logs` reads the run's redacted copies. What icm cannot know: an app that replaces itself with the
-  same program and another value of a same-named variable still counts as known by name, so `logs`
-  prints the original value, and after `stop` the app's raw live `app.stdout` and `app.stderr`
-  keep a token icm never learned. Hand a secret that matters to `icm run desktop --env NAME=…`.
+  `logs` reads the run's redacted copies. What icm cannot know, in a session from before the log
+  collector: an app that replaces itself with the same program and another value of a same-named
+  variable still counts as known by name while it runs, so `logs` prints the original value, and
+  after `stop` the app's raw live `app.stdout` and `app.stderr` keep a token icm never learned. Hand
+  a secret that matters to `icm run desktop --env NAME=…`.
 - Desktop session records keep only the protocol fields of the app's `ready` event, redacted, so a
   secret an app put in a field of its own no longer stays in them.
 - `icm stop --shutdown` leaves a managed simulator or emulator running when it cannot read which

@@ -57,10 +57,12 @@ pixels of the `screen.preview.png` you looked at; the result's `screen` gives th
   the secret values given with `--env` in a `secrets.json` (mode 0600) there, so later commands
   redact them too. A desktop app also inherits icm's environment, and its collector redacts those
   values from the live files, so icm keeps none of them in a file. A session from an older icm
-  (before the collector) has no such redaction: if the app inherited one and ended by itself,
-  `icm logs desktop` shows only the run's redacted copies and warns
-  `desktop.logs.secret_unknown`, whatever its own shell holds, so hand a secret the app logs with
-  `--env`.
+  (before the collector) has no such redaction: while its app runs, `icm logs desktop` can print an
+  inherited value the app logged, once the app has replaced itself with the same program and
+  another value of that variable; once the app has ended, `icm logs desktop` shows only the run's
+  redacted copies and warns `desktop.logs.secret_unknown`, whatever its own shell holds. So hand a
+  secret the app logs with `--env`, which every later command redacts (the known limitations below
+  say what else applies).
 - Flows: `tests/flows/*.ice`. A header, a `-----` line, then one instruction per line:
   ```
   viewport: 402x874
