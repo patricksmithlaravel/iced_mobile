@@ -142,8 +142,11 @@ this file in the commit that fixes or finds a limitation.
     without suggestions and is asked not to learn what is typed, and what
     it composes there reaches the field as typed text, so it is never drawn
     in clear. On iOS the view tells UIKit that the field is secure text
-    entry, which has not been seen on a simulator or device yet; the iOS
-    keyboard shows no suggestions in any field anyway (above). On both, a
+    entry: on the iOS 27.0 Simulator the keyboard then has no emoji or
+    dictation key, and it switches to and from that keyboard as the focus
+    moves between a password field and another (a physical iPhone has not
+    been tried). The iOS keyboard shows no suggestions in any field anyway
+    (above). On both, a
     `text_editor` focused from code that also takes the keyboard (see
     `text_editor` below) leaves the keyboard set up for the password field.
   - The keyboard covers fields in the lower half of the screen unless the

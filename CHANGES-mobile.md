@@ -307,8 +307,10 @@ Text input on Android, and secure fields on Android and iOS:
   `Window::set_ime_purpose` (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers
   `isSecureTextEntry` and turns off autocorrection, spell checking, auto-capitalisation and smart
   punctuation for a password, the terminal purpose turns off the same without secure entry, and a
-  changed purpose reloads the keyboard that is shown. What that changes on iOS has not been seen
-  on a simulator or device yet: the keyboard there shows no suggestions in any field anyway. Before,
+  changed purpose reloads the keyboard that is shown. On the iOS 27.0 Simulator the password
+  keyboard has no emoji or dictation key, and the keyboard switches to and from it as the focus
+  moves between a password field and another; a physical iPhone has not been tried. The iOS
+  keyboard shows no suggestions in any field anyway. Before,
   the keyboard was not told that a field held a password. When a `text_editor` focused from code
   also takes the keyboard next to a password field (a tap does not take its focus), the keyboard is
   set up for the password field: on Android and iOS, `InputMethod::merge` makes the merged request
