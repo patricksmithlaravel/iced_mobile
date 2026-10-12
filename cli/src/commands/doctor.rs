@@ -63,19 +63,30 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
     };
     let mut dir = project_dir(project.as_ref());
 
+    // The platforms named on the command line, else the project's
+    // `[app] platforms`, or the default set while no project resolves. It
+    // is worked out again when a fix lets the project resolve.
     let explicit = !args.platforms.is_empty();
-    let mut platforms = if explicit {
-        args.platforms.clone()
-    } else {
-        doctor::default_platforms(project.as_ref())
+    let platforms_for = |project: Option<&Project>| -> Vec<Platform> {
+        let mut platforms = if explicit {
+            args.platforms.clone()
+        } else {
+            doctor::default_platforms(project)
+        };
+        platforms.sort();
+        platforms.dedup();
+        platforms
     };
-    platforms.sort();
-    platforms.dedup();
+    let mut platforms = platforms_for(project.as_ref());
 
     let env = ctx.env.clone();
     let downloads = ctx.global.yes && !ctx.global.offline;
 
-    let gather = |ctx: &Ctx, project: Option<&Project>, dir: &Path| -> Vec<Requirement> {
+    let gather = |ctx: &Ctx,
+                  project: Option<&Project>,
+                  dir: &Path,
+                  platforms: &[Platform]|
+     -> Vec<Requirement> {
         let probe = Probe {
             ctx,
             host: &host,
@@ -84,10 +95,10 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
             dir,
             explicit,
         };
-        doctor::gather(&probe, &platforms)
+        doctor::gather(&probe, platforms)
     };
 
-    let mut requirements = gather(ctx, project.as_ref(), &dir);
+    let mut requirements = gather(ctx, project.as_ref(), &dir, &platforms);
 
     if ctx.dry_run() {
         let mut plan = Plan::new();
@@ -148,16 +159,20 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
                     .as_ref()
                     .is_some_and(|problem| matches!(problem.fix.by, By::Doctor | By::DoctorYes))
             {
-                match ctx.project() {
+                match ctx.project_unreported() {
                     Ok(resolved) => {
                         project = Some(resolved.clone());
                         dir = project_dir(project.as_ref());
                         config_problem = None;
+                        // The project's `[app] platforms` now apply: the
+                        // default set checked while it did not resolve
+                        // would otherwise go on being checked.
+                        platforms = platforms_for(project.as_ref());
                     }
                     Err(error) => config_problem = Some(error),
                 }
             }
-            requirements = gather(ctx, project.as_ref(), &dir);
+            requirements = gather(ctx, project.as_ref(), &dir, &platforms);
         }
     }
 

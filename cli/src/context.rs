@@ -92,6 +92,18 @@ impl Ctx {
     /// package. Attaches the run directory under `<target>/icm` and sets the
     /// result's `app` and `inputs`.
     pub fn project(&mut self) -> Result<&Project> {
+        self.resolve_project(true)
+    }
+
+    /// [`Ctx::project`] for a caller that reports the failure itself and may
+    /// ask again (doctor, after each fix round): the errors after the first
+    /// are not recorded as checks, so a failure that repeats is not listed
+    /// once per round.
+    pub fn project_unreported(&mut self) -> Result<&Project> {
+        self.resolve_project(false)
+    }
+
+    fn resolve_project(&mut self, report: bool) -> Result<&Project> {
         if self.project.is_none() {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             match resolve(
@@ -112,7 +124,13 @@ impl Ctx {
                     if let Some(root) = failure.root {
                         let _ = self.rep.attach(&root);
                     }
-                    return Err(self.report_all(failure.errors));
+                    if report {
+                        return Err(self.report_all(failure.errors));
+                    }
+                    let first = failure.errors.into_iter().next().unwrap_or_else(|| {
+                        IcmError::new(CheckId::InternalBug, "an empty error list was reported")
+                    });
+                    return Err(first);
                 }
             }
         }
