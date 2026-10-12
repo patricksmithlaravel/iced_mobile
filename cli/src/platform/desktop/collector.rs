@@ -487,15 +487,14 @@ fn redact_line(line: &[u8], secrets: &[String]) -> Vec<u8> {
 /// and every form is at most as long as the longest in `secrets`. An escaped
 /// byte takes three bytes, so a match is at most three times that length. A
 /// base64 encoding of a secret, each character percent-escaped and its padding
-/// included, is at most `4 * longest + 22` bytes ([`process::redact_text`]
-/// replaces it): a secret of `n` bytes spans at most `(n + 4) / 3` groups of
-/// four characters, three escaped bytes each, and the padding is at most six.
+/// included, is at most [`process::base64_bound`] bytes ([`process::redact_text`]
+/// replaces it).
 fn holdback(secrets: &[String]) -> usize {
     secrets
         .iter()
         .map(String::len)
         .max()
-        .map_or(0, |longest| 4 * longest + 22)
+        .map_or(0, process::base64_bound)
 }
 
 /// Where a UTF-8 character that the end of `bytes` cuts short begins, or the

@@ -1,15 +1,15 @@
 ## How icm detects it
 
-A release build inherits icm's environment, so an app that reads a variable
-at build time (`option_env!("API_TOKEN")`, `env!`, a build script) bakes its
-value into the binary, the wasm or the site. Before it writes
-`artifacts.json`, `icm release` searches every file it ships (the files
-`artifacts.json` lists, inside a `.app` or the web `site/` too) and the
-binaries cargo built for the release (an `.ipa`, `.aab`, `.deb`, `.msi` or
-AppImage compresses them) for the value of each secret-named variable in its
-environment (`*TOKEN*`,
-`*KEY*`, `*SECRET*`, `*PASS*`, `*PRIVATE*`, 6 bytes or more, not a path):
-raw, JSON-escaped and percent-encoded. A value found is a FAIL, and the
+A release build inherits icm's environment, so an app that reads a variable at
+build time (`option_env!("API_TOKEN")`, `env!`, a build script) bakes its value
+into the binary, the wasm or the site. Before it writes `artifacts.json`,
+`icm release` searches every file it ships (the files `artifacts.json` lists,
+inside a `.app` or the web `site/` too) and the binaries cargo built for the
+release (an `.ipa`, `.aab`, `.deb`, `.msi` or AppImage compresses them) for the
+value of each secret-named variable in its environment (`*TOKEN*`, `*KEY*`,
+`*SECRET*`, `*PASS*`, `*PRIVATE*`, 6 bytes or more, not a path): raw,
+JSON-escaped, percent-encoded and in base64 (either alphabet, at any position
+in its group, as the redaction finds it). A value found is a FAIL, and the
 release is not uploadable; under `--sign none` it is a WARN. The detail names
 the variable and the files, never the value.
 

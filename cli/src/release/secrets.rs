@@ -8,11 +8,12 @@
 //! The release searches every file it ships (each file `artifacts.json`
 //! lists, inside a `.app` or the web `site/` too) and the binaries cargo
 //! built for it (before an `.ipa`, `.aab`, `.deb`, `.msi` or AppImage
-//! compresses them) for each value raw, JSON-escaped and percent-encoded
-//! ([`crate::process::secret_forms`]). icm's own `artifacts.json`,
-//! `UPLOAD.md` and `upload.sh`, which name variables and keychain profiles,
-//! are not among them. `icm verify` searches the listed files, or the
-//! artifact, with the variables of its own environment.
+//! compresses them) for each value raw, JSON-escaped, percent-encoded
+//! ([`crate::process::secret_forms`]) and in base64, which the redaction
+//! finds too ([`crate::process::holds_base64_secret`]). icm's own
+//! `artifacts.json`, `UPLOAD.md` and `upload.sh`, which name variables and
+//! keychain profiles, are not among them. `icm verify` searches the listed
+//! files, or the artifact, with the variables of its own environment.
 //!
 //! A value found is a FAIL and the release is not uploadable; under `--sign
 //! none` it is a WARN. Only the variables' names are reported, never their
@@ -53,15 +54,9 @@ pub fn check_with(
     if variables.is_empty() {
         return None;
     }
-    let needles: Vec<(&str, Vec<Vec<u8>>)> = variables
+    let needles: Vec<(&str, Vec<String>)> = variables
         .iter()
-        .map(|(name, value)| {
-            let forms = crate::process::secret_forms(value)
-                .into_iter()
-                .map(String::into_bytes)
-                .collect();
-            (name.as_str(), forms)
-        })
+        .map(|(name, value)| (name.as_str(), crate::process::secret_forms(value)))
         .collect();
     let mut files = Vec::new();
     for root in roots {
@@ -150,18 +145,22 @@ fn collect(root: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// The names of the variables one of whose forms `file` holds.
-fn search<'a>(file: &Path, needles: &[(&'a str, Vec<Vec<u8>>)]) -> Vec<&'a str> {
+/// The names of the variables one of whose forms `file` holds, raw or in
+/// base64.
+fn search<'a>(file: &Path, needles: &[(&'a str, Vec<String>)]) -> Vec<&'a str> {
     let Ok(mut reader) = std::fs::File::open(file) else {
         return Vec::new();
     };
     let longest = needles
         .iter()
-        .flat_map(|(_, forms)| forms.iter().map(Vec::len))
+        .flat_map(|(_, forms)| forms.iter().map(String::len))
         .max()
         .unwrap_or(1);
+    // The tail a form, or a base64 encoding of one, could start in: an
+    // encoding is the longer.
+    let keep = crate::process::base64_bound(longest);
     let mut found: Vec<&str> = Vec::new();
-    let mut window: Vec<u8> = Vec::with_capacity(CHUNK + longest);
+    let mut window: Vec<u8> = Vec::with_capacity(CHUNK + keep);
     let mut chunk = vec![0u8; CHUNK];
     loop {
         let read = match reader.read(&mut chunk) {
@@ -170,15 +169,18 @@ fn search<'a>(file: &Path, needles: &[(&'a str, Vec<Vec<u8>>)]) -> Vec<&'a str> 
         };
         window.extend_from_slice(&chunk[..read]);
         for (name, forms) in needles {
-            if !found.contains(name) && forms.iter().any(|form| contains(&window, form)) {
+            if found.contains(name) {
+                continue;
+            }
+            let raw = forms.iter().any(|form| contains(&window, form.as_bytes()));
+            if raw || crate::process::holds_base64_secret(&window, forms) {
                 found.push(*name);
             }
         }
         if found.len() == needles.len() {
             break;
         }
-        // Keep the tail a form could start in.
-        let keep = longest.saturating_sub(1).min(window.len());
+        let keep = keep.min(window.len());
         let _ = window.drain(..window.len() - keep);
     }
     found
@@ -273,6 +275,79 @@ mod tests {
         );
 
         assert!(check_with(&[], &roots, dist.path(), SignMode::Auto).is_none());
+    }
+
+    /// A value a build bakes in only as base64 fails, as the redaction would
+    /// find it: standard and URL-safe, padded or not, at a chunk's boundary,
+    /// after a header's `user:` (so the value starts at another position in
+    /// its group), with `+` and `/` escaped as a URL or a JSON string write
+    /// them. No file holds the value raw or in any other form, and base64 of
+    /// other text passes. The value is fabricated.
+    #[test]
+    fn a_value_baked_in_only_as_base64_fails() {
+        let token = "Zq9XB64MARKERa1b2c3/Tok\"en>?~9";
+        let dist = tempfile::tempdir().unwrap();
+        let pkg = dist.path().join("site/pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        // Standard and padded, across the first chunk's end.
+        let mut wasm = vec![0u8; CHUNK - 3];
+        wasm.extend_from_slice(
+            crate::process::base64_text(token.as_bytes(), false, true).as_bytes(),
+        );
+        wasm.extend_from_slice(&[0u8; 64]);
+        std::fs::write(pkg.join("app_bg.wasm"), &wasm).unwrap();
+        // `user:` before the value, unpadded, `+` as `%2B` and `/` as `\/`.
+        let header = crate::process::base64_text(format!("user:{token}").as_bytes(), false, false)
+            .replace('+', "%2B")
+            .replace('/', "\\/");
+        std::fs::write(
+            pkg.join("app.js"),
+            format!("fetch(url, {{ headers: {{ Authorization: \"Basic {header}\" }} }});"),
+        )
+        .unwrap();
+        // URL-safe, in the binary cargo built for the release.
+        let built = tempfile::tempdir().unwrap();
+        let exe = built.path().join("app");
+        std::fs::write(
+            &exe,
+            format!(
+                "\0\0{}\0",
+                crate::process::base64_text(token.as_bytes(), true, false)
+            ),
+        )
+        .unwrap();
+        // The base64 of other text is no secret.
+        std::fs::write(
+            dist.path().join("notes.txt"),
+            crate::process::base64_text(b"nothing secret here", false, true),
+        )
+        .unwrap();
+
+        for path in [pkg.join("app_bg.wasm"), pkg.join("app.js"), exe.clone()] {
+            let bytes = std::fs::read(&path).unwrap();
+            for form in crate::process::secret_forms(token) {
+                assert!(!contains(&bytes, form.as_bytes()), "{form} in {path:?}");
+            }
+        }
+
+        let variables = vars(&[("API_TOKEN", token)]);
+        let roots = [dist.path().to_path_buf(), exe.clone()];
+        let check = check_with(&variables, &roots, dist.path(), SignMode::Auto).unwrap();
+        assert_eq!(check.status, Status::Fail);
+        let detail = &check.error.detail;
+        assert!(detail.starts_with("the value of `API_TOKEN` "), "{detail}");
+        assert!(detail.contains("in 3 shipped files"), "{detail}");
+        assert!(detail.contains("site/pkg/app_bg.wasm"), "{detail}");
+        assert!(detail.contains("site/pkg/app.js"), "{detail}");
+        assert!(
+            !detail.contains("Zq9X") && !detail.contains("notes.txt"),
+            "{detail}"
+        );
+        assert_eq!(check.error.evidence.len(), 3);
+
+        let other = vars(&[("DB_PASSWORD", "not-in-any-file-7")]);
+        let pass = check_with(&other, &roots, dist.path(), SignMode::Auto).unwrap();
+        assert_eq!(pass.status, Status::Pass);
     }
 
     #[test]

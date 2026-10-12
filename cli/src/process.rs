@@ -605,27 +605,7 @@ fn redact_base64(text: &str, secrets: &[String]) -> Option<String> {
             cuts.push((end, end + padding, ""));
         }
     }
-    // Four characters carry three bytes, so a run that encodes the shortest
-    // secret has at least as many characters as that secret's encoding.
-    if let Some(shortest) = secrets.iter().map(String::len).filter(|&len| len > 0).min() {
-        let need = (4 * shortest).div_ceil(3);
-        let mut at = 0;
-        while at < bytes.len() {
-            if base64_token(bytes, at).is_none() {
-                at += 1;
-                continue;
-            }
-            // Each character with the bytes of the text it takes.
-            let mut run = Vec::new();
-            while let Some((symbol, len)) = base64_token(bytes, at) {
-                run.push((symbol, at, at + len));
-                at += len;
-            }
-            if run.len() >= need {
-                encoded_spans(bytes, &run, secrets, &mut cuts);
-            }
-        }
-    }
+    cuts.extend(encoded_cuts(bytes, secrets));
     if cuts.is_empty() {
         return None;
     }
@@ -653,6 +633,54 @@ fn redact_base64(text: &str, secrets: &[String]) -> Option<String> {
     }
     out.push_str(&text[copied..]);
     Some(out)
+}
+
+/// Whether `bytes` holds a secret in base64, in any form [`redact_base64`]
+/// replaces (either alphabet, padded or not, percent-escaped or with `\/`,
+/// at any position in its group). The release's scan of the files it ships
+/// asks this, so a build that bakes a secret in only as base64 is found as
+/// the redaction would find it.
+pub fn holds_base64_secret(bytes: &[u8], secrets: &[String]) -> bool {
+    !encoded_cuts(bytes, secrets).is_empty()
+}
+
+/// How many bytes a base64 encoding of a secret takes at most, when the
+/// longest form of the secret is `longest` bytes: each character
+/// percent-escaped, and the padding. A secret of `n` bytes spans at most
+/// `(n + 4) / 3` groups of four characters, three escaped bytes each, and
+/// the padding is at most six. A scan that keeps this many bytes of each
+/// window for the next one sees every encoding whole.
+pub fn base64_bound(longest: usize) -> usize {
+    4 * longest + 22
+}
+
+/// The spans of `bytes` that encode one of `secrets`, each to be replaced by
+/// [`REDACTED`] (`encoded_spans` for each run of base64 characters long
+/// enough to hold the shortest secret's encoding).
+fn encoded_cuts(bytes: &[u8], secrets: &[String]) -> Vec<(usize, usize, &'static str)> {
+    let mut cuts = Vec::new();
+    // Four characters carry three bytes, so a run that encodes the shortest
+    // secret has at least as many characters as that secret's encoding.
+    if let Some(shortest) = secrets.iter().map(String::len).filter(|&len| len > 0).min() {
+        let need = (4 * shortest).div_ceil(3);
+        let mut at = 0;
+        while at < bytes.len() {
+            if base64_token(bytes, at).is_none() {
+                at += 1;
+                continue;
+            }
+            // Each character with the bytes of the text it takes.
+            let mut run = Vec::new();
+            while let Some((symbol, len)) = base64_token(bytes, at) {
+                run.push((symbol, at, at + len));
+                at += len;
+            }
+            if run.len() >= need {
+                encoded_spans(bytes, &run, secrets, &mut cuts);
+            }
+        }
+    }
+    cuts
 }
 
 /// The base64 character that the text holds at `at`, and how many of its
@@ -729,6 +757,29 @@ fn padding_len(bytes: &[u8], at: usize) -> usize {
         }
     }
     end - at
+}
+
+/// Base64 as a test writes it: standard or URL-safe, padded or not. The
+/// release's scan tests use it too.
+#[cfg(test)]
+pub(crate) fn base64_text(bytes: &[u8], url: bool, pad: bool) -> String {
+    const STANDARD: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let alphabet = if url { URL } else { STANDARD };
+    let mut out = String::new();
+    for group in bytes.chunks(3) {
+        let word = group.iter().enumerate().fold(0u32, |word, (i, &byte)| {
+            word | u32::from(byte) << (16 - 8 * i)
+        });
+        for i in 0..4 {
+            if i <= group.len() {
+                out.push(char::from(alphabet[(word >> (18 - 6 * i)) as usize & 63]));
+            } else if pad {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// The bytes that base64 characters encode, from the first one: each four
@@ -1438,6 +1489,7 @@ fn bytes_to_os(bytes: &[u8]) -> OsString {
 /// The forms a secret value takes in output and files, the whole value
 /// only ([`secret_values`] also has a multi-line value's lines): raw,
 /// JSON-escaped once and twice (each also with `\/`) and percent-encoded.
+/// Its base64 is not listed: [`holds_base64_secret`] finds it.
 pub fn secret_forms(value: &str) -> Vec<String> {
     let mut forms = Vec::new();
     for form in value_forms(value) {
@@ -2238,27 +2290,6 @@ mod tests {
                 "{text}"
             );
         }
-    }
-
-    /// Base64 as a test writes it: standard or URL-safe, padded or not.
-    fn base64_text(bytes: &[u8], url: bool, pad: bool) -> String {
-        const STANDARD: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        const URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let alphabet = if url { URL } else { STANDARD };
-        let mut out = String::new();
-        for group in bytes.chunks(3) {
-            let word = group.iter().enumerate().fold(0u32, |word, (i, &byte)| {
-                word | u32::from(byte) << (16 - 8 * i)
-            });
-            for i in 0..4 {
-                if i <= group.len() {
-                    out.push(char::from(alphabet[(word >> (18 - 6 * i)) as usize & 63]));
-                } else if pad {
-                    out.push('=');
-                }
-            }
-        }
-        out
     }
 
     /// The base64 an app writes for a secret is redacted, in either

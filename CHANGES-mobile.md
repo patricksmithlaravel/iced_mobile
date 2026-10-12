@@ -29,7 +29,9 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   or handed secret reached the desktop live files, `app.log`, `logs.ndjson`, `result.json`,
   `events.ndjson` and `logs` output unredacted: a whole value, a `Basic` header's (the secret after
   `user:`), and a percent-encoded or JSON-escaped one. A base64 encoding that a line break splits is
-  still written as the app wrote it (`docs/agents/limitations.md`).
+  still written as the app wrote it (`docs/agents/limitations.md`). The release's secret scan
+  (`release.secret_in_artifacts`) finds the base64 too, so a value that a build bakes in only as
+  base64 makes the release unuploadable, where the scan passed it before.
 - **iOS:** the vendored winit reports an insertion of only a line break as Return and one of only
   `\t` as Tab, deciding per insertion, so a Return typed right after another key in the same turn
   of the event loop is no longer lost.
