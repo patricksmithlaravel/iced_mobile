@@ -347,11 +347,6 @@ impl Engine {
         !self.is_idle() || !self.context.is_empty()
     }
 
-    /// Whether a preedit is shown: the keyboard composes.
-    pub(crate) fn is_composing(&self) -> bool {
-        self.preedit.is_some()
-    }
-
     /// Nothing to reset: no text typed since the last reset and no preedit.
     ///
     /// Precisely: the mirror's committed text, as the engine last applied
@@ -2451,7 +2446,7 @@ mod tests {
     fn a_key_that_yields_commits_the_composition_first() {
         let mut engine = Engine::new();
         let _ = edits(&mut engine, state(0, "hello", (5, 5), (0, 5)));
-        assert!(engine.is_composing());
+        assert!(engine.preedit.is_some());
 
         assert_eq!(
             apply(
@@ -2466,7 +2461,7 @@ mod tests {
                 Request::Yield
             )
         );
-        assert!(!engine.is_composing());
+        assert!(engine.preedit.is_none());
 
         // The rebase that follows makes the caret the origin, in the same
         // generation.

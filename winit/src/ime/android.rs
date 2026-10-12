@@ -49,11 +49,12 @@
 //!   session: a focus moved to another widget is handled as [`disable`]
 //!   handles it, and a caret moved in the field as a tap is. The caret of a
 //!   field without the focus moves at once and ends nothing.
-//!   While the keyboard composes, the watch holds the caret moves back, so
-//!   that the composition is committed where it was typed, and they are
-//!   made once the field has it, deferred the same way; a `select_all`
-//!   then selects the word too, instead of the word replacing the
-//!   selection.
+//!   While the keyboard has typed into the field, the watch holds the caret
+//!   moves back, so that what the keyboard sent before them reaches the
+//!   field where it was typed, a composition and what arrives while the
+//!   operation runs alike, and they are made once the field has it,
+//!   deferred the same way; a `select_all` then selects the word too,
+//!   instead of the word replacing the selection.
 //! - From the first `show` to the next `hide`, the queue holds the window, so
 //!   that a native call can wake the event loop: it pushes its message and
 //!   requests a redraw (winit's Android loop ignores a bare wake). Native
@@ -214,7 +215,8 @@ pub(crate) struct Typing {
     /// The window: the operation runs on its interface through a
     /// [`Watch`](super::Watch).
     pub(crate) window: window::Id,
-    /// Whether the watch holds caret moves back: the keyboard composes.
+    /// Whether the watch holds caret moves back: the keyboard has typed
+    /// into the field ([`Feed::holds`]).
     pub(crate) hold: bool,
 }
 
@@ -281,8 +283,8 @@ where
 
 /// A widget operation ran on the window `typing` names, watched: ends the
 /// keyboard's session if it moved the focus or the caret, and defers the
-/// caret moves it held back until the field has the composition (see the
-/// module's documentation).
+/// caret moves it held back until the field has what the keyboard sent
+/// (see the module's documentation).
 pub(crate) fn operated<P, C>(
     typing: Typing,
     moved: super::Moved,

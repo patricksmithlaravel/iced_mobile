@@ -447,8 +447,9 @@ pub(crate) struct Moved {
     /// or the focused widget was focused again (which moves `text_input`'s
     /// caret to its end).
     pub(crate) caret: bool,
-    /// The caret moves held back, in order, while the keyboard composed:
-    /// they run once the field has the composition (see [`Watch`]).
+    /// The caret moves held back, in order, while the keyboard had typed
+    /// into the field: they run once the field has what it sent (see
+    /// [`Watch`]).
     pub(crate) held: Vec<Held>,
 }
 
@@ -482,12 +483,13 @@ pub(crate) enum Held {
 /// text input without the focus is not the keyboard's: its moves are made
 /// at once and end nothing.
 ///
-/// A `hold`ing watch is used while the keyboard composes, so that the
-/// composition can be committed where it was typed before the caret moves:
+/// A `hold`ing watch is used while the keyboard has typed into the field,
+/// so that what it sent before the caret moves, a composition and what
+/// arrives while the operation runs, reaches the field where it was typed:
 /// it does not make the caret moves of a focused widget with an id, and
 /// records them in [`Moved::held`] instead, for a [`Replay`] to make once
-/// the field has the composition. Focus moves, and caret moves of a widget
-/// without an id (which a replay cannot find), are made at once.
+/// the field has it. Focus moves, and caret moves of a widget without an id
+/// (which a replay cannot find), are made at once.
 #[cfg(any(
     all(target_os = "android", feature = "android-native-activity"),
     test

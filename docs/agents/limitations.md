@@ -92,9 +92,10 @@ this file in the commit that fixes or finds a limitation.
     Moving the caret of that field from code (`move_cursor_to`,
     `select_all`) commits the word where it was typed first, then moves the
     caret, so a position counts the word; the caret of another field moves
-    and leaves the word alone. What the keyboard typed before such an operation
-    reaches the field before it runs. Let the user's tap or Enter move the
-    focus where it can.
+    and leaves the word alone. What the keyboard typed before such an
+    operation, and what it sends while the operation runs, reaches the field
+    before the caret moves. Let the user's tap or Enter move the focus where
+    it can.
   - `text_input` deletes by character cluster, as on the desktop: a
     combining mark, vowel sign or virama typed right after the place the
     user tapped joins the character before it, and Backspace then deletes

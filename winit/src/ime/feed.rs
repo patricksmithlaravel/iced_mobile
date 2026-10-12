@@ -217,9 +217,13 @@ impl Feed {
     }
 
     /// Whether the caret moves an operation makes in the field wait until
-    /// the field has the composition: the keyboard composes.
+    /// the field has what the keyboard sent meanwhile: the engine is not
+    /// idle. Its edits are worked out from the caret it knows, so a message
+    /// that arrives while the operation runs must reach the field before
+    /// the caret moves. An idle engine's edits act at the field's caret,
+    /// wherever it is.
     pub(crate) fn holds(&self) -> bool {
-        self.engine.is_composing()
+        !self.engine.is_idle()
     }
 
     /// Applies the queued messages in order; stops after a key that yields
@@ -583,6 +587,64 @@ mod tests {
         let fed = finish(&mut feed, &mut queue);
         assert!(!fed.answer && fed.edits.is_empty() && fed.calls.is_empty());
         assert!(!feed.takes_turn());
+    }
+
+    #[test]
+    fn caret_moves_wait_whenever_the_keyboard_has_typed() {
+        let mut feed = Feed::new();
+        let mut queue = VecDeque::new();
+        assert!(!feed.holds());
+
+        // The keyboard commits each letter: nothing composes, but the
+        // engine works out its edits from the caret it knows.
+        queue.push_back(state("world", false));
+        let _ = drain(&mut feed, &mut queue);
+        assert!(feed.follows() && feed.holds());
+
+        // An operation that moves the caret: nothing is queued before it,
+        // and its moves wait.
+        let fed = operate(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty());
+        assert!(feed.holds());
+
+        // A letter arrives while it runs: it reaches the field at the caret
+        // the engine knows, before the moves are made, and the engine starts
+        // over.
+        queue.push_back(state("worlds", false));
+        let fed = finish(&mut feed, &mut queue);
+        assert!(!fed.answer);
+        assert_eq!(fed.edits, [commit("s")]);
+        assert_eq!(fed.calls, [Call::Reset(1)]);
+        assert!(!feed.holds() && !feed.follows());
+
+        // A revision too: worked out from the caret the engine knows.
+        queue.push_back(Message::State {
+            generation: 1,
+            text: "wrold".to_owned(),
+            selection: (5, 5),
+            composing: (-1, -1),
+        });
+        let _ = drain(&mut feed, &mut queue);
+        queue.push_back(Message::State {
+            generation: 1,
+            text: "world".to_owned(),
+            selection: (5, 5),
+            composing: (-1, -1),
+        });
+        assert!(feed.holds());
+        let fed = finish(&mut feed, &mut queue);
+        assert_eq!(
+            fed.edits,
+            [
+                Edit::Key(Key::Left),
+                Edit::Key(Key::Left),
+                Edit::Key(Key::Backspace),
+                Edit::Key(Key::Backspace),
+                commit("or"),
+                Edit::Key(Key::Right),
+                Edit::Key(Key::Right),
+            ]
+        );
     }
 
     #[test]
