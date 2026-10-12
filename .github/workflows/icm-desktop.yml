@@ -82,9 +82,12 @@ jobs:
             libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 \
             libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libgl1 libegl1 mesa-vulkan-drivers
       - uses: actions/checkout@v4
+      # The installer runs with root's own HOME: with GitHub's /github/home it
+      # takes the difference from root's passwd home for sudo and prints
+      # errors (`$HOME differs from euid-obtained home directory`).
       - name: Rust
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | HOME=/root sh -s -- -y --profile minimal --default-toolchain stable
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - name: icm's desktop release tests (the real dpkg-deb)
         working-directory: cli
