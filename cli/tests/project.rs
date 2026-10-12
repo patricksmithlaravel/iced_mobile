@@ -697,6 +697,97 @@ fn doctor_android_reports_and_fixes_with_fake_tools() {
     assert_eq!(owner["errors"][0]["fix"]["by"], "owner");
 }
 
+/// A new app on a machine without the toolchain its rust-toolchain.toml
+/// pins: `cargo metadata` fails, so the project does not resolve until
+/// `doctor --fix --yes` installs the toolchain (the first CI run of
+/// icm-android.yml, where it failed `env.rust_toolchain_missing` after
+/// installing it).
+#[test]
+fn doctor_resolves_the_project_once_it_installed_its_toolchain() {
+    let mut sandbox = Sandbox::with_fixture("app");
+    fake_android(&mut sandbox, &[]);
+    let installed = sandbox.path("toolchain-installed");
+    let missing = "echo \"error: toolchain '1.98.0-fake' is not installed\" >&2; exit 1";
+    let sysroot = sandbox.path("sysroot");
+    write_exe(
+        &sandbox.path("fakebin/rustc"),
+        &format!(
+            "#!/bin/sh\n[ -e '{installed}' ] || {{ {missing}; }}\ncase \"$*\" in\n  *sysroot*) echo '{sysroot}' ;;\n  *--version*) echo 'rustc 1.98.0 (fake 2026-08-18)' ;;\n  *) exit 1 ;;\nesac\n",
+            installed = installed.display(),
+            sysroot = sysroot.display()
+        ),
+    );
+    write_exe(
+        &sandbox.path("fakebin/rustup"),
+        &format!(
+            "#!/bin/sh\necho \"rustup $*\" >> '{log}'\nif [ \"$1 $2\" = 'toolchain install' ]; then touch '{installed}'; exit 0; fi\n[ -e '{installed}' ] || {{ {missing}; }}\nif [ \"$1 $2\" = 'show active-toolchain' ]; then echo '1.98.0-fake (overridden)'; exit 0; fi\nexit 1\n",
+            log = sandbox.path("tools.log").display(),
+            installed = installed.display()
+        ),
+    );
+    let real_cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    write_exe(
+        &sandbox.path("fakebin/cargo"),
+        &format!(
+            "#!/bin/sh\n[ -e '{installed}' ] || {{ {missing}; }}\nexec '{real_cargo}' \"$@\"\n",
+            installed = installed.display()
+        ),
+    );
+    sandbox.set("ICM_TOOL_CARGO", sandbox.path("fakebin/cargo"));
+
+    let ids = |result: &Value| -> Vec<String> {
+        result["checks"]["failed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Reported once, with the fix that installs it.
+    let before = sandbox.json(&["doctor", "android"]);
+    assert_eq!(before["exit"], 4, "{before}");
+    assert!(before["app"].is_null(), "{before}");
+    let failed = ids(&before);
+    assert_eq!(
+        failed
+            .iter()
+            .filter(|id| *id == "env.rust_toolchain_missing")
+            .count(),
+        1,
+        "{before}"
+    );
+    let error = before["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "env.rust_toolchain_missing")
+        .unwrap();
+    assert!(
+        error["fix"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c
+                .as_str()
+                .unwrap()
+                .ends_with("rustup toolchain install 1.98.0-fake")),
+        "{error}"
+    );
+
+    // The fix installs it, the project resolves, and nothing is left.
+    let fixed = sandbox.json(&["doctor", "android", "--fix", "--yes"]);
+    assert_eq!(fixed["exit"], 0, "{fixed}");
+    assert!(ids(&fixed).is_empty(), "{fixed}");
+    assert_eq!(fixed["app"]["id"], "com.acme.fixture", "{fixed}");
+    assert!(
+        tool_log(&sandbox).contains("rustup toolchain install 1.98.0-fake"),
+        "{}",
+        tool_log(&sandbox)
+    );
+    assert!(sandbox.path("android-home/avd/icm-api36.ini").is_file());
+}
+
 #[test]
 fn doctor_installs_rust_targets_for_the_projects_toolchain() {
     let mut sandbox = Sandbox::new();
