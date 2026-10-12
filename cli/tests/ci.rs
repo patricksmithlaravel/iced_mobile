@@ -32,6 +32,7 @@ const WORKFLOWS: &[&str] = &[
     ".github/workflows/framework.yml",
     ".github/workflows/icm.yml",
     ".github/workflows/icm-android.yml",
+    ".github/workflows/icm-ios.yml",
 ];
 
 /// Every file under `.github/workflows` and `.github/ci`, with its text.
