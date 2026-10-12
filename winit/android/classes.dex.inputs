@@ -1,0 +1,5 @@
+d367840f37389c8784da6d25c3e1e3ec8d3439130c447f500ba335c179f23ef5  winit/android/java/iced_mobile/Keyboard.java
+410743d4d46a44c81153f481d650ebab3a5c16a9f0df27cc06b083911e8a92a6  winit/android/java/iced_mobile/KeyboardConnection.java
+f1a59f5fa8676869f2b49547a1494f6ea22a8a810051c28a02af52897baa6290  winit/android/java/iced_mobile/KeyboardView.java
+javac 21.0.12.1
+d8 8.10.9-dev (build-tools 36.0.0)

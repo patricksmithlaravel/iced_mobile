@@ -1,0 +1,544 @@
+package iced_mobile;
+
+import android.text.Editable;
+import android.text.Selection;
+import android.text.TextUtils;
+import android.view.KeyCharacterMap;
+import android.view.KeyEvent;
+import android.view.inputmethod.BaseInputConnection;
+
+/**
+ * What the keyboard does to the view's mirror. The editing itself is
+ * {@link BaseInputConnection}'s; this class counts batch edits, has the view
+ * report the mirror when the outermost one ends, and handles the keys and
+ * the Enter the keyboard sends.
+ *
+ * <p>A connection edits nothing once the view restarted the keyboard, was
+ * uninstalled, or the system closed the connection. Everything here runs on
+ * the UI thread.
+ */
+final class KeyboardConnection extends BaseInputConnection {
+    private final KeyboardView view;
+    private final int epoch;
+    private int batches;
+    private boolean closed;
+
+    KeyboardConnection(KeyboardView view, int epoch) {
+        super(view, true);
+        this.view = view;
+        this.epoch = epoch;
+    }
+
+    private boolean active() {
+        return !closed && view.accepts(epoch);
+    }
+
+    @Override
+    public Editable getEditable() {
+        return active() ? view.mirror() : null;
+    }
+
+    @Override
+    public boolean beginBatchEdit() {
+        if (!active()) {
+            return false;
+        }
+
+        batches++;
+        return true;
+    }
+
+    @Override
+    public boolean endBatchEdit() {
+        if (!active()) {
+            return false;
+        }
+
+        if (batches > 0) {
+            batches--;
+        }
+
+        if (batches == 0) {
+            view.report();
+        }
+
+        return batches > 0;
+    }
+
+    /**
+     * Ends the connection. A composition stays: the view finishes it when
+     * the keyboard starts over, and the system when the focus moves, while
+     * a newer connection may be composing already.
+     */
+    @Override
+    public void closeConnection() {
+        boolean pending = active() && batches > 0;
+
+        closed = true;
+        batches = 0;
+
+        // Edits of a batch that will not end.
+        if (pending) {
+            view.report();
+        }
+
+        // Its finishComposingText does nothing now.
+        super.closeConnection();
+    }
+
+    @Override
+    public boolean commitText(CharSequence text, int newCursorPosition) {
+        if (!active()) {
+            return false;
+        }
+
+        // What keyboards commit for Enter: a key for the app, not text.
+        if (TextUtils.equals(text, "\n")) {
+            view.forward(KeyEvent.KEYCODE_ENTER);
+            return true;
+        }
+
+        beginBatchEdit();
+
+        try {
+            super.commitText(text, newCursorPosition);
+        } catch (RuntimeException error) {
+            Keyboard.warn("commitText", error);
+        } finally {
+            endBatchEdit();
+        }
+
+        return true;
+    }
+
+    @Override
+    public boolean setComposingText(CharSequence text, int newCursorPosition) {
+        if (!active()) {
+            return false;
+        }
+
+        beginBatchEdit();
+
+        try {
+            super.setComposingText(text, newCursorPosition);
+        } catch (RuntimeException error) {
+            Keyboard.warn("setComposingText", error);
+        } finally {
+            endBatchEdit();
+        }
+
+        return true;
+    }
+
+    @Override
+    public boolean setComposingRegion(int start, int end) {
+        if (!active()) {
+            return false;
+        }
+
+        beginBatchEdit();
+
+        try {
+            super.setComposingRegion(start, end);
+        } catch (RuntimeException error) {
+            Keyboard.warn("setComposingRegion", error);
+        } finally {
+            endBatchEdit();
+        }
+
+        return true;
+    }
+
+    @Override
+    public boolean finishComposingText() {
+        if (!active()) {
+            return false;
+        }
+
+        beginBatchEdit();
+
+        try {
+            super.finishComposingText();
+        } catch (RuntimeException error) {
+            Keyboard.warn("finishComposingText", error);
+        } finally {
+            endBatchEdit();
+        }
+
+        return true;
+    }
+
+    @Override
+    public boolean setSelection(int start, int end) {
+        if (!active()) {
+            return false;
+        }
+
+        beginBatchEdit();
+
+        try {
+            super.setSelection(start, end);
+        } catch (RuntimeException error) {
+            Keyboard.warn("setSelection", error);
+        } finally {
+            endBatchEdit();
+        }
+
+        return true;
+    }
+
+    @Override
+    public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+        if (!active()) {
+            return false;
+        }
+
+        beginBatchEdit();
+
+        try {
+            Editable text = view.mirror();
+            int[] around = around(text);
+
+            if (around != null) {
+                int start = around[0];
+                int end = around[1];
+                int before = (int) Math.max(0L,
+                        (long) start - Math.max(0, beforeLength));
+                int after = (int) Math.min((long) text.length(),
+                        (long) end + Math.max(0, afterLength));
+
+                delete(text, before, start, end, after);
+            }
+        } catch (RuntimeException error) {
+            Keyboard.warn("deleteSurroundingText", error);
+        } finally {
+            endBatchEdit();
+        }
+
+        return true;
+    }
+
+    @Override
+    public boolean deleteSurroundingTextInCodePoints(int beforeLength,
+            int afterLength) {
+        if (!active()) {
+            return false;
+        }
+
+        beginBatchEdit();
+
+        try {
+            Editable text = view.mirror();
+            int[] around = around(text);
+
+            if (around != null) {
+                int start = around[0];
+                int end = around[1];
+                int before = backward(text, start, beforeLength);
+                int after = forward(text, end, afterLength);
+
+                delete(text, before, start, end, after);
+            }
+        } catch (RuntimeException error) {
+            Keyboard.warn("deleteSurroundingTextInCodePoints", error);
+        } finally {
+            endBatchEdit();
+        }
+
+        return true;
+    }
+
+    @Override
+    public boolean performEditorAction(int editorAction) {
+        if (!active()) {
+            return false;
+        }
+
+        view.forward(KeyEvent.KEYCODE_ENTER);
+        return true;
+    }
+
+    /**
+     * The keyboard's keys go to the shell here, not through the view root:
+     * there they would reach the app on another path than the text, and an
+     * Enter could overtake the text typed before it.
+     */
+    @Override
+    @SuppressWarnings("deprecation")
+    public boolean sendKeyEvent(KeyEvent event) {
+        if (!active() || event == null) {
+            return false;
+        }
+
+        try {
+            if (event.getAction() == KeyEvent.ACTION_MULTIPLE) {
+                String characters = event.getCharacters();
+
+                if (event.getKeyCode() == KeyEvent.KEYCODE_UNKNOWN
+                        && characters != null && !characters.isEmpty()) {
+                    type(characters);
+                }
+
+                return true;
+            }
+
+            if (event.getAction() != KeyEvent.ACTION_DOWN) {
+                return true;
+            }
+
+            int keyCode = event.getKeyCode();
+
+            switch (keyCode) {
+                case KeyEvent.KEYCODE_DEL:
+                    if (!deleteBackward()) {
+                        view.forward(keyCode);
+                    }
+                    break;
+                case KeyEvent.KEYCODE_FORWARD_DEL:
+                    if (!deleteForward()) {
+                        view.forward(keyCode);
+                    }
+                    break;
+                case KeyEvent.KEYCODE_ENTER:
+                case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                case KeyEvent.KEYCODE_TAB:
+                case KeyEvent.KEYCODE_ESCAPE:
+                case KeyEvent.KEYCODE_DPAD_UP:
+                case KeyEvent.KEYCODE_DPAD_DOWN:
+                case KeyEvent.KEYCODE_DPAD_LEFT:
+                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                case KeyEvent.KEYCODE_MOVE_HOME:
+                case KeyEvent.KEYCODE_MOVE_END:
+                    view.forward(keyCode);
+                    break;
+                default:
+                    // Not a shortcut, and not a dead key.
+                    int character = event.isCtrlPressed()
+                            || event.isMetaPressed()
+                            ? 0
+                            : event.getUnicodeChar(event.getMetaState());
+
+                    if (character > 0
+                            && (character & KeyCharacterMap.COMBINING_ACCENT)
+                                    == 0) {
+                        type(new String(Character.toChars(character)));
+                    }
+                    break;
+            }
+        } catch (RuntimeException error) {
+            Keyboard.warn("sendKeyEvent", error);
+        }
+
+        return true;
+    }
+
+    @Override
+    public CharSequence getTextBeforeCursor(int length, int flags) {
+        if (!active() || length < 0) {
+            return null;
+        }
+
+        try {
+            return super.getTextBeforeCursor(length, flags);
+        } catch (RuntimeException error) {
+            Keyboard.warn("getTextBeforeCursor", error);
+            return null;
+        }
+    }
+
+    @Override
+    public CharSequence getTextAfterCursor(int length, int flags) {
+        if (!active() || length < 0) {
+            return null;
+        }
+
+        try {
+            // Older releases add the length to the cursor unchecked.
+            return super.getTextAfterCursor(
+                    Math.min(length, view.mirror().length()), flags);
+        } catch (RuntimeException error) {
+            Keyboard.warn("getTextAfterCursor", error);
+            return null;
+        }
+    }
+
+    /**
+     * Characters from a key: committed at the cursor after any composition,
+     * as a hardware key types into a text field.
+     */
+    private void type(String characters) {
+        if (characters.equals("\n")) {
+            view.forward(KeyEvent.KEYCODE_ENTER);
+            return;
+        }
+
+        beginBatchEdit();
+
+        try {
+            removeComposingSpans(view.mirror());
+            super.commitText(characters, 1);
+        } finally {
+            endBatchEdit();
+        }
+    }
+
+    /**
+     * Deletes the selection, or the code point before the cursor. False when
+     * there is nothing to delete.
+     */
+    private boolean deleteBackward() {
+        beginBatchEdit();
+
+        try {
+            Editable text = view.mirror();
+            int[] selection = selection(text);
+
+            if (selection == null) {
+                return false;
+            }
+
+            int start = selection[0];
+            int end = selection[1];
+
+            if (start == end) {
+                start = backward(text, start, 1);
+            }
+
+            if (start == end) {
+                return false;
+            }
+
+            text.delete(start, end);
+            return true;
+        } finally {
+            endBatchEdit();
+        }
+    }
+
+    /**
+     * Deletes the selection, or the code point after the cursor. False when
+     * there is nothing to delete.
+     */
+    private boolean deleteForward() {
+        beginBatchEdit();
+
+        try {
+            Editable text = view.mirror();
+            int[] selection = selection(text);
+
+            if (selection == null) {
+                return false;
+            }
+
+            int start = selection[0];
+            int end = selection[1];
+
+            if (start == end) {
+                end = forward(text, end, 1);
+            }
+
+            if (start == end) {
+                return false;
+            }
+
+            text.delete(start, end);
+            return true;
+        } finally {
+            endBatchEdit();
+        }
+    }
+
+    /**
+     * The selection, in order and inside the text, or null when there is
+     * none.
+     */
+    private static int[] selection(Editable text) {
+        int start = Selection.getSelectionStart(text);
+        int end = Selection.getSelectionEnd(text);
+
+        if (start < 0 || end < 0) {
+            return null;
+        }
+
+        int length = text.length();
+
+        return new int[] {
+            Math.min(Math.min(start, end), length),
+            Math.min(Math.max(start, end), length),
+        };
+    }
+
+    /**
+     * The selection grown to cover the composing region, which the
+     * surrounding text excludes, or null when there is no selection.
+     */
+    private static int[] around(Editable text) {
+        int[] around = selection(text);
+
+        if (around == null) {
+            return null;
+        }
+
+        int start = getComposingSpanStart(text);
+        int end = getComposingSpanEnd(text);
+
+        if (start >= 0 && end >= 0) {
+            around[0] = Math.min(around[0], Math.min(start, end));
+            around[1] = Math.max(around[1], Math.max(start, end));
+        }
+
+        return around;
+    }
+
+    /** Deletes [before, start) and [end, after), with start <= end. */
+    private static void delete(Editable text, int before, int start, int end,
+            int after) {
+        if (end < after) {
+            text.delete(end, after);
+        }
+
+        if (before < start) {
+            text.delete(before, start);
+        }
+    }
+
+    /**
+     * The index {@code count} code points before {@code index}, or 0. An
+     * unpaired surrogate counts as one code point.
+     */
+    private static int backward(CharSequence text, int index, int count) {
+        while (count > 0 && index > 0) {
+            index--;
+
+            if (index > 0 && Character.isLowSurrogate(text.charAt(index))
+                    && Character.isHighSurrogate(text.charAt(index - 1))) {
+                index--;
+            }
+
+            count--;
+        }
+
+        return index;
+    }
+
+    /**
+     * The index {@code count} code points after {@code index}, or the
+     * length. An unpaired surrogate counts as one code point.
+     */
+    private static int forward(CharSequence text, int index, int count) {
+        int length = text.length();
+
+        while (count > 0 && index < length) {
+            index++;
+
+            if (index < length && Character.isLowSurrogate(text.charAt(index))
+                    && Character.isHighSurrogate(text.charAt(index - 1))) {
+                index++;
+            }
+
+            count--;
+        }
+
+        return index;
+    }
+}
