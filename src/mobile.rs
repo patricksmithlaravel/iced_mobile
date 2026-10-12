@@ -451,7 +451,9 @@
 //!   only from the next redraw: it typed that text as the last field's
 //!   keyboard, which may suggest and learn words, and what it composed of
 //!   it reaches the password field as typed text, never drawn in clear.
-//!   A hardware keyboard's Enter, Tab and Escape count the same way. The
+//!   A hardware keyboard's Enter, Tab and Escape count the same way, and one
+//!   that waited behind a keyboard key's turn holds even a focus that turn
+//!   moved, until a tap, since its own message may still move the focus. The
 //!   application may move the focus after such a key later still, from a
 //!   subscription (`keyboard::listen`, which is how it takes Tab:
 //!   `text_input` ignores it) or a task, whose message arrives after the
@@ -629,10 +631,12 @@
 //! "123" until its numbers are shown once or it is hidden and shown again;
 //! it types as usual. A keyboard shown while none was up is set up for its
 //! field at once, without that label. The iOS keyboard shows no suggestions
-//! in any field anyway. On both, when a `text_editor` focused from code
-//! also takes the keyboard ([Known limitations](#known-limitations)), the
-//! keyboard is still set up for the secure field: iced asks for a secure
-//! keyboard when any field that wants it is secure.
+//! in any field anyway. On both, a `text_editor` focused from code gives up
+//! its focus when the user taps outside it ([Known
+//! limitations](#known-limitations)), so what the keyboard types, a password
+//! included, reaches the field that has the focus only. Should both still ask
+//! for the keyboard, iced asks for a secure keyboard when any field that
+//! wants it is secure.
 //!
 //! # Events for launchers
 //!
@@ -997,12 +1001,11 @@
 //!   CJK: the app's view takes key input only. When the focus moves
 //!   straight from a secure field to another field, that field's numbers
 //!   key can read ".?123".
-//! - **`text_editor` ignores touch.** A tap neither focuses a `text_editor`
-//!   nor takes the focus from one, so one focused from code goes on taking
-//!   the keyboard's text alongside a `text_input` the user taps, a password
-//!   too, which the editor shows in clear (the keyboard is still set up for
-//!   the password field, so it neither suggests nor learns it). Move the
-//!   focus away from it from code.
+//! - **`text_editor` ignores touch, but a touch takes its focus.** A tap
+//!   cannot focus a `text_editor`. One focused from code gives up the focus
+//!   when the user taps anywhere outside it, as a `text_input` does, so the
+//!   keyboard's text, a password included, goes to the field that has the
+//!   focus only. A Done button needs no code for it.
 //! - **Line breaks in inserted text on iOS.** UIKit hands over text one
 //!   insertion at a time. An insertion that is only a line break (`"\n"`,
 //!   `"\r"`, or `"\r\n"` counted once) is one Return, as from the

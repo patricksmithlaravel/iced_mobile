@@ -70,8 +70,11 @@
 //! then may be the one the focus moves to, and a password field's
 //! composition must not show in the field it leaves. The composition waits
 //! until a tap on the field that has the focus, or an operation that moves
-//! it, has decided the purpose. A focus the application moves in its turn,
-//! before the event loop resumes, is decided at the resume's redraw as before.
+//! it, has decided the purpose. A focus the application moves in its turn
+//! after a keyboard key is decided at the resume's redraw. A hardware key
+//! that waited behind a keyboard key's turn ends that decision when the event
+//! loop replays it: its own message may still move the focus, so a focus the
+//! turn moved waits for a tap too.
 //!
 //! A field that becomes a password field while the engine shows a
 //! composition in it (the application made it secure) gets the
@@ -1463,5 +1466,134 @@ mod tests {
 
         // Nothing queued and nothing typed: nothing to reset.
         assert_eq!(feed.abandon(&mut queue), None);
+    }
+
+    #[test]
+    fn a_normal_field_after_an_enter_shows_its_composition_once_a_tap_decides()
+    {
+        // A chat field that keeps its text after Enter, and nothing moves the
+        // focus. The composition after the key waits for a tap on the field:
+        // the redraw after a key that yields does not decide, since a
+        // subscription may still move the focus. A text_editor's newline is
+        // the same Enter key.
+        let mut feed = Feed::new();
+        let mut form = Form::default();
+        let mut queue = VecDeque::from([
+            state("hi", false),
+            key(KEYCODE_ENTER),
+            rebase(),
+            state("hel", true),
+        ]);
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.answer);
+        assert_eq!(fed.edits, [commit("hi"), Edit::Key(Key::Enter)]);
+        form.handle(&fed.edits);
+        assert_eq!(form.submitted, ["hi"]);
+
+        // The application's turn does nothing; the composition after it is
+        // held back, and the redraw shows nothing of it.
+        feed.resume();
+        let fed = drain(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty());
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+        assert!(form.got.is_empty() && form.drawn.is_empty());
+
+        // A tap on the field decides for it: the composition is shown.
+        feed.refocused();
+        assert!(form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [preedit("hel")]);
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+        assert_eq!(form.got, [(0, "hel".to_owned())]);
+        assert_eq!(form.drawn, [(0, "hel".to_owned())]);
+    }
+
+    #[test]
+    fn a_hardware_key_replayed_after_a_turn_holds_a_focus_the_turn_moved() {
+        // The keyboard's Enter is queued behind a hardware Enter. The hardware
+        // key's interrupt stops at the keyboard's Enter, the application's turn
+        // moves the focus to a second normal field (`on_submit`), and then the
+        // event loop replays the hardware Enter. Its own message may still move
+        // the focus after the redraw, so the redraw does not decide the focus
+        // the turn moved: the composition waits for a tap, as after any
+        // hardware key.
+        let mut feed = Feed::new();
+        let mut form = Form::default();
+        let mut queue =
+            VecDeque::from([state("sam", false), key(KEYCODE_ENTER)]);
+
+        let fed = finish_key(&mut feed, &mut queue);
+        assert!(fed.answer);
+        assert_eq!(fed.edits, [commit("sam"), Edit::Key(Key::Enter)]);
+        form.handle(&fed.edits);
+
+        // The replayed `AboutToWait` starts the turn, and the operation of
+        // `on_submit` moves the focus in it.
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.answer && fed.edits.is_empty());
+        let fed = operate(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty());
+        form.focus_next();
+        feed.refocused();
+
+        // The replayed hardware Enter is handled again: nothing is left to
+        // apply, and its finish ends the decision the turn made.
+        let fed = finish_key(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty() && fed.calls.is_empty());
+
+        // The keyboard composes for the second field, and the redraw shows
+        // none of it.
+        queue.extend([rebase(), state("pw", true)]);
+        feed.resume();
+        let fed = drain(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty());
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+        assert!(form.got.is_empty() && form.drawn.is_empty());
+
+        // A tap on the second field decides for it.
+        feed.refocused();
+        assert!(form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [preedit("pw")]);
+        form.handle(&fed.edits);
+        assert_eq!(form.got, [(1, "pw".to_owned())]);
+    }
+
+    #[test]
+    fn a_tap_after_the_keyboard_was_hidden_decides_the_field_it_focuses() {
+        // The keyboard's Enter in a chat field, then a press outside it hides
+        // the keyboard, which ends the session with the field. A tap on the
+        // next field while the keyboard is hidden still decides its purpose
+        // (`refocused`), so the composition after the tap is shown at once,
+        // not held back until a second tap.
+        let mut feed = Feed::new();
+        let mut form = Form::default();
+        let mut queue =
+            VecDeque::from([state("hi", false), key(KEYCODE_ENTER)]);
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.answer);
+        form.handle(&fed.edits);
+        feed.resume();
+
+        // The keyboard is hidden: the session ends, and the next session
+        // starts in the generation the reset names.
+        let generation = feed.abandon(&mut queue).unwrap_or(0);
+
+        // The tap focuses the second field, and the window redraws.
+        form.focus_next();
+        feed.refocused();
+        assert!(!form.redraw(&mut feed));
+
+        // The keyboard, shown again for it, composes; the field shows it.
+        queue.push_back(state_in(generation, "b", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [preedit("b")]);
+        form.handle(&fed.edits);
+        assert_eq!(form.got, [(1, "b".to_owned())]);
     }
 }
