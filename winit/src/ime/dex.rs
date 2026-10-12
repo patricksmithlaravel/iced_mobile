@@ -166,7 +166,11 @@
 //! The work on the UI thread catches every exception and logs it under the
 //! tag `iced_mobile`. Nothing logs the mirror's text. When the view cannot
 //! be added, `show` and `hide` use the window's decor view instead, and the
-//! keyboard can only send key events, as without the dex.
+//! keyboard can only send key events, as without the dex. The shell does
+//! not learn of that failure (`install` has returned), so it still calls
+//! `show` at a tap on the focused field and when an operation focuses a
+//! widget, which brings back a keyboard the user hid, unlike without the
+//! dex.
 
 /// The dex `winit/android/build-dex.sh` built.
 pub(crate) const DEX: &[u8] = include_bytes!("../../android/classes.dex");

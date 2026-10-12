@@ -93,6 +93,11 @@ use crate::core::{
 /// modifiers from those and `text_editor` from the key; the second puts
 /// back the window's own.
 ///
+/// These are window events like a hardware keyboard's, so what the field
+/// does not capture reaches subscriptions (`keyboard::listen`,
+/// `event::listen`): every release, the `ModifiersChanged` around a key,
+/// and the presses no field takes. `src/mobile.rs` says so to apps.
+///
 /// A commit and a preedit are the input method's events; an empty preedit
 /// with no cursor clears a shown one. `Opened` is never sent: `text_input`
 /// and `text_editor` take a preedit and a commit without it, and it would

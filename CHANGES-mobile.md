@@ -254,20 +254,38 @@ Text input on Android, and secure fields on Android and iOS:
   some other keyboards; Gboard on the Android 16 emulator commits each letter in Latin-script
   languages) shows underlined at the caret and joins the value once the keyboard commits it. The
   keyboard sees only the text it typed since it last started over: when the field got the focus,
-  at a tap, after its Enter, Tab, Escape or arrow keys, after a caret moved from code, and at the
-  other points `docs/agents/limitations.md` lists. Before, the keyboard could only send key events:
-  no composition, suggestions or swipe typing, and characters outside the key map were lost.
-  Before Android 8 and when the input connection cannot be installed (one warning in the log),
-  nothing changes. Nor with GameActivity, whose input connection hands the keyboard's text to winit
-  as text events that the vendored winit drops, so what the keyboard commits there does not reach
-  fields; the docs said before that only text not sent as keys could be lost there.
+  at a touch that starts, after its Enter, Tab, Escape or arrow keys, after a caret moved from code,
+  and at the other points `docs/agents/limitations.md` lists. Before, the keyboard could only send
+  key events: no composition, suggestions or swipe typing, and characters outside the key map were
+  lost. Before Android 8 and when the input connection cannot be installed (one warning in the log),
+  nothing changes, but when only the keyboard's view could not be added to the Activity (its
+  warning is under the log tag `iced_mobile`, not `iced`), a tap on the focused field or focusing a
+  field from code brings back a keyboard the user hid. Nor with GameActivity, whose input connection
+  hands the keyboard's text to winit as text events that the vendored winit drops, so what the
+  keyboard commits there does not reach fields, which the docs now say.
+- **Android:** everything the keyboard types, a single letter and its Paste included, reaches a
+  field as an input method's commit, as from a desktop input method: `text_input` hands it to
+  `on_input`, never to `on_paste`, and `text_editor` gets it as `Edit::Paste`, never as
+  `Edit::Insert`, so an editor that drops `Edit::Paste` takes no typing from the keyboard. Its
+  deletions and caret moves come as Backspace, Delete and arrow keys, one per cluster, pressed and
+  released: subscriptions (`keyboard::listen`, `event::listen`) see what the field does not capture,
+  every release among them, and when a modifier is held on a hardware keyboard, or for Select all
+  (Ctrl+A), a `ModifiersChanged` before the key and one after it that puts the window's back.
+  Whatever the field, the keyboard is told it edits single-line text with no action
+  (`IME_ACTION_NONE`), so its action key is a plain Enter, never Done, Next, Search or Send, and the
+  keyboard's view is left out of Android's autofill (`IMPORTANT_FOR_AUTOFILL_NO`), so autofill (a
+  password manager's, and the credentials it suggests in the keyboard) offers nothing, in password
+  fields either.
 - **Android:** the keyboard's Enter, from its key, its action button or a commit of a lone line
   break, reaches the app as the Enter key after the text typed before it, and submits a
   `text_input`; its Tab, from its key or a commit of a lone tab, is the Tab key. The app handles
   Enter, Tab and Escape, builds its view again and runs the widget operations its `update` returns
   for them, before the text typed after them reaches a field, also when a tap or an operation comes
   in between: a field cleared on submit gets that text alone, and the field `on_submit` moves the
-  focus to gets it. None of that text is dropped, however soon it follows. A key the app handles
+  focus to gets it. None of that text is dropped while a field has the focus, however soon it
+  follows; when the key leaves no field with the focus (Escape unfocuses a `text_input` or a
+  `text_editor`, an `on_submit` may remove the field), what the keyboard sent right after it is
+  dropped. A key the app handles
   from a subscription (`keyboard::listen`, how an app takes Tab) or a task comes after that text,
   which then goes to the field that had the focus. Line breaks and tabs inside longer committed text
   are dropped. Backspace and Delete reach the field's text
@@ -278,15 +296,19 @@ Text input on Android, and secure fields on Android and iOS:
   keyboards that have a Ctrl key), Page Up and Down, function keys and Insert are dropped, and its
   keys come without modifiers, its own Shift or one held on a hardware keyboard: its arrows, Home
   and End move the caret without selecting, and a Ctrl held on a hardware keyboard does not make
-  its deletions delete words. A hardware keyboard's keys reach the app as before.
+  its deletions delete words. A hardware keyboard's keys reach the app as key events, as before,
+  unless the input method takes them: while a field asks for the keyboard, one that composes a
+  hardware keyboard's letters (CJK input methods) types them into the field as commits and
+  preedits, not `KeyPressed` events.
 - **Android:** the keyboard's editing panel (Gboard's text editing tools) works in fields: Select all
-  selects the field's text, as its Ctrl+A does, and Paste inserts the clipboard's text at the caret
-  without its line breaks and tabs. Cut and Copy take what the keyboard selected in the text it typed
-  since it last started over, never a password. Before, the input connection ignored them.
-- **Android:** a tap, a hardware key other than a modifier or the window losing the focus commits
-  the word being composed, and the app takes the commit, and builds its view again, before the tap:
-  a Send button enabled only once the field holds text takes the tap that finished the word. Shift,
-  Ctrl, Alt and the other modifiers leave the word alone.
+  selects the field's text, as the field's own Ctrl+A does, and Paste inserts the clipboard's text
+  at the caret without its line breaks and tabs. Cut and Copy take what the keyboard selected in the
+  text it typed since it last started over, never a password.
+- **Android:** any touch that starts (a tap, but also the start of a scroll or a drag, or another
+  finger), a mouse button pressed, a hardware key other than a modifier or the window losing the
+  focus commits the word being composed, and the app takes the commit, and builds its view again,
+  before the touch: a Send button enabled only once the field holds text takes the tap that finished
+  the word. Shift, Ctrl, Alt and the other modifiers leave the word alone.
 - **Android:** when the app moves the focus from code (`operation::focus`, `focus_next`,
   `focus_previous`, or `focusable::unfocus` run with `iced::advanced::widget::operate`) or the
   field leaves the view, the word being composed is dropped and the field's preedit cleared: the
@@ -305,7 +327,8 @@ Text input on Android, and secure fields on Android and iOS:
   `text_editor` an Edit button focuses again), and so does the window getting the focus back
   (after the notification shade, a system dialog or another app), since nothing tells the shell
   that the user hid it. Before, the field had to lose the focus once, as it still has with
-  GameActivity, before Android 8 and when the input connection cannot be installed.
+  GameActivity, before Android 8 and when the input connection cannot be installed (unless only the
+  keyboard's view could not be added).
 - Password fields (`.secure(true)`) are marked secure to the system keyboard on Android with the
   input connection above, and on iOS: the Android keyboard shows its password layout without
   suggestions. On Android the input type is `TYPE_TEXT_VARIATION_PASSWORD` with
@@ -325,8 +348,8 @@ Text input on Android, and secure fields on Android and iOS:
   set up for the password field: on Android and iOS, `InputMethod::merge` makes the merged request
   secure when any of the requests is.
 - On Android and iOS, `text_editor` draws no placeholder while it shows a preedit, as `text_input`
-  does: an empty editor showed its placeholder under the word the Android keyboard composed (iOS
-  sends no preedit). The desktop and the web draw it as upstream does.
+  does, so a word the Android keyboard composes into an empty editor is not drawn over its
+  placeholder (iOS sends no preedit). The desktop and the web draw it as upstream does.
 - The known limitations in an app's `AGENTS.md` describe text input as it now is, and say that the
   iOS keyboard shows no predictions in any field: the app's view takes key input only.
 
