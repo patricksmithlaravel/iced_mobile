@@ -234,17 +234,18 @@ final class KeyboardView extends View {
      * a reset ran since the shell asked at {@code generation}. A composition
      * is kept until it ends. An empty mirror is rebased too, so the shell
      * always learns that its request ran.
+     *
+     * <p>This can run between two calls of the keyboard's batch edit, whose
+     * edits so far are not reported yet: they are reported first, as
+     * {@link #forward} reports them, so that the rebase loses none.
      */
     void forget(int generation) {
         if (!installed || generation != this.generation) {
             return;
         }
 
-        if (composingStart() != -1) {
-            forgetting = true;
-        } else {
-            rebase();
-        }
+        forgetting = true;
+        report();
     }
 
     void reset(int generation) {
@@ -343,11 +344,10 @@ final class KeyboardView extends View {
         sendSelection();
 
         // A password is not kept here, the mirror stays small, and the text
-        // the shell asked to forget goes. A composition is kept until the
-        // keyboard commits it.
-        boolean clear = secure
-                ? mirror.length() > 0
-                : mirror.length() > CAP || forgetting;
+        // the shell asked to forget goes, even when the mirror is empty. A
+        // composition is kept until the keyboard commits it.
+        boolean clear = forgetting
+                || (secure ? mirror.length() > 0 : mirror.length() > CAP);
 
         if (clear && !composing) {
             rebase();

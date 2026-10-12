@@ -1137,11 +1137,12 @@ mod tests {
             // rebase.
             self.tell();
 
-            let clear = if self.secure {
-                !self.units.is_empty()
-            } else {
-                self.len() > self.cap || self.forgetting
-            };
+            let clear = self.forgetting
+                || if self.secure {
+                    !self.units.is_empty()
+                } else {
+                    self.len() > self.cap
+                };
 
             if clear && self.composing.is_none() {
                 self.rebase();
@@ -1184,17 +1185,16 @@ mod tests {
             self.told = ((0, 0), None);
         }
 
-        /// `Keyboard.forget(generation)` running on the UI thread.
+        /// `Keyboard.forget(generation)` running on the UI thread, maybe
+        /// inside a batch edit: what the batch edited so far is reported
+        /// first, then the mirror is rebased once nothing composes.
         fn forget(&mut self, generation: i32) {
             if generation != self.generation {
                 return;
             }
 
-            if self.composing.is_some() {
-                self.forgetting = true;
-            } else {
-                self.rebase();
-            }
+            self.forgetting = true;
+            self.send_report();
         }
     }
 
@@ -1354,6 +1354,8 @@ mod tests {
         interruptions: usize,
         rebases: usize,
         forgets: usize,
+        /// Requests to forget run inside a batch edit.
+        batched_forgets: usize,
     }
 
     impl Seen {
@@ -1369,6 +1371,7 @@ mod tests {
             self.interruptions += other.interruptions;
             self.rebases += other.rebases;
             self.forgets += other.forgets;
+            self.batched_forgets += other.batched_forgets;
         }
 
         /// Each path but the `skipped` ones was taken `at_least` times.
@@ -1385,6 +1388,7 @@ mod tests {
                 ("interruptions", self.interruptions),
                 ("rebases", self.rebases),
                 ("forgets", self.forgets),
+                ("batched forgets", self.batched_forgets),
             ] {
                 assert!(
                     count >= at_least || skipped.contains(&name),
@@ -2557,6 +2561,52 @@ mod tests {
     }
 
     #[test]
+    fn a_request_to_forget_inside_a_batch_edit_loses_none_of_it() {
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("e", "");
+
+        mirror.commit_text("\u{301}", 1);
+        assert_eq!(
+            pump(&mut engine, &mut mirror, &mut field),
+            [(Request::Forget, 0)]
+        );
+
+        // The request runs between two calls of the keyboard's next batch
+        // edit, which reports when it ends: what the batch edited so far is
+        // reported before the rebase, and the batch goes on in the empty
+        // mirror.
+        mirror.begin_batch_edit();
+        mirror.commit_text("x", 1);
+        mirror.forget(0);
+        assert!(mirror.units.is_empty());
+        mirror.commit_text("y", 1);
+        mirror.end_batch_edit();
+
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert_eq!(field.text(), "e\u{301}xy");
+        assert_eq!(engine.base, "y");
+
+        // A secure field's mirror is empty after each report: the request
+        // rebases it all the same, and leaves nothing to forget later.
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(true, 4096);
+        let mut field = Field::new("e", "");
+
+        mirror.commit_text("\u{301}", 1);
+        assert_eq!(
+            pump(&mut engine, &mut mirror, &mut field),
+            [(Request::Forget, 0)]
+        );
+        mirror.forget(0);
+        assert_eq!(mirror.out, [Message::Rebase { generation: 0 }]);
+        assert!(!mirror.forgetting);
+        let _ = pump(&mut engine, &mut mirror, &mut field);
+        assert!(engine.is_idle());
+        assert_eq!(field.text(), "e\u{301}");
+    }
+
+    #[test]
     fn pinyin_composes_and_commits_chinese() {
         let mut harness = Harness::new("", "!");
 
@@ -3126,7 +3176,9 @@ mod tests {
     }
 
     /// One thing a keyboard does.
-    fn keyboard_op(m: &mut Mirror, rng: &mut Rng) {
+    fn keyboard_op(harness: &mut Harness, rng: &mut Rng) {
+        let m = &mut harness.mirror;
+
         match rng.below(64) {
             0..=43 => text_op(m, rng),
             44..=51 => m.send_key(KEYCODE_DEL),
@@ -3138,10 +3190,26 @@ mod tests {
             58..=59 => m.send_char(rng.pick(&['a', 'é', 'ß', '1', ' ', '你'])),
             _ => {
                 m.begin_batch_edit();
+
                 for _ in 0..rng.between(2, 4) {
-                    text_op(m, rng);
+                    text_op(&mut harness.mirror, rng);
+
+                    // The UI thread runs a request to forget between two
+                    // calls of the batch, with its edits not reported yet.
+                    // A reset never runs there: it restarts the keyboard,
+                    // whose old connection edits nothing afterwards.
+                    if rng.chance(80)
+                        && matches!(
+                            harness.posted.front(),
+                            Some(Posted::Forget(_))
+                        )
+                    {
+                        harness.adopt();
+                        harness.seen.batched_forgets += 1;
+                    }
                 }
-                m.end_batch_edit();
+
+                harness.mirror.end_batch_edit();
             }
         }
     }
@@ -3160,7 +3228,7 @@ mod tests {
             harness.label = format!("seed {seed} step {step}");
 
             match rng.below(100) {
-                0..=79 => keyboard_op(&mut harness.mirror, &mut rng),
+                0..=79 => keyboard_op(&mut harness, &mut rng),
                 80..=83 => {
                     let at = rng.below(harness.app.value.len() + 1);
                     harness.tap(at);
@@ -3213,7 +3281,9 @@ mod tests {
             seen.add(simulate(seed, 400, false, cap));
         }
 
-        seen.assert_reached(100, &[]);
+        // A request to forget meets an open batch edit more rarely.
+        seen.assert_reached(100, &["batched forgets"]);
+        seen.assert_reached(20, &[]);
     }
 
     #[test]
