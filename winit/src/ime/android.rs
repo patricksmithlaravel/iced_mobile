@@ -201,7 +201,9 @@ pub(crate) fn disable(window: winit::window::WindowId) -> bool {
 ///
 /// The focus is the one after the press, which may have moved it to
 /// another field, and the bounds are those the press was hit-tested
-/// against.
+/// against. A press on the focused field holds the keyboard's compositions
+/// back from it until that redraw, since the field may be a password field
+/// (see [`Feed::refocused`]).
 pub(crate) fn touched(
     events: &[core::Event],
     cursor: mouse::Cursor,
@@ -223,8 +225,17 @@ pub(crate) fn touched(
 
     let touched = presses.into_iter().any(|press| focused.contains(press));
 
-    // A widget focused from code before keeps its request.
-    SESSION.with_borrow_mut(|session| session.touched |= touched);
+    // A widget focused from code before keeps its request. The press may
+    // have focused a password field, whose purpose the shell learns at the
+    // redraw this asks for: until then the keyboard's compositions are held
+    // back from it, as after an operation moved the focus.
+    SESSION.with_borrow_mut(|session| {
+        session.touched |= touched;
+
+        if touched {
+            session.feed.refocused();
+        }
+    });
 
     touched
 }

@@ -454,11 +454,15 @@
 //!   A key the application handles later, from a subscription
 //!   (`keyboard::listen`, which is how it takes Tab: `text_input` ignores
 //!   it) or a task, comes after that text, which then goes to the field
-//!   that had the focus. When the key leaves no field with the focus
-//!   (Escape unfocuses a `text_input` or a `text_editor`, an `on_submit`
-//!   may remove the field or unfocus it), what the keyboard sent right
-//!   after it is dropped. A line break or tab inside longer committed text
-//!   is dropped, as on iOS.
+//!   that had the focus. A composition the keyboard still has open when
+//!   the subscription's focus move ends that session is dropped with it, as
+//!   a word being composed is when the application moves the focus itself:
+//!   a password it composes after such a Tab is never committed to either
+//!   field, and a password it commits reaches the field that had the focus.
+//!   When the key leaves no field with the focus (Escape unfocuses a
+//!   `text_input` or a `text_editor`, an `on_submit` may remove the field or
+//!   unfocus it), what the keyboard sent right after it is dropped. A line
+//!   break or tab inside longer committed text is dropped, as on iOS.
 //! - Everything the keyboard types, a single letter and its Paste
 //!   included, reaches the field as an input method's commit, as from a
 //!   desktop input method: `text_input` hands it to `on_input`, never to
@@ -595,12 +599,13 @@
 //! `IME_FLAG_NO_PERSONALIZED_LEARNING`). What a keyboard composes there
 //! reaches the field as typed text, so it is never drawn in clear, and so
 //! does a composition that reaches a secure field from another purpose (the
-//! field an Enter or Tab moved the focus from, the field the application
-//! focused from code, or a field it makes secure while the keyboard
-//! composes): the shell commits it as typed text at the redraw that tells
-//! it the field's purpose, and a field the focus moves to gets no preedit
-//! until then. On Android and iOS the window never draws a secure field's
-//! preedit. On iOS the view answers `isSecureTextEntry` for it: on the iOS
+//! field an Enter, Tab or tap moved the focus from, the field the
+//! application focused from code, or a field it makes secure while the
+//! keyboard composes): the shell commits it as typed text at the redraw that
+//! tells it the field's purpose, and a field the focus moves to, by a tap on
+//! it too, gets no preedit until then. On Android and iOS the window never
+//! draws a secure field's preedit. On iOS the view answers
+//! `isSecureTextEntry` for it: on the iOS
 //! 27.0 Simulator the keyboard then has no emoji or dictation key, and it
 //! switches to and from that keyboard as the focus moves between the secure
 //! field and another (a physical iPhone has not been tried). When the focus
