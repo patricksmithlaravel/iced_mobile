@@ -14,9 +14,13 @@ import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 
 /**
- * The view the keyboard types into: 1x1 pixels, transparent, focused while
- * a field wants the keyboard. It holds the keyboard's text, the mirror, and
- * reports it to the shell after each edit.
+ * The view the keyboard types into: 1x1 pixels, transparent, focused from
+ * the first field that wants the keyboard on. It holds the keyboard's text,
+ * the mirror, and reports it to the shell after each edit.
+ *
+ * <p>It is a text editor only while a field wants the keyboard: otherwise
+ * the keyboard sees a view that edits nothing, as without this view, and
+ * lets a hardware keyboard's keys through to the app.
  *
  * <p>The mirror holds only what was typed since the last reset or rebase,
  * not the field's text. Everything here runs on the UI thread.
@@ -81,12 +85,14 @@ final class KeyboardView extends View {
 
     @Override
     public boolean onCheckIsTextEditor() {
-        return true;
+        return installed && wanted;
     }
 
     @Override
     public InputConnection onCreateInputConnection(EditorInfo info) {
-        if (!installed) {
+        // No field: the keyboard gets no connection and an editor of type
+        // TYPE_NULL, as for a view that is not a text editor.
+        if (!installed || !wanted) {
             return null;
         }
 
@@ -164,11 +170,28 @@ final class KeyboardView extends View {
             purpose = Keyboard.NORMAL;
         }
 
+        boolean focused = isFocused();
         boolean changed = purpose != this.purpose;
+
+        if (focused && wanted && changed) {
+            // Another purpose, maybe another field: a composition is
+            // committed where it is, under the purpose it was typed with,
+            // and the keyboard for the new purpose does not see this text.
+            finishComposing();
+
+            if (!isEmpty()) {
+                rebase();
+            }
+        }
+
+        // The keyboard edits nothing since hide(), or edits for the old
+        // purpose: it starts again with this one.
+        boolean restart = focused && (!wanted || changed);
+
         this.purpose = purpose;
         wanted = true;
 
-        if (!isFocused()) {
+        if (!focused) {
             // Focusable from the first field on: before it, the view does
             // not take the focus when a hardware key leaves touch mode.
             setFocusable(true);
@@ -176,12 +199,7 @@ final class KeyboardView extends View {
 
             // Starts input, which reads the purpose.
             requestFocus();
-        } else if (changed) {
-            // Another field: its keyboard does not see this one's text.
-            if (!isEmpty()) {
-                rebase();
-            }
-
+        } else if (restart) {
             restart();
         }
 
@@ -190,13 +208,25 @@ final class KeyboardView extends View {
         }
     }
 
+    /**
+     * Hides the keyboard and forgets the mirror, which the shell has reset
+     * or knows to hold no text. The view keeps the focus but is no text
+     * editor until the next show.
+     */
     void hide() {
         if (!installed) {
             return;
         }
 
+        boolean editing = wanted;
+
         wanted = false;
         manager.hideSoftInputFromWindow(getWindowToken(), 0);
+        clear();
+
+        if (editing && isFocused()) {
+            restart();
+        }
     }
 
     /**

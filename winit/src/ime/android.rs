@@ -22,7 +22,22 @@
 //!   while the field still asks for it, which brings back a keyboard the
 //!   user hid. When no field asked before, what the keyboard sent since the
 //!   last field belongs to no field: it is dropped, and the engine and the
-//!   Java side are reset if it held anything. [`disable`] calls `hide()`.
+//!   Java side are reset if it held anything.
+//! - [`disable`] runs when no field asks any more. The field has lost the
+//!   focus, so what the keyboard typed and composes there is dropped, as
+//!   desktop input methods drop a composition then: the queue is emptied,
+//!   the engine and the Java side are reset unless the engine is idle, and
+//!   `hide()` follows. The window gets `input_method::Event::Closed` at the
+//!   next drain or interrupt, which clears the preedit every text widget
+//!   keeps (`text_input` and `text_editor` take it whatever their focus).
+//! - A widget operation (`text_input::focus`, `focus_next`, `unfocus`,
+//!   `move_cursor_to`, `select_all`, ...) can move the focus or the caret
+//!   while the keyboard has typed into the field. The event loop runs it
+//!   through a [`Watch`](super::Watch), which records that, and [`operated`]
+//!   then ends the session:
+//!   a focus moved to another widget is handled as [`disable`] handles it,
+//!   and a caret moved in the field as a tap is, so the composition is
+//!   committed where the caret now is.
 //! - From the first `show` to the next `hide`, the queue holds the window, so
 //!   that a native call can wake the event loop: it pushes its message and
 //!   requests a redraw (winit's Android loop ignores a bare wake). Native
@@ -40,9 +55,12 @@
 //!   a hardware key is pressed or the window loses the focus reaches the
 //!   application: the queued messages are applied first, then, unless the
 //!   engine is idle, it is reset, which commits a composition, and the Java
-//!   side forgets its text. Those edits reach the field ahead of the event,
-//!   so a tap on a Send button submits the word being composed, and the
-//!   keyboard's text starts again where the caret is after the event.
+//!   side forgets its text. When that gave the field edits, the event loop
+//!   applies them and builds the views again before the event reaches the
+//!   application (it returns true): a tap on a Send button submits the word
+//!   being composed, even when the button is enabled only once the field
+//!   holds text. The keyboard's text starts again where the caret is after
+//!   the event.
 //! - Dropping the [`Shell`] at the end of the run uninstalls the Java side,
 //!   deletes its global reference, empties the queue and lets go of the
 //!   window and the `AndroidApp`. The class and its loader stay loaded for
@@ -117,16 +135,58 @@ pub(crate) fn enable(
     SESSION.with_borrow_mut(|session| session.enable(window, purpose))
 }
 
-/// No field asks for the keyboard any more: hides it. False when the
-/// keyboard's Java side is not available, and the window must ask winit
-/// instead.
-pub(crate) fn disable() -> bool {
-    SESSION.with_borrow_mut(Session::disable)
+/// No field of `window` asks for the keyboard any more: hides it (see the
+/// module's documentation). False when the keyboard's Java side is not
+/// available, and the window must ask winit instead.
+pub(crate) fn disable(window: winit::window::WindowId) -> bool {
+    SESSION.with_borrow_mut(|session| session.disable(window))
+}
+
+/// Whether a widget operation is to be [watched](super::Watch): the keyboard
+/// is shown for a field and has typed or composes something there.
+pub(crate) fn is_typing() -> bool {
+    let typing = SESSION.with_borrow(|session| {
+        session.is_installed()
+            && session.shown.is_some()
+            && !session.engine.is_idle()
+    });
+
+    typing || !queue().messages.is_empty()
+}
+
+/// A watched widget operation ran on `window`: ends the keyboard's session
+/// if it moved the focus or the caret (see the module's documentation).
+pub(crate) fn operated<P, C>(
+    window: window::Id,
+    moved: super::Moved,
+    windows: &mut WindowManager<P, C>,
+    events: &mut Vec<(window::Id, core::Event)>,
+) where
+    P: Program,
+    C: Compositor<Renderer = P::Renderer>,
+    P::Theme: theme::Base,
+{
+    if moved.focus {
+        SESSION.with_borrow_mut(Session::abandon);
+
+        events.push((
+            window,
+            core::Event::InputMethod(input_method::Event::Closed),
+        ));
+    } else if moved.caret {
+        let edits = SESSION.with_borrow_mut(Session::finish);
+
+        let _ = deliver(edits, windows, events);
+    }
 }
 
 /// The shell's side of the run's session: what the event loop calls, and
 /// the end of the session when it is dropped.
-pub(crate) struct Shell;
+pub(crate) struct Shell {
+    /// The next interrupting event is the one the last interrupt returned
+    /// true for, which the event loop handles again.
+    replaying: bool,
+}
 
 impl Shell {
     /// Starts the run's session. A message left from the last Activity's
@@ -134,19 +194,25 @@ impl Shell {
     pub(crate) fn new() -> Self {
         clear_queue();
 
-        Self
+        Self { replaying: false }
     }
 
     /// Before `event` reaches the application: a touch that starts, a mouse
     /// button pressed, a hardware key pressed or the loss of the window's
     /// focus ends what the keyboard was typing (see the module's
     /// documentation).
+    ///
+    /// True when the field got edits: the event loop then handles them, and
+    /// builds the views again, before it hands `event` to the application,
+    /// and calls this again with `event`, which then does nothing.
+    #[must_use]
     pub(crate) fn interrupt<P, C>(
         &mut self,
         event: &winit::event::WindowEvent,
         windows: &mut WindowManager<P, C>,
         events: &mut Vec<(window::Id, core::Event)>,
-    ) where
+    ) -> bool
+    where
         P: Program,
         C: Compositor<Renderer = P::Renderer>,
         P::Theme: theme::Base,
@@ -167,31 +233,31 @@ impl Shell {
                 ..
             } if event.state == ElementState::Pressed => false,
             WindowEvent::Focused(false) => false,
-            _ => return,
+            _ => return false,
         };
 
-        let edits = SESSION.with_borrow_mut(|session| {
-            let mut edits = Vec::new();
+        let replayed = std::mem::take(&mut self.replaying);
 
+        let edits = SESSION.with_borrow_mut(|session| {
             if !session.is_installed() {
-                return edits;
+                return Vec::new();
             }
 
             if touch {
                 session.touch = Touch::Pending;
             }
 
-            session.apply_queue(&mut edits);
-
-            if !session.engine.is_idle() {
-                let generation = session.engine.reset(&mut edits);
-                session.call(dex::RESET, &[JValue::Int(generation)]);
+            if replayed {
+                return Vec::new();
             }
 
-            edits
+            session.finish()
         });
 
-        deliver(edits, windows, events);
+        closed(windows, events);
+
+        self.replaying = deliver(edits, windows, events);
+        self.replaying
     }
 
     /// When the event loop is about to wait: applies what the keyboard sent
@@ -219,7 +285,9 @@ impl Shell {
             edits
         });
 
-        deliver(edits, windows, events);
+        closed(windows, events);
+
+        let _ = deliver(edits, windows, events);
     }
 }
 
@@ -242,6 +310,9 @@ struct Session {
     /// it.
     shown: Option<i32>,
     touch: Touch,
+    /// The window whose field lost the keyboard, which gets
+    /// `input_method::Event::Closed`.
+    closed: Option<winit::window::WindowId>,
 }
 
 /// The Java side for the run's Activity.
@@ -312,7 +383,7 @@ impl Session {
         true
     }
 
-    fn disable(&mut self) -> bool {
+    fn disable(&mut self, window: winit::window::WindowId) -> bool {
         self.touch = Touch::None;
 
         if !self.is_installed() {
@@ -320,11 +391,46 @@ impl Session {
         }
 
         if self.shown.take().is_some() {
+            self.abandon();
             self.call(dex::HIDE, &[]);
             set_window(None);
+            self.closed = Some(window);
         }
 
         true
+    }
+
+    /// The field the keyboard typed into lost the focus: what the keyboard
+    /// sent, typed and composes there is dropped, and its Java side starts
+    /// over.
+    fn abandon(&mut self) {
+        let _dropped = std::mem::take(&mut queue().messages);
+
+        if !self.engine.is_idle() {
+            let generation = self.engine.reset(&mut Vec::new());
+            self.call(dex::RESET, &[JValue::Int(generation)]);
+        }
+    }
+
+    /// The user or the application moved the caret: applies what the
+    /// keyboard sent, then, unless the engine is idle, resets it, which
+    /// commits a composition where it is, and has the Java side forget its
+    /// text. Returns the edits for the field.
+    fn finish(&mut self) -> Vec<Edit> {
+        let mut edits = Vec::new();
+
+        if !self.is_installed() {
+            return edits;
+        }
+
+        self.apply_queue(&mut edits);
+
+        if !self.engine.is_idle() {
+            let generation = self.engine.reset(&mut edits);
+            self.call(dex::RESET, &[JValue::Int(generation)]);
+        }
+
+        edits
     }
 
     fn is_installed(&self) -> bool {
@@ -435,14 +541,14 @@ impl Session {
         self.engine = Engine::new();
         self.shown = None;
         self.touch = Touch::None;
+        self.closed = None;
         self.app = None;
     }
 }
 
-/// Gives the edits to the window whose field asks for the keyboard, as its
-/// events.
-fn deliver<P, C>(
-    edits: Vec<Edit>,
+/// Gives `input_method::Event::Closed` to the window whose field lost the
+/// keyboard, if it is still open.
+fn closed<P, C>(
     windows: &mut WindowManager<P, C>,
     events: &mut Vec<(window::Id, core::Event)>,
 ) where
@@ -450,8 +556,31 @@ fn deliver<P, C>(
     C: Compositor<Renderer = P::Renderer>,
     P::Theme: theme::Base,
 {
-    if edits.is_empty() {
+    let Some(window) = SESSION.with_borrow_mut(|session| session.closed.take())
+    else {
         return;
+    };
+
+    if let Some((id, _window)) = windows.get_mut_alias(window) {
+        events
+            .push((id, core::Event::InputMethod(input_method::Event::Closed)));
+    }
+}
+
+/// Gives the edits to the window whose field asks for the keyboard, as its
+/// events. Whether a window got any.
+fn deliver<P, C>(
+    edits: Vec<Edit>,
+    windows: &mut WindowManager<P, C>,
+    events: &mut Vec<(window::Id, core::Event)>,
+) -> bool
+where
+    P: Program,
+    C: Compositor<Renderer = P::Renderer>,
+    P::Theme: theme::Base,
+{
+    if edits.is_empty() {
+        return false;
     }
 
     let Some((id, window)) = windows
@@ -463,7 +592,7 @@ fn deliver<P, C>(
             edits.len()
         );
 
-        return;
+        return false;
     };
 
     let modifiers = conversion::modifiers(window.state.modifiers());
@@ -471,6 +600,8 @@ fn deliver<P, C>(
     for edit in edits {
         super::events(edit, modifiers, |event| events.push((id, event)));
     }
+
+    true
 }
 
 /// Loads the class if this process has not, then installs the Java side

@@ -331,7 +331,7 @@ where
                 target_os = "android",
                 feature = "android-native-activity"
             ))]
-            let keyboard = crate::ime::disable();
+            let keyboard = crate::ime::disable(self.raw.id());
 
             #[cfg(not(all(
                 target_os = "android",

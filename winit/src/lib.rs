@@ -914,6 +914,10 @@ async fn run_instance<P>(
     let mut safe_area = safe_area::Shell::new();
     #[cfg(all(target_os = "android", feature = "android-native-activity"))]
     let mut keyboard = ime::Shell::new();
+    // Android (NativeActivity): events handled before the next one received
+    // (see `ime::Shell::interrupt`).
+    #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+    let mut replay = std::collections::VecDeque::new();
 
     let mut compositor = None;
     let mut events = Vec::new();
@@ -962,8 +966,18 @@ async fn run_instance<P>(
     log::info!("System theme: {system_theme:?}");
 
     'next_event: loop {
+        #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+        let replayed = replay.pop_front();
+        #[cfg(not(all(
+            target_os = "android",
+            feature = "android-native-activity"
+        )))]
+        let replayed = None;
+
         // Empty the queue if possible
-        let event = if let Ok(event) = try_next(&mut event_receiver) {
+        let event = if let Some(event) = replayed {
+            Some(event)
+        } else if let Ok(event) = try_next(&mut event_receiver) {
             event
         } else {
             event_receiver.next().await
@@ -1533,15 +1547,31 @@ async fn run_instance<P>(
                         // Android (NativeActivity): a tap, a mouse button,
                         // a hardware key or the loss of the focus ends what
                         // the keyboard was typing, and its edits come first.
+                        // The application takes them, and the views are
+                        // built again, before the event reaches it: a
+                        // button that the finished word enables takes the
+                        // tap that finished it.
                         #[cfg(all(
                             target_os = "android",
                             feature = "android-native-activity"
                         ))]
-                        keyboard.interrupt(
+                        if keyboard.interrupt(
                             &window_event,
                             &mut window_manager,
                             &mut events,
-                        );
+                        ) {
+                            replay.push_back(Event::EventLoopAwakened(
+                                event::Event::AboutToWait,
+                            ));
+                            replay.push_back(Event::EventLoopAwakened(
+                                event::Event::WindowEvent {
+                                    event: window_event,
+                                    window_id,
+                                },
+                            ));
+
+                            continue;
+                        }
 
                         let Some((id, window)) =
                             window_manager.get_mut_alias(window_id)
@@ -2388,11 +2418,49 @@ fn run_action<'a, P, C>(
             }
         },
         Action::Widget(operation) => {
+            // Android (NativeActivity): an operation that moves the focus or
+            // the caret while the keyboard types ends what it typed (see
+            // `ime`), so the one on the window that has the keyboard is
+            // watched.
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            let typing = ime::is_typing()
+                .then(|| {
+                    window_manager
+                        .iter_mut()
+                        .find(|(_id, window)| window.ime_requested())
+                        .map(|(id, _window)| id)
+                })
+                .flatten();
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            let mut moved = ime::Moved::default();
+
             let mut current_operation = Some(operation);
 
             while let Some(mut operation) = current_operation.take() {
                 for (id, ui) in interfaces.iter_mut() {
                     if let Some(window) = window_manager.get_mut(*id) {
+                        #[cfg(all(
+                            target_os = "android",
+                            feature = "android-native-activity"
+                        ))]
+                        if typing == Some(*id) {
+                            ui.operate(
+                                &window.renderer,
+                                &mut ime::Watch::new(
+                                    operation.as_mut(),
+                                    &mut moved,
+                                ),
+                            );
+
+                            continue;
+                        }
+
                         ui.operate(&window.renderer, operation.as_mut());
                     }
                 }
@@ -2404,6 +2472,14 @@ fn run_action<'a, P, C>(
                         current_operation = Some(next);
                     }
                 }
+            }
+
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            if let Some(id) = typing {
+                ime::operated(id, moved, window_manager, events);
             }
         }
         Action::Image(action) => match action {

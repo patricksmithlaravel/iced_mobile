@@ -79,7 +79,10 @@ public final class Keyboard {
         post(SHOW, purpose);
     }
 
-    /** Hides the keyboard. */
+    /**
+     * Hides the keyboard and forgets its text; until the next {@link #show},
+     * the keyboard has nothing to edit.
+     */
     public void hide() {
         post(HIDE, 0);
     }
