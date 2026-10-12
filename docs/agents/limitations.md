@@ -124,9 +124,11 @@ this file in the commit that fixes or finds a limitation.
     Backspace, Delete, Enter, Tab, Escape, the arrows, Home and End. Its
     Ctrl and Meta shortcuts (Ctrl+C, X, V and A on keyboards that have a
     Ctrl key) and its other keys (Page Up and Down, function keys, Insert)
-    are dropped, and its arrows, Home and End come without its own Shift,
-    so they move the caret without selecting. A hardware keyboard's keys
-    reach the app as before.
+    are dropped, and its keys come without modifiers, its own Shift or one
+    held on a hardware keyboard: its arrows, Home and End move the caret
+    without selecting, and a Ctrl held on a hardware keyboard does not make
+    its deletions delete words. A hardware keyboard's keys reach the app as
+    before.
   - On Android, the keyboard's editing panel (Gboard's text editing tools)
     works in part: Select all selects the field's text (the field's own
     Ctrl+A), and Paste inserts the clipboard's text at the caret without

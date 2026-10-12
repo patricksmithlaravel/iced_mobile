@@ -70,7 +70,8 @@ use crate::core::{
     touch,
 };
 
-/// The events an edit becomes for the focused field, in order.
+/// The events an edit becomes for the focused field, in order, with
+/// `modifiers` the window's (a hardware keyboard's).
 ///
 /// A key is a press and a release shaped like the keys winit's Android
 /// backend reports and `conversion` maps: the named key as both the key and
@@ -81,11 +82,16 @@ use crate::core::{
 /// key acts; `text_editor` takes Delete only with no text or "\u{7f}", and
 /// moves only on a key without text.
 ///
-/// Select all is the text widgets' own shortcut, Ctrl+A: the A key pressed
-/// and released with `Modifiers::COMMAND` added to the window's modifiers,
-/// between two `ModifiersChanged` when that adds it, since `text_input`
-/// reads the modifiers from those and `text_editor` from the key; the
-/// second puts back the window's own.
+/// The keys are the engine's, which keep the field in step with the
+/// keyboard's text: a Backspace deletes one cluster and an arrow moves over
+/// one. So they are pressed with no modifier, whatever the hardware
+/// keyboard holds, where Ctrl would make a Backspace delete a word and
+/// Shift an arrow select. Select all is the text widgets' own shortcut,
+/// Ctrl+A: the A key pressed and released with `Modifiers::COMMAND` alone.
+/// When those are not the window's modifiers, the press and the release
+/// come between two `ModifiersChanged`, since `text_input` reads the
+/// modifiers from those and `text_editor` from the key; the second puts
+/// back the window's own.
 ///
 /// A commit and a preedit are the input method's events; an empty preedit
 /// with no cursor clears a shown one. `Opened` is never sent: `text_input`
@@ -105,69 +111,54 @@ fn events(
     use keyboard::key::{Code, Named, Physical};
 
     match edit {
-        edit::Edit::Key(key) => {
+        edit::Edit::Key(pressed) => {
             let named = keyboard::Key::Named;
 
-            // The key, its physical key, its text, and the modifiers it is
-            // pressed with.
-            let (key, code, text, with) = match key {
-                edit::Key::Backspace => (
-                    named(Named::Backspace),
-                    Code::Backspace,
-                    Some("\u{8}"),
-                    modifiers,
-                ),
-                edit::Key::Delete => (
-                    named(Named::Delete),
-                    Code::Delete,
-                    Some("\u{7f}"),
-                    modifiers,
-                ),
+            // The key, its physical key and its text.
+            let (key, code, text) = match pressed {
+                edit::Key::Backspace => {
+                    (named(Named::Backspace), Code::Backspace, Some("\u{8}"))
+                }
+                edit::Key::Delete => {
+                    (named(Named::Delete), Code::Delete, Some("\u{7f}"))
+                }
                 edit::Key::Left => {
-                    (named(Named::ArrowLeft), Code::ArrowLeft, None, modifiers)
+                    (named(Named::ArrowLeft), Code::ArrowLeft, None)
                 }
-                edit::Key::Right => (
-                    named(Named::ArrowRight),
-                    Code::ArrowRight,
-                    None,
-                    modifiers,
-                ),
-                edit::Key::Up => {
-                    (named(Named::ArrowUp), Code::ArrowUp, None, modifiers)
+                edit::Key::Right => {
+                    (named(Named::ArrowRight), Code::ArrowRight, None)
                 }
+                edit::Key::Up => (named(Named::ArrowUp), Code::ArrowUp, None),
                 edit::Key::Down => {
-                    (named(Named::ArrowDown), Code::ArrowDown, None, modifiers)
+                    (named(Named::ArrowDown), Code::ArrowDown, None)
                 }
-                edit::Key::Home => {
-                    (named(Named::Home), Code::Home, None, modifiers)
-                }
-                edit::Key::End => {
-                    (named(Named::End), Code::End, None, modifiers)
-                }
+                edit::Key::Home => (named(Named::Home), Code::Home, None),
+                edit::Key::End => (named(Named::End), Code::End, None),
                 edit::Key::Enter => {
-                    (named(Named::Enter), Code::Enter, Some("\r"), modifiers)
+                    (named(Named::Enter), Code::Enter, Some("\r"))
                 }
-                edit::Key::Tab => {
-                    (named(Named::Tab), Code::Tab, Some("\t"), modifiers)
+                edit::Key::Tab => (named(Named::Tab), Code::Tab, Some("\t")),
+                edit::Key::Escape => {
+                    (named(Named::Escape), Code::Escape, Some("\u{1b}"))
                 }
-                edit::Key::Escape => (
-                    named(Named::Escape),
-                    Code::Escape,
-                    Some("\u{1b}"),
-                    modifiers,
-                ),
                 edit::Key::SelectAll => (
                     keyboard::Key::Character(SmolStr::new("a")),
                     Code::KeyA,
                     None,
-                    modifiers | keyboard::Modifiers::COMMAND,
                 ),
             };
 
-            let physical_key = Physical::Code(code);
-            let shortcut = with != modifiers;
+            // The modifiers it is pressed with: none but Select all's own.
+            let with = if pressed == edit::Key::SelectAll {
+                keyboard::Modifiers::COMMAND
+            } else {
+                keyboard::Modifiers::empty()
+            };
 
-            if shortcut {
+            let physical_key = Physical::Code(code);
+            let changed = with != modifiers;
+
+            if changed {
                 push(core::Event::Keyboard(keyboard::Event::ModifiersChanged(
                     with,
                 )));
@@ -191,7 +182,7 @@ fn events(
                 modifiers: with,
             }));
 
-            if shortcut {
+            if changed {
                 push(core::Event::Keyboard(keyboard::Event::ModifiersChanged(
                     modifiers,
                 )));
@@ -1550,22 +1541,35 @@ mod tests {
         }
     }
 
-    fn convert(edit: edit::Edit) -> Vec<core::Event> {
+    /// The events of `edit` while the window has `modifiers`.
+    fn convert_with(
+        edit: edit::Edit,
+        modifiers: keyboard::Modifiers,
+    ) -> Vec<core::Event> {
         let mut out = Vec::new();
-        events(edit, keyboard::Modifiers::SHIFT, |event| out.push(event));
+        events(edit, modifiers, |event| out.push(event));
         out
     }
 
-    fn press(named: Named, code: Code, text: Option<&str>) -> [core::Event; 2] {
-        let key = keyboard::Key::Named(named);
+    /// The events of `edit` while the window has no modifiers.
+    fn convert(edit: edit::Edit) -> Vec<core::Event> {
+        convert_with(edit, keyboard::Modifiers::empty())
+    }
 
+    /// A press and a release of `key` with `modifiers`.
+    fn pressed(
+        key: keyboard::Key,
+        code: Code,
+        text: Option<&str>,
+        modifiers: keyboard::Modifiers,
+    ) -> [core::Event; 2] {
         [
             core::Event::Keyboard(keyboard::Event::KeyPressed {
                 key: key.clone(),
                 modified_key: key.clone(),
                 physical_key: Physical::Code(code),
                 location: keyboard::Location::Standard,
-                modifiers: keyboard::Modifiers::SHIFT,
+                modifiers,
                 text: text.map(SmolStr::new),
                 repeat: false,
             }),
@@ -1574,112 +1578,145 @@ mod tests {
                 modified_key: key,
                 physical_key: Physical::Code(code),
                 location: keyboard::Location::Standard,
-                modifiers: keyboard::Modifiers::SHIFT,
+                modifiers,
             }),
         ]
     }
 
+    /// A press and a release of a named key with no modifiers.
+    fn press(named: Named, code: Code, text: Option<&str>) -> [core::Event; 2] {
+        pressed(
+            keyboard::Key::Named(named),
+            code,
+            text,
+            keyboard::Modifiers::empty(),
+        )
+    }
+
+    fn modifiers_changed(modifiers: keyboard::Modifiers) -> core::Event {
+        core::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers))
+    }
+
+    /// Every key the engine presses but Select all, its named key, physical
+    /// key and text.
+    const KEYS: [(edit::Key, Named, Code, Option<&str>); 11] = [
+        (
+            edit::Key::Backspace,
+            Named::Backspace,
+            Code::Backspace,
+            Some("\u{8}"),
+        ),
+        (
+            edit::Key::Delete,
+            Named::Delete,
+            Code::Delete,
+            Some("\u{7f}"),
+        ),
+        (edit::Key::Enter, Named::Enter, Code::Enter, Some("\r")),
+        (edit::Key::Tab, Named::Tab, Code::Tab, Some("\t")),
+        (
+            edit::Key::Escape,
+            Named::Escape,
+            Code::Escape,
+            Some("\u{1b}"),
+        ),
+        (edit::Key::Left, Named::ArrowLeft, Code::ArrowLeft, None),
+        (edit::Key::Right, Named::ArrowRight, Code::ArrowRight, None),
+        (edit::Key::Up, Named::ArrowUp, Code::ArrowUp, None),
+        (edit::Key::Down, Named::ArrowDown, Code::ArrowDown, None),
+        (edit::Key::Home, Named::Home, Code::Home, None),
+        (edit::Key::End, Named::End, Code::End, None),
+    ];
+
     #[test]
     fn keys_are_a_press_and_a_release_with_desktop_text() {
-        let cases = [
-            (
-                edit::Key::Backspace,
-                Named::Backspace,
-                Code::Backspace,
-                "\u{8}",
-            ),
-            (edit::Key::Delete, Named::Delete, Code::Delete, "\u{7f}"),
-            (edit::Key::Enter, Named::Enter, Code::Enter, "\r"),
-            (edit::Key::Tab, Named::Tab, Code::Tab, "\t"),
-            (edit::Key::Escape, Named::Escape, Code::Escape, "\u{1b}"),
-        ];
-
-        for (key, named, code, text) in cases {
+        // The arrows, Home and End have none.
+        for (key, named, code, text) in KEYS {
             assert_eq!(
                 convert(edit::Edit::Key(key)),
-                press(named, code, Some(text)),
+                press(named, code, text),
                 "{key:?}"
             );
         }
     }
 
     #[test]
-    fn moves_have_no_text() {
-        let cases = [
-            (edit::Key::Left, Named::ArrowLeft, Code::ArrowLeft),
-            (edit::Key::Right, Named::ArrowRight, Code::ArrowRight),
-            (edit::Key::Up, Named::ArrowUp, Code::ArrowUp),
-            (edit::Key::Down, Named::ArrowDown, Code::ArrowDown),
-            (edit::Key::Home, Named::Home, Code::Home),
-            (edit::Key::End, Named::End, Code::End),
-        ];
+    fn keys_come_without_the_hardware_keyboards_modifiers() {
+        // A Ctrl or Shift held on a hardware keyboard would make the
+        // engine's Backspace delete a word, or its arrows select: the keys
+        // come with none, between two `ModifiersChanged` for `text_input`,
+        // the second giving back the window's.
+        for held in [
+            keyboard::Modifiers::SHIFT,
+            keyboard::Modifiers::CTRL,
+            keyboard::Modifiers::ALT,
+            keyboard::Modifiers::LOGO,
+            keyboard::Modifiers::SHIFT | keyboard::Modifiers::CTRL,
+        ] {
+            for (key, named, code, text) in KEYS {
+                let [down, up] = press(named, code, text);
 
-        for (key, named, code) in cases {
-            assert_eq!(
-                convert(edit::Edit::Key(key)),
-                press(named, code, None),
-                "{key:?}"
-            );
+                assert_eq!(
+                    convert_with(edit::Edit::Key(key), held),
+                    [
+                        modifiers_changed(keyboard::Modifiers::empty()),
+                        down,
+                        up,
+                        modifiers_changed(held),
+                    ],
+                    "{key:?} with {held:?}"
+                );
+            }
         }
     }
 
     #[test]
     fn select_all_is_the_fields_shortcut() {
-        let shortcut = |modifiers: keyboard::Modifiers| {
-            let key = keyboard::Key::Character(SmolStr::new("a"));
-            let with = modifiers | keyboard::Modifiers::COMMAND;
-
-            [
-                core::Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: key.clone(),
-                    modified_key: key.clone(),
-                    physical_key: Physical::Code(Code::KeyA),
-                    location: keyboard::Location::Standard,
-                    modifiers: with,
-                    text: None,
-                    repeat: false,
-                }),
-                core::Event::Keyboard(keyboard::Event::KeyReleased {
-                    key: key.clone(),
-                    modified_key: key,
-                    physical_key: Physical::Code(Code::KeyA),
-                    location: keyboard::Location::Standard,
-                    modifiers: with,
-                }),
-            ]
+        let shortcut = || {
+            pressed(
+                keyboard::Key::Character(SmolStr::new("a")),
+                Code::KeyA,
+                None,
+                keyboard::Modifiers::COMMAND,
+            )
         };
 
         // `text_input` takes the command modifier from `ModifiersChanged`,
-        // which then gives back the window's own.
-        let [pressed, released] = shortcut(keyboard::Modifiers::SHIFT);
-        assert_eq!(
-            convert(edit::Edit::Key(edit::Key::SelectAll)),
-            [
-                core::Event::Keyboard(keyboard::Event::ModifiersChanged(
-                    keyboard::Modifiers::SHIFT | keyboard::Modifiers::COMMAND
-                )),
-                pressed,
-                released,
-                core::Event::Keyboard(keyboard::Event::ModifiersChanged(
-                    keyboard::Modifiers::SHIFT
-                )),
-            ]
-        );
+        // which then gives back the window's own, and the key comes with no
+        // other: Shift held on a hardware keyboard is left out.
+        for held in [keyboard::Modifiers::empty(), keyboard::Modifiers::SHIFT] {
+            let [down, up] = shortcut();
+
+            assert_eq!(
+                convert_with(edit::Edit::Key(edit::Key::SelectAll), held),
+                [
+                    modifiers_changed(keyboard::Modifiers::COMMAND),
+                    down,
+                    up,
+                    modifiers_changed(held),
+                ],
+                "{held:?}"
+            );
+        }
 
         // With it held already, none is needed.
-        let mut out = Vec::new();
-        events(
-            edit::Edit::Key(edit::Key::SelectAll),
-            keyboard::Modifiers::COMMAND,
-            |event| out.push(event),
+        assert_eq!(
+            convert_with(
+                edit::Edit::Key(edit::Key::SelectAll),
+                keyboard::Modifiers::COMMAND
+            ),
+            shortcut()
         );
-        assert_eq!(out, shortcut(keyboard::Modifiers::COMMAND));
     }
 
     #[test]
     fn commits_and_preedits_are_input_method_events() {
+        // Whatever the window's modifiers.
         assert_eq!(
-            convert(edit::Edit::Commit("héllo".to_owned())),
+            convert_with(
+                edit::Edit::Commit("héllo".to_owned()),
+                keyboard::Modifiers::CTRL
+            ),
             [core::Event::InputMethod(input_method::Event::Commit(
                 "héllo".to_owned()
             ))]

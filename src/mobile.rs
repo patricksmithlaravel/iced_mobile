@@ -456,9 +456,11 @@
 //! - The keyboard's keys reach a field only as text, Backspace, Delete,
 //!   Enter, Tab, Escape, the arrows, Home and End. Its Ctrl and Meta
 //!   shortcuts (on keyboards that have a Ctrl key) and its other keys (Page
-//!   Up and Down, function keys, Insert) are dropped, and its arrows, Home
-//!   and End come without its own Shift, so they move the caret without
-//!   selecting. A hardware keyboard's keys reach the application as before.
+//!   Up and Down, function keys, Insert) are dropped, and its keys come
+//!   without modifiers, its own Shift or one held on a hardware keyboard:
+//!   its arrows, Home and End move the caret without selecting, and a Ctrl
+//!   held on a hardware keyboard does not make its deletions delete words.
+//!   A hardware keyboard's keys reach the application as before.
 //! - The keyboard's editing panel (Gboard's text editing tools) works in
 //!   part: Select all selects the field's text (the field's own Ctrl+A),
 //!   and Paste inserts the clipboard's text at the caret without its line

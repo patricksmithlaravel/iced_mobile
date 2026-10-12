@@ -276,8 +276,9 @@ Text input on Android, and secure fields on Android and iOS:
   without dropping keys sent in quick succession. The keyboard's other keys no longer reach the
   app, as they did as key events before: its Ctrl and Meta shortcuts (Ctrl+C, X, V and A on
   keyboards that have a Ctrl key), Page Up and Down, function keys and Insert are dropped, and its
-  arrows, Home and End come without its own Shift, so they move the caret without selecting. A
-  hardware keyboard's keys reach the app as before.
+  keys come without modifiers, its own Shift or one held on a hardware keyboard: its arrows, Home
+  and End move the caret without selecting, and a Ctrl held on a hardware keyboard does not make
+  its deletions delete words. A hardware keyboard's keys reach the app as before.
 - **Android:** the keyboard's editing panel (Gboard's text editing tools) works in fields: Select all
   selects the field's text, as its Ctrl+A does, and Paste inserts the clipboard's text at the caret
   without its line breaks and tabs. Cut and Copy take what the keyboard selected in the text it typed

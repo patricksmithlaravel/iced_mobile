@@ -90,7 +90,10 @@
 //!   The keyboard's text starts again where the caret is after the event. A
 //!   modifier (Shift, Ctrl, Alt, ...) moves no caret and ends nothing: an
 //!   input method that composes a hardware keyboard's letters may let it
-//!   through.
+//!   through. It reaches the application at once, before the edits queued
+//!   ahead of it, and those the keyboard makes while it is held: neither
+//!   takes it, since the keys the edits become come without the window's
+//!   modifiers (`events`).
 //! - Dropping the [`Shell`] at the end of the run uninstalls the Java side,
 //!   deletes its global reference, empties the queue and lets go of the
 //!   window and the `AndroidApp`. The class and its loader stay loaded for
