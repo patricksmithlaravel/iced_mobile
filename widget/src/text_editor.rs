@@ -986,11 +986,14 @@ where
 
         let text_bounds = bounds.shrink(self.padding);
 
-        // The placeholder gives way to a preedit, as in `text_input`.
-        let is_composing = state
-            .preedit
-            .as_ref()
-            .is_some_and(|preedit| !preedit.content.is_empty());
+        // On Android and iOS the placeholder gives way to a preedit, as in
+        // `text_input`. Elsewhere it is drawn under one, as upstream draws
+        // it.
+        let is_composing = cfg!(any(target_os = "android", target_os = "ios"))
+            && state
+                .preedit
+                .as_ref()
+                .is_some_and(|preedit| !preedit.content.is_empty());
 
         if internal.editor.is_empty() && !is_composing {
             if let Some(placeholder) = self.placeholder.clone() {
