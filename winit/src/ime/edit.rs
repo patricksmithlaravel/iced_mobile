@@ -85,6 +85,10 @@ pub(crate) const KEYCODE_DPAD_RIGHT: i32 = 22;
 pub(crate) const KEYCODE_MOVE_HOME: i32 = 122;
 /// Android's `KeyEvent.KEYCODE_MOVE_END`.
 pub(crate) const KEYCODE_MOVE_END: i32 = 123;
+/// The keyboard's Select all (`performContextMenuAction` with
+/// `android.R.id.selectAll`), which the Java side sends as a key: Android
+/// has no key code for it, and none is this large.
+pub(crate) const SELECT_ALL: i32 = 0x0001_0000;
 
 /// A message from the keyboard's Java side, in the order it was sent.
 ///
@@ -102,7 +106,8 @@ pub(crate) enum Message {
     },
     /// A key the keyboard pressed that does not edit the mirror: Backspace
     /// or Delete with nothing to delete in the mirror, or Enter, Tab,
-    /// Escape, an arrow, Home or End. `code` is Android's key code.
+    /// Escape, an arrow, Home or End, or its Select all. `code` is Android's
+    /// key code, or [`SELECT_ALL`].
     Key { generation: i32, code: i32 },
     /// The Java side emptied the mirror without a reset (a secure field
     /// after each report, a mirror grown past its cap, a key that moves the
@@ -145,6 +150,8 @@ pub(crate) enum Key {
     Enter,
     Tab,
     Escape,
+    /// Selects all of the field's text: its own shortcut.
+    SelectAll,
 }
 
 impl Key {
@@ -162,6 +169,7 @@ impl Key {
             KEYCODE_ENTER | KEYCODE_NUMPAD_ENTER => Self::Enter,
             KEYCODE_TAB => Self::Tab,
             KEYCODE_ESCAPE => Self::Escape,
+            SELECT_ALL => Self::SelectAll,
             _ => return None,
         })
     }
@@ -226,8 +234,9 @@ impl Engine {
     ///
     /// An Enter, Tab or Escape key from the keyboard first commits a shown
     /// preedit, so a field submitted by Enter has the word being composed,
-    /// and yields. An arrow, Home or End key commits it too. After any of
-    /// them the Java side rebases when the mirror held text, and an empty
+    /// and yields. An arrow, Home or End key, and Select all, commit it too.
+    /// After any of them the Java side rebases when the mirror held text,
+    /// and an empty
     /// mirror leaves the engine idle, so either way the origin follows the
     /// app's caret, with no new generation: what the keyboard sends after
     /// the key counts. A message of another generation predates a reset the
@@ -462,9 +471,11 @@ impl Engine {
             | Key::End
             | Key::Enter
             | Key::Tab
-            | Key::Escape => {
+            | Key::Escape
+            | Key::SelectAll => {
                 // The rebase that follows a non-empty mirror, or the empty
-                // one, makes the app's caret after the key the origin: no
+                // one, makes the app's caret after the key the origin (after
+                // Select all, the selection the next text replaces): no
                 // new generation, so the keys and text the keyboard sends
                 // meanwhile count. The engine knows nothing of the text
                 // before it, and starts over at once.
@@ -761,6 +772,9 @@ mod tests {
         value: Vec<String>,
         caret: usize,
         preedit: Option<(String, Option<Range<usize>>)>,
+        /// All of the value is selected (Select all), which the next text,
+        /// Backspace or Delete replaces and an arrow ends.
+        selected: bool,
         /// While the last edits applied: the lowest caret, and the fewest
         /// clusters after it.
         low: usize,
@@ -778,6 +792,7 @@ mod tests {
                 value,
                 caret,
                 preedit: None,
+                selected: false,
                 low: caret,
             }
         }
@@ -791,6 +806,38 @@ mod tests {
             self.tail = self.value.len() - self.caret;
 
             for edit in edits {
+                if std::mem::take(&mut self.selected) {
+                    match edit {
+                        Edit::Key(Key::Backspace | Key::Delete) => {
+                            self.value.clear();
+                            self.caret = 0;
+                            continue;
+                        }
+                        Edit::Commit(_) => {
+                            self.value.clear();
+                            self.caret = 0;
+                        }
+                        Edit::Key(Key::Left) => {
+                            self.caret = 0;
+                            continue;
+                        }
+                        Edit::Key(Key::Right) => {
+                            self.caret = self.value.len();
+                            continue;
+                        }
+                        Edit::Key(
+                            Key::Enter
+                            | Key::Tab
+                            | Key::Escape
+                            | Key::SelectAll,
+                        )
+                        | Edit::Preedit(..) => self.selected = true,
+                        Edit::Key(
+                            Key::Up | Key::Down | Key::Home | Key::End,
+                        ) => {}
+                    }
+                }
+
                 match edit {
                     Edit::Key(Key::Backspace) => {
                         if self.caret > 0 {
@@ -818,6 +865,10 @@ mod tests {
                         | Key::Tab
                         | Key::Escape,
                     ) => {}
+                    Edit::Key(Key::SelectAll) => {
+                        self.selected = !self.value.is_empty();
+                        self.caret = self.value.len();
+                    }
                     Edit::Commit(text) => {
                         let inserted = graphemes(text);
                         let count = inserted.len();
@@ -903,6 +954,7 @@ mod tests {
                 | KEYCODE_NUMPAD_ENTER
                 | KEYCODE_TAB
                 | KEYCODE_ESCAPE
+                | SELECT_ALL
         )
     }
 
@@ -1183,6 +1235,50 @@ mod tests {
             self.composing = None;
             self.replace(&text, 1, false);
             self.end_batch_edit();
+        }
+
+        /// `KeyboardConnection.performContextMenuAction` with
+        /// `android.R.id.paste`: the clipboard's text, without its line
+        /// breaks and tabs, goes in at the selection after any composition
+        /// is finished, as a key's character does; never a key.
+        fn paste(&mut self, clip: &str) {
+            let text = plain(clip);
+
+            if text.is_empty() {
+                return;
+            }
+
+            self.begin_batch_edit();
+            self.composing = None;
+            self.replace(&text, 1, false);
+            self.end_batch_edit();
+        }
+
+        /// `performContextMenuAction` with `android.R.id.copy` (or `cut`):
+        /// the mirror's selection, which a cut also deletes; none when
+        /// nothing is selected or the field is a password.
+        fn copy(&mut self, cut: bool) -> Option<String> {
+            let (start, end) = self.ordered_selection();
+
+            if self.secure || start == end {
+                return None;
+            }
+
+            let text = String::from_utf16_lossy(&self.units[start..end]);
+
+            if cut {
+                self.begin_batch_edit();
+                self.delete(start, end);
+                self.end_batch_edit();
+            }
+
+            Some(text)
+        }
+
+        /// `performContextMenuAction` with `android.R.id.selectAll`: the
+        /// field's own Select all, which the mirror cannot hold.
+        fn select_all(&mut self) {
+            self.forward(SELECT_ALL);
         }
 
         /// `KeyboardView.forward`: the composition is finished and reported
@@ -2238,6 +2334,7 @@ mod tests {
             (KEYCODE_DPAD_RIGHT, Key::Right),
             (KEYCODE_MOVE_HOME, Key::Home),
             (KEYCODE_MOVE_END, Key::End),
+            (SELECT_ALL, Key::SelectAll),
         ] {
             let mut engine = Engine::new();
             let request = if matches!(key, Key::Enter | Key::Tab | Key::Escape)
@@ -3171,6 +3268,91 @@ mod tests {
             harness.mirror.units,
             "pw".encode_utf16().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn the_keyboards_paste_goes_in_at_the_caret() {
+        let mut harness = Harness::new("x", "!");
+
+        // The composition is finished first, and line breaks and tabs are
+        // dropped, as from the keyboard's clipboard.
+        let _ = harness.run(|m| m.set_composing_text("wo", 1));
+        assert_eq!(
+            harness.run(|m| m.paste("rld\nnext\t")),
+            [clear(), commit("worldnext")]
+        );
+        assert_eq!(harness.value(), "xworldnext!");
+
+        // A clip of only a line break pastes nothing: it is never Enter.
+        assert_eq!(harness.run(|m| m.paste("\n")), []);
+        assert_eq!(harness.run(|m| m.paste("")), []);
+
+        // The mirror holds the pasted text, which Backspace deletes.
+        assert_eq!(
+            harness.run(|m| m.send_key(KEYCODE_DEL)),
+            [Edit::Key(Key::Backspace)]
+        );
+        assert_eq!(harness.value(), "xworldnex!");
+    }
+
+    #[test]
+    fn the_keyboards_cut_and_copy_take_its_own_selection() {
+        let mut harness = Harness::new("> ", "");
+
+        let _ = harness.run(|m| m.commit_text("hello", 1));
+        let _ = harness.run(|m| m.set_selection(1, 3));
+
+        // Copy leaves the text.
+        assert_eq!(harness.mirror.copy(false).as_deref(), Some("el"));
+        harness.drain();
+        assert_eq!(harness.take(), []);
+        assert_eq!(harness.value(), "> hello");
+
+        // Cut deletes it in the field too.
+        assert_eq!(harness.mirror.copy(true).as_deref(), Some("el"));
+        harness.drain();
+        assert_eq!(harness.take(), keys(Key::Backspace, 2));
+        assert_eq!(harness.value(), "> hlo");
+
+        // Nothing selected: nothing to take.
+        assert_eq!(harness.mirror.copy(false), None);
+        assert_eq!(harness.mirror.copy(true), None);
+
+        // A password is never taken, not even while it is composed.
+        let mut harness = Harness::with("", "", true, 4096);
+        let _ = harness.run(|m| m.set_composing_text("pw", 1));
+        let _ = harness.run(|m| m.set_selection(0, 2));
+        assert_eq!(harness.mirror.copy(false), None);
+        assert_eq!(harness.mirror.copy(true), None);
+        assert_eq!(harness.value(), "pw");
+    }
+
+    #[test]
+    fn select_all_selects_the_fields_text_for_the_next_edit() {
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("abc", "");
+
+        // The composition is committed, then the field selects all of its
+        // text, and the mirror starts over.
+        mirror.set_composing_text("de", 1);
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        mirror.select_all();
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert_eq!((field.text().as_str(), field.selected), ("abcde", true));
+        assert!(mirror.units.is_empty());
+        assert!(engine.is_idle());
+
+        // The next text replaces it.
+        mirror.commit_text("x", 1);
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert_eq!((field.text().as_str(), field.selected), ("x", false));
+
+        // The keyboard's Backspace deletes it.
+        mirror.select_all();
+        mirror.send_key(KEYCODE_DEL);
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert_eq!(field.text(), "");
     }
 
     #[test]

@@ -30,6 +30,12 @@ public final class Keyboard {
     static final int SECURE = 1;
     static final int TERMINAL = 2;
 
+    /**
+     * The key code {@link #key} sends for the keyboard's Select all, which
+     * Android has none for: larger than any of its key codes.
+     */
+    static final int SELECT_ALL = 0x10000;
+
     private static final int CREATE = 0;
     private static final int SHOW = 1;
     private static final int HIDE = 2;

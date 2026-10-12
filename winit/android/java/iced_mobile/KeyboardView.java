@@ -1,5 +1,6 @@
 package iced_mobile;
 
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.text.Editable;
 import android.text.Selection;
@@ -81,6 +82,17 @@ final class KeyboardView extends View {
     /** Whether a connection created at {@code epoch} may still edit. */
     boolean accepts(int epoch) {
         return installed && epoch == this.epoch;
+    }
+
+    /** Whether the field is a password field. */
+    boolean isSecure() {
+        return purpose == Keyboard.SECURE;
+    }
+
+    /** The system clipboard, or null. */
+    ClipboardManager clipboard() {
+        return (ClipboardManager) getContext()
+                .getSystemService(Context.CLIPBOARD_SERVICE);
     }
 
     @Override
@@ -311,7 +323,7 @@ final class KeyboardView extends View {
             return;
         }
 
-        boolean secure = purpose == Keyboard.SECURE;
+        boolean secure = isSecure();
         int selStart = Selection.getSelectionStart(mirror);
         int selEnd = Selection.getSelectionEnd(mirror);
         boolean composing = composingStart() != -1;
@@ -452,10 +464,11 @@ final class KeyboardView extends View {
 
     /**
      * Whether the mirror starts over after the key: it moves the app's
-     * caret, or may submit or leave the field.
+     * caret or selection, or may submit or leave the field.
      */
     private static boolean startsOver(int keyCode) {
         switch (keyCode) {
+            case Keyboard.SELECT_ALL:
             case KeyEvent.KEYCODE_DPAD_UP:
             case KeyEvent.KEYCODE_DPAD_DOWN:
             case KeyEvent.KEYCODE_DPAD_LEFT:

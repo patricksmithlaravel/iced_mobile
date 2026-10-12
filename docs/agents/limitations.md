@@ -24,7 +24,8 @@ this file in the commit that fixes or finds a limitation.
 - **No edit menu on phones.** A long press in a text field shows no menu and
   no selection handles, and the Ctrl shortcuts of text fields fire only from
   a hardware keyboard on Android (iOS hardware keyboards send no modifier
-  keys). The clipboard itself works: `iced::clipboard::read` and `write` use
+  keys); the Android keyboard's own Select all and Paste work, its Cut and
+  Copy only on what it typed (see Text input). The clipboard itself works: `iced::clipboard::read` and `write` use
   the system's, so give fields that need it Copy and Paste buttons. Read
   only when the user asks to paste: Android 10 and later give `None` to an
   app without the input focus, and iOS 16 and later ask the user ("Allow
@@ -125,6 +126,13 @@ this file in the commit that fixes or finds a limitation.
     are dropped, and its arrows, Home and End come without its own Shift,
     so they move the caret without selecting. A hardware keyboard's keys
     reach the app as before.
+  - On Android, the keyboard's editing panel (Gboard's text editing tools)
+    works in part: Select all selects the field's text (the field's own
+    Ctrl+A), and Paste inserts the clipboard's text at the caret without
+    its line breaks and tabs, as a paste from the keyboard's clipboard
+    does. Cut and Copy take only what the keyboard selected in the text it
+    typed since it last started over, never the field's other text or a
+    password; Gboard offers them only then.
   - On Android, a keyboard the user hid while a field keeps the focus
     comes back at a tap on a field, and also whenever the window gets the
     focus back (after the notification shade, a system dialog or another

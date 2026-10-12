@@ -274,6 +274,10 @@ Text input on Android, and secure fields on Android and iOS:
   keyboards that have a Ctrl key), Page Up and Down, function keys and Insert are dropped, and its
   arrows, Home and End come without its own Shift, so they move the caret without selecting. A
   hardware keyboard's keys reach the app as before.
+- **Android:** the keyboard's editing panel (Gboard's text editing tools) works in fields: Select all
+  selects the field's text, as its Ctrl+A does, and Paste inserts the clipboard's text at the caret
+  without its line breaks and tabs. Cut and Copy take what the keyboard selected in the text it typed
+  since it last started over, never a password. Before, the input connection ignored them.
 - **Android:** a tap, a hardware key other than a modifier or the window losing the focus commits
   the word being composed, and the app takes the commit, and builds its view again, before the tap:
   a Send button enabled only once the field holds text takes the tap that finished the word. Shift,

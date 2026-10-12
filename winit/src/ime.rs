@@ -74,6 +74,12 @@ use crate::core::{
 /// key acts; `text_editor` takes Delete only with no text or "\u{7f}", and
 /// moves only on a key without text.
 ///
+/// Select all is the text widgets' own shortcut, Ctrl+A: the A key pressed
+/// and released with `Modifiers::COMMAND` added to the window's modifiers,
+/// between two `ModifiersChanged` when that adds it, since `text_input`
+/// reads the modifiers from those and `text_editor` from the key; the
+/// second puts back the window's own.
+///
 /// A commit and a preedit are the input method's events; an empty preedit
 /// with no cursor clears a shown one. `Opened` is never sent: `text_input`
 /// and `text_editor` take a preedit and a commit without it, and it would
@@ -93,35 +99,79 @@ fn events(
 
     match edit {
         edit::Edit::Key(key) => {
-            let (named, code, text) = match key {
-                edit::Key::Backspace => {
-                    (Named::Backspace, Code::Backspace, Some("\u{8}"))
+            let named = keyboard::Key::Named;
+
+            // The key, its physical key, its text, and the modifiers it is
+            // pressed with.
+            let (key, code, text, with) = match key {
+                edit::Key::Backspace => (
+                    named(Named::Backspace),
+                    Code::Backspace,
+                    Some("\u{8}"),
+                    modifiers,
+                ),
+                edit::Key::Delete => (
+                    named(Named::Delete),
+                    Code::Delete,
+                    Some("\u{7f}"),
+                    modifiers,
+                ),
+                edit::Key::Left => {
+                    (named(Named::ArrowLeft), Code::ArrowLeft, None, modifiers)
                 }
-                edit::Key::Delete => {
-                    (Named::Delete, Code::Delete, Some("\u{7f}"))
+                edit::Key::Right => (
+                    named(Named::ArrowRight),
+                    Code::ArrowRight,
+                    None,
+                    modifiers,
+                ),
+                edit::Key::Up => {
+                    (named(Named::ArrowUp), Code::ArrowUp, None, modifiers)
                 }
-                edit::Key::Left => (Named::ArrowLeft, Code::ArrowLeft, None),
-                edit::Key::Right => (Named::ArrowRight, Code::ArrowRight, None),
-                edit::Key::Up => (Named::ArrowUp, Code::ArrowUp, None),
-                edit::Key::Down => (Named::ArrowDown, Code::ArrowDown, None),
-                edit::Key::Home => (Named::Home, Code::Home, None),
-                edit::Key::End => (Named::End, Code::End, None),
-                edit::Key::Enter => (Named::Enter, Code::Enter, Some("\r")),
-                edit::Key::Tab => (Named::Tab, Code::Tab, Some("\t")),
-                edit::Key::Escape => {
-                    (Named::Escape, Code::Escape, Some("\u{1b}"))
+                edit::Key::Down => {
+                    (named(Named::ArrowDown), Code::ArrowDown, None, modifiers)
                 }
+                edit::Key::Home => {
+                    (named(Named::Home), Code::Home, None, modifiers)
+                }
+                edit::Key::End => {
+                    (named(Named::End), Code::End, None, modifiers)
+                }
+                edit::Key::Enter => {
+                    (named(Named::Enter), Code::Enter, Some("\r"), modifiers)
+                }
+                edit::Key::Tab => {
+                    (named(Named::Tab), Code::Tab, Some("\t"), modifiers)
+                }
+                edit::Key::Escape => (
+                    named(Named::Escape),
+                    Code::Escape,
+                    Some("\u{1b}"),
+                    modifiers,
+                ),
+                edit::Key::SelectAll => (
+                    keyboard::Key::Character(SmolStr::new("a")),
+                    Code::KeyA,
+                    None,
+                    modifiers | keyboard::Modifiers::COMMAND,
+                ),
             };
 
-            let key = keyboard::Key::Named(named);
             let physical_key = Physical::Code(code);
+            let shortcut = with != modifiers;
+
+            if shortcut {
+                push(core::Event::Keyboard(keyboard::Event::ModifiersChanged(
+                    with,
+                )));
+            }
 
             push(core::Event::Keyboard(keyboard::Event::KeyPressed {
                 key: key.clone(),
                 modified_key: key.clone(),
                 physical_key,
                 location: keyboard::Location::Standard,
-                modifiers,
+                modifiers: with,
                 text: text.map(SmolStr::new),
                 repeat: false,
             }));
@@ -131,8 +181,14 @@ fn events(
                 modified_key: key,
                 physical_key,
                 location: keyboard::Location::Standard,
-                modifiers,
+                modifiers: with,
             }));
+
+            if shortcut {
+                push(core::Event::Keyboard(keyboard::Event::ModifiersChanged(
+                    modifiers,
+                )));
+            }
         }
         edit::Edit::Commit(text) => {
             push(core::Event::InputMethod(input_method::Event::Commit(text)));
@@ -1505,6 +1561,59 @@ mod tests {
                 "{key:?}"
             );
         }
+    }
+
+    #[test]
+    fn select_all_is_the_fields_shortcut() {
+        let shortcut = |modifiers: keyboard::Modifiers| {
+            let key = keyboard::Key::Character(SmolStr::new("a"));
+            let with = modifiers | keyboard::Modifiers::COMMAND;
+
+            [
+                core::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: key.clone(),
+                    modified_key: key.clone(),
+                    physical_key: Physical::Code(Code::KeyA),
+                    location: keyboard::Location::Standard,
+                    modifiers: with,
+                    text: None,
+                    repeat: false,
+                }),
+                core::Event::Keyboard(keyboard::Event::KeyReleased {
+                    key: key.clone(),
+                    modified_key: key,
+                    physical_key: Physical::Code(Code::KeyA),
+                    location: keyboard::Location::Standard,
+                    modifiers: with,
+                }),
+            ]
+        };
+
+        // `text_input` takes the command modifier from `ModifiersChanged`,
+        // which then gives back the window's own.
+        let [pressed, released] = shortcut(keyboard::Modifiers::SHIFT);
+        assert_eq!(
+            convert(edit::Edit::Key(edit::Key::SelectAll)),
+            [
+                core::Event::Keyboard(keyboard::Event::ModifiersChanged(
+                    keyboard::Modifiers::SHIFT | keyboard::Modifiers::COMMAND
+                )),
+                pressed,
+                released,
+                core::Event::Keyboard(keyboard::Event::ModifiersChanged(
+                    keyboard::Modifiers::SHIFT
+                )),
+            ]
+        );
+
+        // With it held already, none is needed.
+        let mut out = Vec::new();
+        events(
+            edit::Edit::Key(edit::Key::SelectAll),
+            keyboard::Modifiers::COMMAND,
+            |event| out.push(event),
+        );
+        assert_eq!(out, shortcut(keyboard::Modifiers::COMMAND));
     }
 
     #[test]

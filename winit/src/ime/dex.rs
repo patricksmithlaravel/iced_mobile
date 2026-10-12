@@ -97,12 +97,24 @@
 //! - `KEYCODE_DPAD_UP` (19), `KEYCODE_DPAD_DOWN` (20), `KEYCODE_DPAD_LEFT`
 //!   (21), `KEYCODE_DPAD_RIGHT` (22), `KEYCODE_MOVE_HOME` (122) and
 //!   `KEYCODE_MOVE_END` (123).
+//! - 0x10000 (`Keyboard.SELECT_ALL`, the engine's `SELECT_ALL`): the
+//!   keyboard's Select all (`performContextMenuAction` with
+//!   `android.R.id.selectAll`). Android has no key code for it, and none of
+//!   its key codes is this large. The field selects all of its text.
 //!
-//! After an Enter, Tab or Escape key, or a caret-moving one, the app's
-//! caret moves, or its field may be submitted or left, where the mirror
-//! cannot follow, so when the mirror was not empty a rebase follows at
-//! once, with no new generation: what the keyboard sends after the key
-//! counts.
+//! After an Enter, Tab or Escape key, a caret-moving one or Select all, the
+//! app's caret or selection moves, or its field may be submitted or left,
+//! where the mirror cannot follow, so when the mirror was not empty a
+//! rebase follows at once, with no new generation: what the keyboard sends
+//! after the key counts.
+//!
+//! The keyboard's Cut and Copy (`performContextMenuAction` with
+//! `android.R.id.cut` and `copy`) put the mirror's selection on the
+//! clipboard, and Cut deletes it, which is reported as a state; with
+//! nothing selected, and always for a secure field, they do nothing. Paste
+//! (`android.R.id.paste` and `pasteAsPlainText`) commits the clipboard's
+//! text at the selection after any composition is finished, without line
+//! breaks and tabs and never as a key, and is reported as a state.
 //!
 //! Other keys with a character, unless pressed with Ctrl or Meta and
 //! unless a dead key, are typed into the mirror at the cursor after any

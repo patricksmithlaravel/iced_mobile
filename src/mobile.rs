@@ -454,6 +454,12 @@
 //!   Up and Down, function keys, Insert) are dropped, and its arrows, Home
 //!   and End come without its own Shift, so they move the caret without
 //!   selecting. A hardware keyboard's keys reach the application as before.
+//! - The keyboard's editing panel (Gboard's text editing tools) works in
+//!   part: Select all selects the field's text (the field's own Ctrl+A),
+//!   and Paste inserts the clipboard's text at the caret without its line
+//!   breaks and tabs. Cut and Copy take only what the keyboard selected in
+//!   the text it typed since it last started over, never the field's other
+//!   text or a password; Gboard offers them only then.
 //! - If the user hides the keyboard while a field keeps the focus, a tap on
 //!   a field brings it back, also on a `text_editor`, which otherwise
 //!   ignores the tap. A tap elsewhere leaves it hidden. The window getting
@@ -812,7 +818,9 @@
 //!   task ends without an id.
 //! - **No edit menu.** A long press in a text field shows no menu and no
 //!   selection handles, and the copy, cut and paste shortcuts of text
-//!   fields fire only from a hardware keyboard on Android. The
+//!   fields fire only from a hardware keyboard on Android, where the
+//!   keyboard's own Select all and Paste work too, and its Cut and Copy
+//!   only on what it typed. The
 //!   [clipboard](#clipboard) itself works: offer Copy and Paste buttons
 //!   where they matter.
 //! - **Text input on Android** ([Text input](#text-input)). The keyboard

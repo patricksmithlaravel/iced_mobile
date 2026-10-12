@@ -1,5 +1,7 @@
 package iced_mobile;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.text.Editable;
 import android.text.Selection;
 import android.text.TextUtils;
@@ -11,7 +13,8 @@ import android.view.inputmethod.BaseInputConnection;
  * What the keyboard does to the view's mirror. The editing itself is
  * {@link BaseInputConnection}'s; this class counts batch edits, has the view
  * report the mirror when the outermost one ends, handles the keys the
- * keyboard sends and the Enter and Tab it commits, and keeps line breaks and
+ * keyboard sends, the Enter and Tab it commits and the actions of its
+ * editing panel (Select all, Cut, Copy, Paste), and keeps line breaks and
  * tabs out of what it commits and composes (replaceText is not filtered).
  *
  * <p>A connection edits nothing once the view restarted the keyboard, was
@@ -214,6 +217,41 @@ final class KeyboardConnection extends BaseInputConnection {
         return true;
     }
 
+    /**
+     * The keyboard's Select all, Cut, Copy and Paste, as from its editing
+     * panel. Select all is the field's own, which selects the field's text
+     * (the mirror holds only some of it), and the mirror starts over. Cut
+     * and Copy take the mirror's selection, the only one the keyboard
+     * knows of, and never a password. Paste inserts the clipboard's text as
+     * a key's character goes in, without line breaks and tabs.
+     */
+    @Override
+    public boolean performContextMenuAction(int id) {
+        if (!active()) {
+            return false;
+        }
+
+        try {
+            switch (id) {
+                case android.R.id.selectAll:
+                    view.forward(Keyboard.SELECT_ALL);
+                    return true;
+                case android.R.id.cut:
+                    return copy(true);
+                case android.R.id.copy:
+                    return copy(false);
+                case android.R.id.paste:
+                case android.R.id.pasteAsPlainText:
+                    return paste();
+                default:
+                    return false;
+            }
+        } catch (RuntimeException error) {
+            Keyboard.warn("performContextMenuAction", error);
+            return false;
+        }
+    }
+
     @Override
     public boolean performEditorAction(int editorAction) {
         if (!active()) {
@@ -340,10 +378,19 @@ final class KeyboardConnection extends BaseInputConnection {
             return;
         }
 
+        insert(characters);
+    }
+
+    /**
+     * Commits {@code characters} without line breaks and tabs at the
+     * selection, after any composition is finished. False when nothing is
+     * left to insert.
+     */
+    private boolean insert(CharSequence characters) {
         CharSequence text = plain(characters);
 
         if (text.length() == 0) {
-            return;
+            return false;
         }
 
         beginBatchEdit();
@@ -354,6 +401,70 @@ final class KeyboardConnection extends BaseInputConnection {
         } finally {
             endBatchEdit();
         }
+
+        return true;
+    }
+
+    /**
+     * Copies the mirror's selection to the clipboard, and deletes it for a
+     * cut. False when nothing is selected or the field is a password field,
+     * whose text is never copied.
+     */
+    private boolean copy(boolean cut) {
+        Editable text = view.mirror();
+        int[] selection = selection(text);
+
+        if (view.isSecure() || selection == null
+                || selection[0] == selection[1]) {
+            return false;
+        }
+
+        ClipboardManager clipboard = view.clipboard();
+
+        if (clipboard == null) {
+            return false;
+        }
+
+        clipboard.setPrimaryClip(ClipData.newPlainText(null,
+                text.subSequence(selection[0], selection[1]).toString()));
+
+        if (cut) {
+            beginBatchEdit();
+
+            try {
+                text.delete(selection[0], selection[1]);
+            } finally {
+                endBatchEdit();
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Inserts the clipboard's text, its items one after the other. False
+     * when it holds no text. Never logged.
+     */
+    private boolean paste() {
+        ClipboardManager clipboard = view.clipboard();
+        ClipData clip = clipboard == null ? null : clipboard.getPrimaryClip();
+
+        if (clip == null) {
+            return false;
+        }
+
+        StringBuilder text = new StringBuilder();
+
+        for (int index = 0; index < clip.getItemCount(); index++) {
+            CharSequence item =
+                    clip.getItemAt(index).coerceToText(view.getContext());
+
+            if (item != null) {
+                text.append(item);
+            }
+        }
+
+        return insert(text);
     }
 
     /**
