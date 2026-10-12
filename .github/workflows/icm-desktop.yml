@@ -50,15 +50,23 @@ jobs:
       - name: The template's toolchain
         run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)".*/\1/p' examples/app/rust-toolchain.toml)" --profile minimal
       - name: Phase 5 acceptance
+        # The runner is throwaway: the test keychain may join its search
+        # list for the signed release, which codesign needs on macOS 26
+        # (phase5.sh's header). The list is put back and checked.
+        env:
+          ICM_ACCEPT_KEYCHAIN_SEARCH: "1"
         run: ACCEPT="$RUNNER_TEMP/accept" cli/tests/accept/phase5.sh
       - name: Keep the release
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: icm-macos-release
+          # The run directories hold each tool's log (codesign's included).
           path: |
             ${{ runner.temp }}/accept/demo/target/icm/dist
+            ${{ runner.temp }}/accept/demo/target/icm/runs
             ${{ runner.temp }}/accept/log
+            ${{ runner.temp }}/accept/*.json
           if-no-files-found: ignore
 
   linux:

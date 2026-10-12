@@ -156,7 +156,10 @@ stop only the platforms they drive and leave the other platforms' devices alone
   - macOS: an unsigned release and its DMG, which it mounts and verifies, and the app launched. A
     release signed with a throwaway self-signed identity (`test-identity.sh`) in a temporary
     keychain, which never joins the user's search list (the script checks the list is unchanged)
-    and is deleted at the end. The owner's notarization steps are SKIP.
+    and is deleted at the end. The owner's notarization steps are SKIP. Only on a throwaway
+    machine, `ICM_ACCEPT_KEYCHAIN_SEARCH=1` (the CI job sets it) lets that keychain join the list
+    for the signed release, since codesign's `--keychain` only narrows a search of the list and
+    macOS 26's codesign finds no identity outside it; the list is put back and checked.
   - Linux: the `.deb` and the AppImage (`--sign none`), `linux.glibc_floor`, `icm verify linux`,
     `dpkg -i` and `dpkg -r` (as root, or with `ICM_ACCEPT_INSTALL=1` and passwordless sudo), and
     the AppImage's first frame under `xvfb-run` or the session's display.

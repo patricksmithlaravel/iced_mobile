@@ -40,6 +40,16 @@
 # unchanged) and are deleted at the end. The user's own keychains are
 # never searched. Windows and Linux releases here are `--sign none`.
 #
+# Except on a throwaway machine that asks for it: codesign's --keychain only
+# narrows its search to one keychain of the search list (Apple DTS,
+# https://developer.apple.com/forums/thread/728073). macOS 27.0.1's codesign
+# found the identity outside the list; the macOS 26.6.2 CI runner's did not
+# ("<sha1>: no identity found"). With ICM_ACCEPT_KEYCHAIN_SEARCH=1, which
+# the CI workflow sets, the test keychain joins the end of the search list
+# for the signed release only, and icm still names it with ICM_KEYCHAIN.
+# The list is then restored, and the step's own check and the final one
+# still compare it with the list from before the run.
+#
 # Owner steps (never run here; printed as SKIP):
 #   - macOS: notarization and stapling (UPLOAD.md), `icm release macos
 #     --dmg` of the stapled app, and `icm verify macos --after-notarize`.
@@ -84,6 +94,7 @@ echo "host: $HOST"
 
 cleanup() {
     if [ "$HOST" = macos ]; then
+        restore_search_list
         local kc
         for kc in "$EMPTY_KC" "$TEST_KC"; do
             if [ -f "$kc" ]; then
@@ -236,6 +247,37 @@ other_hosts() {
 
 # --- macOS ----------------------------------------------------------------
 
+# keychain_paths: the paths of a `security list-keychains` listing on
+# stdin, one per line, without their quotes.
+keychain_paths() {
+    sed -n 's/^[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p'
+}
+
+# join_search_list KEYCHAIN: with ICM_ACCEPT_KEYCHAIN_SEARCH=1 only (a
+# throwaway machine), KEYCHAIN joins the end of the user's search list, as
+# codesign needs (see the header); otherwise nothing changes.
+join_search_list() {
+    [ "${ICM_ACCEPT_KEYCHAIN_SEARCH:-}" = 1 ] || return 0
+    local list=() path
+    while IFS= read -r path; do
+        list+=("$path")
+    done < <(printf '%s\n' "$SEARCH_LIST_BEFORE" | keychain_paths)
+    security list-keychains -d user -s ${list[@]+"${list[@]}"} "$1"
+    evidence "ICM_ACCEPT_KEYCHAIN_SEARCH=1: $(basename "$1") joined the search list for this release"
+}
+
+# restore_search_list: with ICM_ACCEPT_KEYCHAIN_SEARCH=1 only, the user's
+# search list as it was before the run, when it differs.
+restore_search_list() {
+    [ "${ICM_ACCEPT_KEYCHAIN_SEARCH:-}" = 1 ] || return 0
+    [ "$(security list-keychains -d user)" != "$SEARCH_LIST_BEFORE" ] || return 0
+    local list=() path
+    while IFS= read -r path; do
+        list+=("$path")
+    done < <(printf '%s\n' "$SEARCH_LIST_BEFORE" | keychain_paths)
+    security list-keychains -d user -s ${list[@]+"${list[@]}"}
+}
+
 keychains() {
     mkdir -p "$ACCEPT/keys"
     security create-keychain -p "$KC_PASS" "$EMPTY_KC"
@@ -320,7 +362,11 @@ test_identity_release() {
     sed -i '' "s/^identity = \"auto\"/identity = \"$sha1\"/" icm.toml
     sips --rotate 90 "$DEMO/assets/icon.png" --out "$ACCEPT/icon.png" >/dev/null
     cp "$ACCEPT/icon.png" "$DEMO/assets/icon.png"
+    # The step's subshell puts the list back however it ends.
+    trap restore_search_list EXIT
+    join_search_list "$TEST_KC"
     ICM_KEYCHAIN=$TEST_KC icm release macos --json -q >"$ACCEPT/release-test-id.json" || true
+    restore_search_list
     jqe '.exit == 9 and .errors[0].id == "macos.sign.no_developer_id" and .release.uploadable == false' "$ACCEPT/release-test-id.json"
     for id in macos.sign.verify macos.hardened_runtime macos.min_os macos.bundle; do
         check_event "$ACCEPT/release-test-id.json" ".id == \"$id\" and .status == \"pass\""
