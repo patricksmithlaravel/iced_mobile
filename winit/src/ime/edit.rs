@@ -973,7 +973,7 @@ mod tests {
         /// with no composition.
         cap: usize,
         /// The native side asked to forget the text: rebase once nothing
-        /// composes.
+        /// composes and no batch edit is open.
         forgetting: bool,
         batch: usize,
         reported: Snapshot,
@@ -1361,7 +1361,9 @@ mod tests {
                     self.len() > self.cap
                 };
 
-            if clear && self.composing.is_none() {
+            // Not while something composes, nor inside a batch edit, which
+            // the keyboard worked out from the text it saw when it began.
+            if clear && self.composing.is_none() && self.batch == 0 {
                 self.rebase();
             }
         }
@@ -1402,16 +1404,19 @@ mod tests {
             self.told = ((0, 0), None);
         }
 
-        /// `Keyboard.forget(generation)` running on the UI thread, maybe
-        /// inside a batch edit: what the batch edited so far is reported
-        /// first, then the mirror is rebased once nothing composes.
+        /// `Keyboard.forget(generation)` running on the UI thread: the
+        /// mirror is rebased once nothing composes, and inside a batch edit
+        /// once the batch ends, after its report.
         fn forget(&mut self, generation: i32) {
             if generation != self.generation {
                 return;
             }
 
             self.forgetting = true;
-            self.send_report();
+
+            if self.batch == 0 {
+                self.send_report();
+            }
         }
     }
 
@@ -3030,7 +3035,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_to_forget_inside_a_batch_edit_loses_none_of_it() {
+    fn a_request_to_forget_waits_for_the_keyboards_batch_edit() {
         let mut engine = Engine::new();
         let mut mirror = Mirror::new(false, 4096);
         let mut field = Field::new("e", "");
@@ -3042,19 +3047,53 @@ mod tests {
         );
 
         // The request runs between two calls of the keyboard's next batch
-        // edit, which reports when it ends: what the batch edited so far is
-        // reported before the rebase, and the batch goes on in the empty
-        // mirror.
+        // edit: the batch goes on with the text the keyboard saw when it
+        // began it, and the report when it ends rebases.
         mirror.begin_batch_edit();
         mirror.commit_text("x", 1);
         mirror.forget(0);
-        assert!(mirror.units.is_empty());
+        assert_eq!(mirror.out, []);
+        assert_eq!(String::from_utf16_lossy(&mirror.units), "\u{301}x");
         mirror.commit_text("y", 1);
         mirror.end_batch_edit();
+        assert_eq!(mirror.out.back(), Some(&Message::Rebase { generation: 0 }));
 
         assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
         assert_eq!(field.text(), "e\u{301}xy");
-        assert_eq!(engine.base, "y");
+        assert!(engine.is_idle());
+        assert!(mirror.units.is_empty() && !mirror.forgetting);
+
+        // A key the batch sends reports what it edited before the key, and
+        // the rebase still waits for the batch to end.
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("e", "");
+
+        mirror.commit_text("\u{301}", 1);
+        assert_eq!(
+            pump(&mut engine, &mut mirror, &mut field),
+            [(Request::Forget, 0)]
+        );
+        mirror.begin_batch_edit();
+        mirror.forget(0);
+        mirror.commit_text("x", 1);
+        mirror.delete_surrounding_text(0, 1);
+        mirror.commit_text("y", 1);
+        mirror.end_batch_edit();
+
+        let kinds: Vec<&str> = mirror
+            .out
+            .iter()
+            .map(|message| match message {
+                Message::State { .. } => "state",
+                Message::Key { .. } => "key",
+                Message::Rebase { .. } => "rebase",
+            })
+            .collect();
+        assert_eq!(kinds, ["state", "key", "state", "rebase"]);
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert_eq!(field.text(), "e\u{301}xy");
+        assert!(engine.is_idle());
 
         // A secure field's mirror is empty after each report: the request
         // rebases it all the same, and leaves nothing to forget later.
@@ -3073,6 +3112,54 @@ mod tests {
         let _ = pump(&mut engine, &mut mirror, &mut field);
         assert!(engine.is_idle());
         assert_eq!(field.text(), "e\u{301}");
+    }
+
+    #[test]
+    fn a_batch_edit_the_request_to_forget_meets_edits_the_text_it_saw() {
+        // The field holds "क" and the user tapped after it. A keyboard that
+        // commits each letter types a vowel sign, which joins "क" in the
+        // field, then " teh". Its autocorrection on the next space is a
+        // batch edit worked out from that text, and the request to forget
+        // runs inside it: the batch still deletes "teh" and commits "the ",
+        // or selects "teh" and commits over it, and does not delete only
+        // "h", or insert, as it would in a mirror emptied in between.
+        let batches: [(&str, fn(&mut Mirror)); 2] = [
+            ("कि the ", |mirror| {
+                mirror.delete_surrounding_text(3, 0);
+                mirror.commit_text("the ", 1);
+            }),
+            ("कि the", |mirror| {
+                mirror.set_selection(2, 5);
+                mirror.commit_text("the", 1);
+            }),
+        ];
+
+        for (value, batch) in batches {
+            let mut engine = Engine::new();
+            let mut mirror = Mirror::new(false, 4096);
+            let mut field = Field::new("क", "");
+
+            mirror.commit_text("\u{093F}", 1);
+            assert_eq!(
+                pump(&mut engine, &mut mirror, &mut field),
+                [(Request::Forget, 0)]
+            );
+
+            for letter in [" ", "t", "e", "h"] {
+                mirror.commit_text(letter, 1);
+                assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+            }
+            assert_eq!(field.text(), "कि teh");
+
+            mirror.begin_batch_edit();
+            mirror.forget(0);
+            batch(&mut mirror);
+            mirror.end_batch_edit();
+
+            assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+            assert_eq!(field.text(), value);
+            assert!(engine.is_idle() && mirror.units.is_empty());
+        }
     }
 
     #[test]
@@ -3834,7 +3921,26 @@ mod tests {
                             Some(Posted::Forget(_))
                         )
                     {
+                        // The rest of the batch edits the text the keyboard
+                        // worked it out from: the request sends nothing and
+                        // changes nothing until the batch ends.
+                        let seen = |m: &Mirror| {
+                            (
+                                m.units.clone(),
+                                m.selection,
+                                m.composing,
+                                m.out.len(),
+                            )
+                        };
+                        let before = seen(&harness.mirror);
+
                         harness.adopt();
+                        assert_eq!(
+                            seen(&harness.mirror),
+                            before,
+                            "{}: a request to forget changed a batch edit's text",
+                            harness.label
+                        );
                         harness.seen.batched_forgets += 1;
                     }
                 }

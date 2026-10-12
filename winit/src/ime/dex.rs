@@ -27,7 +27,7 @@
 //! | [`SHOW`]: `public void show(int purpose)` | `(I)V` | focuses the view, makes it a text editor and shows the keyboard for `purpose`; a changed purpose first finishes a composition and rebases a mirror that holds text, then restarts the keyboard (`InputMethodManager.restartInput`), as the first `show` after a `hide` does. Until `hide`, the window gaining the focus shows the keyboard again |
 //! | [`HIDE`]: `public void hide()` | `()V` | hides the keyboard and clears the mirror (the shell has reset or knows it holds no text); the view keeps the focus but is no text editor (`onCheckIsTextEditor` false, no input connection) and restarts the keyboard, which then sees an editor of type `TYPE_NULL` and lets a hardware keyboard's keys through to the app |
 //! | [`RESET`]: `public void reset(int generation)` | `(I)V` | adopts `generation`, clears the mirror and restarts the keyboard (`InputMethodManager.restartInput`) |
-//! | [`FORGET`]: `public void forget(int generation)` | `(I)V` | unless a reset ran since the shell had `generation`: rebases the mirror (below), an empty one too, at once or, while something composes, once the composition ends; no new generation, no restart |
+//! | [`FORGET`]: `public void forget(int generation)` | `(I)V` | unless a reset ran since the shell had `generation`: rebases the mirror (below), an empty one too, at once or, while something composes or the keyboard has a batch edit open, once both ended (after the batch's report); no new generation, no restart |
 //! | [`UNINSTALL`]: `public void uninstall()` | `()V` | hides the keyboard if the view had the focus, removes the view and lets go of the Activity |
 //!
 //! `install` throws `IllegalArgumentException` for a null Activity, and the
@@ -133,10 +133,13 @@
 //!   composition was finished: the next field's keyboard does not see the
 //!   last field's text.
 //!
-//! None of them happens while something is composing. Each report, and
-//! each rebase, tells the keyboard the selection it leaves
-//! (`updateSelection`), so a keyboard that keeps the text before its cursor
-//! learns that the mirror is empty again.
+//! None of them happens while something is composing. Those that follow a
+//! report, and [`FORGET`]'s, also wait while the keyboard has a batch edit
+//! open, which it worked out from the text it saw when it began it: the
+//! report when the batch ends rebases, also when a key inside the batch
+//! made a report before. Each report, and each rebase, tells the keyboard
+//! the selection it leaves (`updateSelection`), so a keyboard that keeps
+//! the text before its cursor learns that the mirror is empty again.
 //!
 //! ## Generations
 //!

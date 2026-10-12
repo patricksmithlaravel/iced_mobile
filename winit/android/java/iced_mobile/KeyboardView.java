@@ -39,8 +39,14 @@ final class KeyboardView extends View {
     /** Whether a field wants the keyboard shown. */
     private boolean wanted;
 
-    /** The shell asked to forget the text once nothing composes. */
+    /**
+     * The shell asked to forget the text once nothing composes and no batch
+     * edit is open.
+     */
     private boolean forgetting;
+
+    /** The connection the keyboard got last, the one it edits through. */
+    private KeyboardConnection connection;
 
     private int purpose = Keyboard.NORMAL;
     private int generation;
@@ -108,6 +114,10 @@ final class KeyboardView extends View {
             return null;
         }
 
+        // The keyboard edits through this one from now on, with no batch
+        // edit open.
+        connection = new KeyboardConnection(this, epoch);
+
         // A new keyboard session starts with no composition.
         finishComposing();
 
@@ -141,7 +151,7 @@ final class KeyboardView extends View {
         sentComposingStart = -1;
         sentComposingEnd = -1;
 
-        return new KeyboardConnection(this, epoch);
+        return connection;
     }
 
     @Override
@@ -247,9 +257,12 @@ final class KeyboardView extends View {
      * is kept until it ends. An empty mirror is rebased too, so the shell
      * always learns that its request ran.
      *
-     * <p>This can run between two calls of the keyboard's batch edit, whose
-     * edits so far are not reported yet: they are reported first, as
-     * {@link #forward} reports them, so that the rebase loses none.
+     * <p>This can run between two calls of the keyboard's batch edit, which
+     * the keyboard worked out from the text it saw when it began it: the
+     * mirror keeps that text until the batch ends, and the report then
+     * rebases, after the batch's edits. A batch the keyboard sent before it
+     * learnt of the rebase, but that starts after it, still edits the empty
+     * mirror: the keyboard has no way to say what text it worked from.
      */
     void forget(int generation) {
         if (!installed || generation != this.generation) {
@@ -257,7 +270,10 @@ final class KeyboardView extends View {
         }
 
         forgetting = true;
-        report();
+
+        if (!batching()) {
+            report();
+        }
     }
 
     void reset(int generation) {
@@ -280,6 +296,7 @@ final class KeyboardView extends View {
         installed = false;
         wanted = false;
         epoch++;
+        connection = null;
         clear();
 
         if (focused) {
@@ -359,11 +376,13 @@ final class KeyboardView extends View {
 
         // A password is not kept here, the mirror stays small, and the text
         // the shell asked to forget goes, even when the mirror is empty. A
-        // composition is kept until the keyboard commits it.
+        // composition is kept until the keyboard commits it, and a batch
+        // edit's text until the batch ends: the keyboard worked the rest of
+        // the batch out from it.
         boolean clear = forgetting
                 || (secure ? mirror.length() > 0 : mirror.length() > CAP);
 
-        if (clear && !composing) {
+        if (clear && !composing && !batching()) {
             rebase();
         }
     }
@@ -432,6 +451,11 @@ final class KeyboardView extends View {
 
         manager.updateSelection(this, selStart, selEnd, composingStart,
                 composingEnd);
+    }
+
+    /** Whether the keyboard has a batch edit open. */
+    private boolean batching() {
+        return connection != null && connection.batching();
     }
 
     private boolean isEmpty() {

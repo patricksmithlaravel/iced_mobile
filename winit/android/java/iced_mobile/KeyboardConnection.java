@@ -37,6 +37,11 @@ final class KeyboardConnection extends BaseInputConnection {
         return !closed && view.accepts(epoch);
     }
 
+    /** Whether the keyboard has a batch edit open here that may still end. */
+    boolean batching() {
+        return batches > 0 && active();
+    }
+
     @Override
     public Editable getEditable() {
         return active() ? view.mirror() : null;
