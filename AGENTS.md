@@ -278,13 +278,14 @@ stop only the platforms they drive and leave the other platforms' devices alone
 - Never boot, wipe, delete or install onto the owner's other AVDs, simulators or phones. Check
   `adb devices` first: when its own emulator is not up, `icm run android` installs onto the single
   online Android device.
-- `--dry-run` (or `icm print plan <cmd…>`) prints the plan and touches no device, browser or
-  file for `new`, `doctor`, `release`, `ledger mark-uploaded`, `devices`, and `build`, `run`,
-  `stop`, `shot` (`--headless` included), `logs` and `input` on every platform (`build --all` and
-  `stop --all` included), and for `test --on android --lifecycle`. `check`, `ui`, `verify` and
-  host `test` have no plan: they refuse it (exit 2, `usage.bad_args`) before they start, and
-  never run for real. `input desktop` and `input ios-device` are refused (exit 2) with or
-  without it.
+- `--dry-run` (or `icm print plan <cmd…>`) prints the plan and touches no device, browser or file
+  for `new`, `doctor`, `release`, `ledger mark-uploaded`, `devices`, and `build`, `run`, `stop`,
+  `shot` (`--headless` included), `logs` and `input` on every platform (`build --all` and
+  `stop --all` included), and for `test --on android --lifecycle`, except that `build ios-sim` and
+  `run ios-sim` need macOS: elsewhere they are refused (`env.unsupported_host`) before they plan.
+  `check`, `ui`, `verify` and host `test` have no plan: they refuse it (exit 2, `usage.bad_args`)
+  before they start, and never run for real. `input desktop` and `input ios-device` are refused
+  (exit 2) with or without it.
 - `icm test --on android --lifecycle` changes the device's night mode, rotation, font scale and
   font weight, sends Home and Back and kills the app's process (`am kill`); it restores the
   settings at the end. `icm release android` installs the release onto icm's running emulator (or
