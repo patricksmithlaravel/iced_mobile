@@ -295,7 +295,19 @@ where
         cursor: Rectangle,
         purpose: input_method::Purpose,
     ) {
-        if self.ime_state.is_none() {
+        // Android (NativeActivity): the keyboard's own view shows the
+        // keyboard for the purpose, at every redraw that needs it (see
+        // `ime`). winit's calls stand in for it when it is not available.
+        #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+        let keyboard = crate::ime::enable(&self.raw, purpose);
+
+        #[cfg(not(all(
+            target_os = "android",
+            feature = "android-native-activity"
+        )))]
+        let keyboard = false;
+
+        if self.ime_state.is_none() && !keyboard {
             self.raw.set_ime_allowed(true);
         }
 
@@ -304,7 +316,10 @@ where
                 LogicalPosition::new(cursor.x, cursor.y),
                 LogicalSize::new(cursor.width, cursor.height),
             );
-            self.raw.set_ime_purpose(conversion::ime_purpose(purpose));
+
+            if !keyboard {
+                self.raw.set_ime_purpose(conversion::ime_purpose(purpose));
+            }
 
             self.ime_state = Some((cursor, purpose));
         }
@@ -312,7 +327,22 @@ where
 
     fn disable_ime(&mut self) {
         if self.ime_state.is_some() {
-            self.raw.set_ime_allowed(false);
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            let keyboard = crate::ime::disable();
+
+            #[cfg(not(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            )))]
+            let keyboard = false;
+
+            if !keyboard {
+                self.raw.set_ime_allowed(false);
+            }
+
             self.ime_state = None;
         }
 

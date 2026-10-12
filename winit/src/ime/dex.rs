@@ -132,9 +132,6 @@
 //! be added, `show` and `hide` use the window's decor view instead, and the
 //! keyboard can only send key events, as without the dex.
 
-// Only the JNI glue uses these on Android; the tests below use every one.
-#![cfg_attr(not(test), allow(dead_code))]
-
 /// The dex `winit/android/build-dex.sh` built.
 pub(crate) const DEX: &[u8] = include_bytes!("../../android/classes.dex");
 

@@ -20,12 +20,6 @@
 //! commits: Enter and Tab reach the app as keys (the Java side turns a commit
 //! of exactly `"\n"` into Enter), and inside longer text they are dropped, as
 //! `text_input` drops them from such an insertion on iOS.
-// The JNI glue that feeds the engine is not in the crate yet, so outside the
-// tests nothing calls it.
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the JNI glue will call the engine")
-)]
 
 use std::iter;
 use std::ops::Range;
@@ -158,6 +152,7 @@ impl Engine {
     }
 
     /// The generation the keyboard's messages must carry to be applied.
+    #[cfg(test)]
     pub(crate) fn generation(&self) -> i32 {
         self.generation
     }

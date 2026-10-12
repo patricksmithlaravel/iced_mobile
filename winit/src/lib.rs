@@ -174,6 +174,9 @@ where
 
         safe_area::set_android_app(app.clone());
 
+        #[cfg(feature = "android-native-activity")]
+        ime::set_android_app(app.clone());
+
         let _ = builder.with_android_app(app);
     }
 
@@ -909,6 +912,8 @@ async fn run_instance<P>(
     let mut window_manager = WindowManager::new();
     let mut is_window_opening = !is_daemon;
     let mut safe_area = safe_area::Shell::new();
+    #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+    let mut keyboard = ime::Shell::new();
 
     let mut compositor = None;
     let mut events = Vec::new();
@@ -1525,6 +1530,19 @@ async fn run_instance<P>(
                             continue;
                         }
 
+                        // Android (NativeActivity): a tap, a mouse button,
+                        // a hardware key or the loss of the focus ends what
+                        // the keyboard was typing, and its edits come first.
+                        #[cfg(all(
+                            target_os = "android",
+                            feature = "android-native-activity"
+                        ))]
+                        keyboard.interrupt(
+                            &window_event,
+                            &mut window_manager,
+                            &mut events,
+                        );
+
                         let Some((id, window)) =
                             window_manager.get_mut_alias(window_id)
                         else {
@@ -1626,6 +1644,14 @@ async fn run_instance<P>(
                         // Before the idle check, which would skip it.
                         safe_area
                             .poll(&mut window_manager, &mut control_sender);
+
+                        // Android (NativeActivity): what the keyboard typed
+                        // since the event loop last turned.
+                        #[cfg(all(
+                            target_os = "android",
+                            feature = "android-native-activity"
+                        ))]
+                        keyboard.drain(&mut window_manager, &mut events);
 
                         if events.is_empty()
                             && messages.is_empty()
