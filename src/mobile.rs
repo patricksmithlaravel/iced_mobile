@@ -496,10 +496,10 @@
 //! reaches the field as typed text, so it is never drawn in clear. On iOS
 //! the view answers `isSecureTextEntry` for it, which has not been seen on
 //! a simulator or device yet: the iOS keyboard shows no suggestions in any
-//! field anyway. On both, the keyboard is set up for the first field in
-//! the view that wants it, so a `text_editor` focused from code that comes
-//! before the secure field leaves it unmarked ([Known
-//! limitations](#known-limitations)).
+//! field anyway. On both, when a `text_editor` focused from code also takes
+//! the keyboard ([Known limitations](#known-limitations)), the keyboard is
+//! still set up for the secure field: iced asks for a secure keyboard when
+//! any field that wants it is secure.
 //!
 //! # Events for launchers
 //!
@@ -851,11 +851,9 @@
 //! - **`text_editor` ignores touch.** A tap neither focuses a `text_editor`
 //!   nor takes the focus from one, so one focused from code goes on taking
 //!   the keyboard's text alongside a `text_input` the user taps, a password
-//!   too, which the editor shows in clear. When the editor comes before
-//!   that field in the view, the keyboard is set up for the editor, so the
-//!   password field is not marked secure either: the keyboard may suggest
-//!   and learn the password, and on Android a word it composes shows in
-//!   clear at the editor's caret. Move the focus away from it from code.
+//!   too, which the editor shows in clear (the keyboard is still set up for
+//!   the password field, so it neither suggests nor learns it). Move the
+//!   focus away from it from code.
 //! - **Line breaks in inserted text on iOS.** UIKit hands over text one
 //!   insertion at a time. An insertion that is only a line break (`"\n"`,
 //!   `"\r"`, or `"\r\n"` counted once) is one Return, as from the

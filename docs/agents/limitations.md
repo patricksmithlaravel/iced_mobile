@@ -143,10 +143,9 @@ this file in the commit that fixes or finds a limitation.
     it composes there reaches the field as typed text, so it is never drawn
     in clear. On iOS the view tells UIKit that the field is secure text
     entry, which has not been seen on a simulator or device yet; the iOS
-    keyboard shows no suggestions in any field anyway (above). On both, the
-    keyboard is set up for the first field in the view that wants it, so a
-    `text_editor` focused from code that comes before the password field
-    leaves it unmarked (see `text_editor` below).
+    keyboard shows no suggestions in any field anyway (above). On both, a
+    `text_editor` focused from code that also takes the keyboard (see
+    `text_editor` below) leaves the keyboard set up for the password field.
   - The keyboard covers fields in the lower half of the screen unless the
     root is padded with `SafeArea::padding` from `iced::mobile::safe_area()`,
     whose bottom rises with it, as the template's is. On Android it rises
@@ -179,12 +178,9 @@ this file in the commit that fixes or finds a limitation.
   tap cannot focus a `text_editor` (focusing it from code works), nor take
   the focus away from one: a `text_editor` focused from code stays focused
   when the user taps a `text_input`, and both then take what is typed, so
-  a password typed into a secure field shows in clear in the editor. When
-  the editor comes before that field in the view (above it in a column),
-  the keyboard is also set up for the editor: the password field is not
-  marked secure, so the keyboard may suggest and learn the password, and
-  on Android a word it composes shows in clear at the editor's caret. Move
-  the focus away from it from code (`operation::focus` on another widget
+  a password typed into a secure field shows in clear in the editor. The
+  keyboard is still set up for the password field, so it neither suggests
+  nor learns the password. Move the focus away from the editor from code (`operation::focus` on another widget
   unfocuses the rest), for example from a Done button. Links in
   `rich_text` and `markdown` cannot be tapped, and `pick_list` and
   `combo_box` menus select on touch-down, so a long menu cannot be
