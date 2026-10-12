@@ -232,14 +232,16 @@ this file in the commit that fixes or finds a limitation.
     without suggestions and is asked not to learn what is typed, and what it
     composes there reaches the field as typed text, so it is never drawn in
     clear. So does a composition that reaches a password field from another
-    purpose (the field an Enter, Tab or tap moved the focus from, the field
-    the app focused from code, or a field the app makes secure while the
-    keyboard composes): the shell commits it as typed text at the redraw
-    that tells it the field's purpose, and a field the focus moves to, by a
-    tap on it too, gets no preedit until then. On Android and iOS the window
-    never draws a password field's preedit. On iOS the view tells UIKit that
-    the field is secure text entry: on the iOS 27.0 Simulator the keyboard
-    then has no emoji or dictation key, and it switches to and from that
+    purpose (the field an Enter, Tab or tap moved the focus from, or the
+    field the app focused from code): the shell commits it as typed text at
+    the redraw that tells it the field's purpose, and no field gets a
+    preedit until that decision, which a tap on the field that has the focus
+    or a focus move from code makes (after an Enter, Tab or Escape, see the
+    bullet below). A field the app makes secure while the keyboard composes
+    gets its composition as typed text at the next redraw. On Android and iOS
+    the window never draws a password field's preedit. On iOS the view tells
+    UIKit that the field is secure text entry: on the iOS 27.0 Simulator the
+    keyboard then has no emoji or dictation key, and it switches to and from that
     keyboard as the
     focus moves between a password field and another (a physical iPhone has
     not been tried). When the focus moves straight from a password field to
@@ -269,16 +271,26 @@ this file in the commit that fixes or finds a limitation.
     field, the keyboard is set up for it only from the next redraw: it typed
     that text as the last field's keyboard, which may suggest and learn
     words, and what it composed of it reaches the password field as typed
-    text, never drawn in clear. A key the app handles later, from a
-    subscription (`keyboard::listen`, which is how an app takes Tab:
-    `text_input` ignores it) or a task, comes after that text: what the
-    keyboard sends in the same instant, such as a password a credential
-    keyboard types right after a username and Tab, goes to the field that
-    had the focus. A composition the keyboard still has open when the
-    subscription's focus move ends that session is dropped with it, as the
-    focus-move bullet above says: a password it composes after such a Tab is
-    never committed to either field, where a password it commits does reach
-    the field that had the focus. When the key leaves no field with the focus
+    text, never drawn in clear. A hardware keyboard's Enter, Tab and Escape
+    count the same way. The app may move the focus after such a key later
+    still, from a subscription (`keyboard::listen`, which is how an app takes
+    Tab: `text_input` ignores it) or a task, and that message arrives after
+    the event loop turned again. So no redraw decides which field a
+    composition belongs to from the key alone: what the keyboard composes
+    after the key shows in no field, the one that has the focus included,
+    until a tap on that field or a focus move from code has let a redraw
+    decide (the underline appears only then). What the keyboard commits
+    reaches the field that has the focus at once, as before. A composition
+    the keyboard still has open when the subscription's focus move ends that
+    session is dropped with it, as the focus-move bullet above says: a
+    password it composes after such a Tab is never committed to either field.
+    A password it commits is not: a commit reaches the field that has the
+    focus, where it is drawn in clear and stays until that field is cleared,
+    when the keyboard sent it in the same burst as the Tab, before the focus
+    move arrived. Commits are not held back: holding them would hide the text
+    a field gets after an Enter, which is most of what the keyboard types, and
+    the shell cannot tell a password from other committed text. When the key
+    leaves no field with the focus
     (Escape unfocuses a `text_input` or a `text_editor`, an `on_submit` may
     remove the field or unfocus it), what the keyboard sent right after it is
     dropped. A line break or tab inside longer committed text (a suggestion,

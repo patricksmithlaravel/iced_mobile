@@ -366,11 +366,16 @@ Text input on Android, and secure fields on Android and iOS:
   `IME_FLAG_NO_PERSONALIZED_LEARNING`, and what a keyboard composes there reaches the field as typed
   text, never as a preedit drawn in clear. So does a composition that reaches a password field from
   another purpose: the letters typed right after the Enter whose `on_submit` focuses the password
-  field, which the keyboard composed for the field it left, reach no field as a preedit until the
-  redraw that tells the shell the field's purpose, which commits them as typed text in a password
-  field; a tap that focuses a password field holds its compositions back the same way until that
-  redraw; a field made secure while the keyboard composes gets its composition as typed text at that
-  redraw; and what the keyboard composes before it is set up for the password field is read as typed
+  field, which the keyboard composed for the field it left, reach no field as a preedit until a tap
+  on the field or a focus move from code has let the redraw that tells the shell the field's purpose
+  decide, which commits them as typed text in a password field. After an Enter, Tab or Escape, from
+  the keyboard or from hardware, a redraw decides only once a focus move from code or a tap on the
+  field has come after the key, since a subscription may still move the focus, so a composition typed
+  then shows in no field, the one that has the focus included, until a tap or a focus move. A tap
+  that focuses a password field holds its compositions back the same way until that redraw, and a
+  preedit the field was given before the tap is cleared when the composition is committed as typed
+  text. A field made secure while the keyboard composes gets its composition as typed text at that
+  redraw, and what the keyboard composes before it is set up for the password field is read as typed
   text too. On an edit of a password field, a `text_input` builds its paragraph from the bullets:
   the paragraph logs the text it is built from at trace level, which used to be the password. On
   Android and iOS the window never draws a password field's preedit (the desktop and the web draw it
