@@ -1124,6 +1124,66 @@ fn stop_keeps_the_record_when_the_recorded_pid_lists_no_usable_executable() {
     }
 }
 
+/// devicectl writes a listed process's pid as an integer. A listing whose entry
+/// for the recorded pid holds it as a string or a float has no integer pid, so
+/// it says nothing about that pid. It was dropped, the recorded pid read as
+/// unlisted, and `stop` counted the app not running, terminated nothing and
+/// removed the record while the app ran. Such a listing confirms nothing, so
+/// `stop` keeps the record and warns, and the next stop, with the pid as an
+/// integer, terminates the app.
+#[test]
+fn stop_keeps_the_record_when_a_listed_pid_is_not_an_integer() {
+    for (case, pid) in [
+        ("a string pid", json!("4242")),
+        ("a float pid", json!(4242.0)),
+    ] {
+        let device = Device::new();
+        let run = device.json(&["run", "ios-device", "--settle", "0s"]);
+        assert_eq!(run["exit"], 0, "{case}: {run}");
+        let stored = device.session()["stop"].clone();
+        device.list_processes(&[json!({"executable": APP_EXECUTABLE, "processIdentifier": pid})]);
+
+        let before = device.devicectl_calls().len();
+        let stop = device.json(&["stop", "ios-device"]);
+        assert_eq!(stop["exit"], 0, "{case}: {stop}");
+        let calls = device.devicectl_calls().split_off(before);
+        assert_eq!(calls.len(), 1, "{case}: {calls:?}");
+        assert!(
+            calls[0].starts_with(&format!("devicectl device info processes --device {UDID} ")),
+            "{case}: {calls:?}"
+        );
+        assert!(!device.terminated(), "{case}: {}", device.log("xcrun.log"));
+        assert_eq!(stop["stopped"], json!([]), "{case}: {stop}");
+        assert_eq!(stop["unverified"], json!([UDID]), "{case}: {stop}");
+        let warned: Vec<&Value> = stop["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["id"] == "ios.device.stop_unconfirmed")
+            .collect();
+        assert_eq!(warned.len(), 1, "{case}: {stop}");
+        let detail = warned[0]["detail"].as_str().unwrap();
+        assert!(detail.contains("processIdentifier"), "{case}: {detail}");
+        assert!(!detail.contains("no process has pid"), "{case}: {detail}");
+        assert_eq!(device.session()["stop"], stored, "{case}");
+        assert!(
+            device.session_path().exists(),
+            "{case}: the record was not kept"
+        );
+
+        device.list_processes(&[process(4242, APP_EXECUTABLE)]);
+        let before = device.devicectl_calls().len();
+        let stop = device.json(&["stop", "ios-device"]);
+        assert_eq!(stop["exit"], 0, "{case}: {stop}");
+        let calls = device.devicectl_calls().split_off(before);
+        assert_asked_then_terminated(&calls, 4242, case);
+        assert_eq!(stop["stopped"][0]["app"], "terminated", "{case}: {stop}");
+        assert_eq!(stop["unverified"], json!([]), "{case}: {stop}");
+        assert_eq!(stop["warnings"], json!([]), "{case}: {stop}");
+        assert!(!device.session_path().exists(), "{case}");
+    }
+}
+
 /// A device that answers with text that is no process list is not an empty
 /// device: devicectl writes its failures as JSON too.
 #[test]

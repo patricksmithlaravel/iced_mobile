@@ -407,7 +407,9 @@ impl Listed {
 /// devicectl writes JSON too (`info.outcome` `failed`, an `error`), so
 /// that, or any text without `result.runningProcesses`, is an error, never
 /// an empty device: a listing that could not be had says nothing about
-/// what runs.
+/// what runs. So is a process whose `processIdentifier` is not an integer
+/// (or is missing): it cannot be told from a recorded pid, and leaving it
+/// out would read that pid as unlisted.
 pub fn running_processes(text: &str) -> Result<Vec<Listed>, String> {
     let json: Value = serde_json::from_str(text)
         .map_err(|error| format!("devicectl's process list is not JSON: {error}"))?;
@@ -424,18 +426,30 @@ pub fn running_processes(text: &str) -> Result<Vec<Listed>, String> {
         .pointer("/result/runningProcesses")
         .and_then(Value::as_array)
         .ok_or("devicectl's process list has no result.runningProcesses")?;
-    Ok(processes
+    processes
         .iter()
-        .filter_map(|process| {
-            Some(Listed {
-                pid: process.get("processIdentifier").and_then(Value::as_i64)?,
+        .map(|process| -> Result<Listed, String> {
+            let pid = process
+                .get("processIdentifier")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| match process.get("processIdentifier") {
+                    Some(value) => format!(
+                        "devicectl's process list has a process whose processIdentifier ({value}) is not an integer"
+                    ),
+                    None => {
+                        "devicectl's process list has a process with no processIdentifier"
+                            .to_string()
+                    }
+                })?;
+            Ok(Listed {
+                pid,
                 executable: process
                     .get("executable")
                     .and_then(Value::as_str)
                     .map(str::to_string),
             })
         })
-        .collect())
+        .collect()
 }
 
 /// A physical device entry as devicectl 642 writes it (icm's tests and
@@ -527,6 +541,29 @@ mod tests {
         assert!(running_processes(r#"{"result":{}}"#).is_err());
         assert!(running_processes("").is_err());
         assert!(running_processes("not json").is_err());
+    }
+
+    /// A listed process whose `processIdentifier` is not an integer (a string,
+    /// a float, or none at all) cannot be matched with a recorded pid. Dropping
+    /// it made the recorded pid read as unlisted, so `stop` took the app for
+    /// not running and removed the record while it ran. The whole listing is
+    /// an error instead, which `stop` reports as unconfirmed.
+    #[test]
+    fn a_listed_process_without_an_integer_pid_fails_the_listing() {
+        let app = "file:///private/var/containers/Bundle/Application/X/App.app/app";
+        for entry in [
+            json!({"executable": app, "processIdentifier": "4242"}),
+            json!({"executable": app, "processIdentifier": 4242.0}),
+            json!({"executable": app}),
+        ] {
+            let text = json!({"info": {"outcome": "success"}, "result": {"runningProcesses": [
+                {"executable": "file:///usr/libexec/backboardd", "processIdentifier": 50},
+                entry
+            ]}})
+            .to_string();
+            let error = running_processes(&text).unwrap_err();
+            assert!(error.contains("processIdentifier"), "{text}: {error}");
+        }
     }
 
     /// An executable icm can read is a path that is not blank once decoded.

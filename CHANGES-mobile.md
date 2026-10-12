@@ -71,6 +71,17 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   process for the installed app still records no pid (`tests/ios_device.rs`:
   `a_probe_ready_app_is_terminated_by_the_pid_the_device_lists`,
   `a_probe_ready_copy_in_another_container_is_not_recorded_as_the_app`). Not seen on a phone.
+- `icm stop ios-device` no longer reads the recorded pid as unlisted when a process in the device's
+  listing gives its `processIdentifier` as something other than an integer (a string or a float).
+  That entry was dropped, so `stop` said the app was not running, terminated nothing and removed the
+  record while the app ran. The listing now fails as unconfirmed, as an unreadable one does: the
+  record stays, the WARN names the `processIdentifier`, and the next stop asks again
+  (`tests/ios_device.rs`: `stop_keeps_the_record_when_a_listed_pid_is_not_an_integer`;
+  `devicectl::running_processes`). Not seen on a phone: devicectl writes integer pids. The same
+  listing gives a run the pid of an app that reported no `start` event (`listed_app_pid`), so a run
+  whose listing holds such a process records no pid, as it does for an unreadable listing, and `stop`
+  then removes that record without asking the device. Before, the entry was skipped and the app's pid
+  was recorded. That case is not fixed here.
 - `icm logs desktop` of a running app whose environment could not be read back in full no longer
   prints the secrets it inherited. A read of the process that returned its arguments and no
   variables (macOS does for a platform binary), or another environment than the app's (the app
