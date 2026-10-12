@@ -84,7 +84,14 @@ pub enum Purpose {
 }
 
 impl InputMethod {
-    /// Merges two [`InputMethod`] strategies, prioritizing the first one when both open:
+    /// Merges two [`InputMethod`] strategies, prioritizing the first one when both open.
+    ///
+    /// On Android and iOS, the first one becomes [`Purpose::Secure`] when the
+    /// second one is: a `text_editor` ignores touch there, so one focused from
+    /// code keeps the focus when the user taps a password field, and both ask
+    /// for the keyboard. The keyboard is then set up for a password, so that it
+    /// neither suggests nor learns what is typed. Elsewhere the first one is
+    /// kept as it is:
     /// ```
     /// # use iced_core::input_method::{InputMethod, Purpose, Preedit};
     /// # use iced_core::{Point, Rectangle, Size};
@@ -111,10 +118,29 @@ impl InputMethod {
     /// ```
     pub fn merge<T: AsRef<str>>(&mut self, other: &InputMethod<T>) {
         if let InputMethod::Enabled { .. } = self {
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            self.secure_from(other);
+
             return;
         }
 
         *self = other.to_owned();
+    }
+
+    /// Android and iOS: makes an open [`InputMethod`] secure when `other` is
+    /// open for a password (see [`InputMethod::merge`]).
+    #[cfg(any(target_os = "android", target_os = "ios", test))]
+    fn secure_from<T>(&mut self, other: &InputMethod<T>) {
+        if let (
+            InputMethod::Enabled { purpose, .. },
+            InputMethod::Enabled {
+                purpose: Purpose::Secure,
+                ..
+            },
+        ) = (self, other)
+        {
+            *purpose = Purpose::Secure;
+        }
     }
 
     /// Returns true if the [`InputMethod`] is open.
@@ -187,4 +213,48 @@ pub enum Event {
     ///
     /// [`Shell::request_input_method`]: crate::Shell::request_input_method
     Closed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Point, Size};
+
+    fn open(purpose: Purpose, content: &str) -> InputMethod {
+        InputMethod::Enabled {
+            cursor: Rectangle::new(Point::ORIGIN, Size::UNIT),
+            purpose,
+            preedit: Some(Preedit {
+                content: content.to_owned(),
+                selection: None,
+                text_size: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_password_field_makes_the_keyboard_secure_on_phones() {
+        for first in [Purpose::Normal, Purpose::Secure, Purpose::Terminal] {
+            let mut ime = open(first, "1");
+            ime.secure_from(&open(Purpose::Secure, "2"));
+
+            // The first request's cursor and preedit stay.
+            assert_eq!(ime, open(Purpose::Secure, "1"), "{first:?}");
+
+            for second in [Purpose::Normal, Purpose::Terminal] {
+                let mut ime = open(first, "1");
+                ime.secure_from(&open(second, "2"));
+
+                assert_eq!(ime, open(first, "1"), "{first:?} {second:?}");
+            }
+
+            let mut ime = open(first, "1");
+            ime.secure_from(&InputMethod::<String>::Disabled);
+            assert_eq!(ime, open(first, "1"), "{first:?}");
+        }
+
+        let mut ime = InputMethod::Disabled;
+        ime.secure_from(&open(Purpose::Secure, "2"));
+        assert_eq!(ime, InputMethod::Disabled);
+    }
 }

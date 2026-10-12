@@ -40,6 +40,12 @@ changelog entry.
 
 ## Unreleased
 
+### Added
+
+- On iOS, implement `Window::set_ime_purpose`: `ImePurpose::Password` turns on secure text entry,
+  and it and `ImePurpose::Terminal` turn off autocorrection, spell checking, auto-capitalization
+  and smart punctuation.
+
 ### Changed
 
 - On Android, report content rect and window insets changes as `WindowEvent::Resized`.

@@ -9,7 +9,9 @@ use objc2_ui_kit::{
     UICoordinateSpace, UIEvent, UIForceTouchCapability, UIGestureRecognizer,
     UIGestureRecognizerDelegate, UIGestureRecognizerState, UIKeyInput, UIPanGestureRecognizer,
     UIPinchGestureRecognizer, UIResponder, UIRotationGestureRecognizer, UITapGestureRecognizer,
-    UITextInputTraits, UITouch, UITouchPhase, UITouchType, UITraitEnvironment, UIView,
+    UITextAutocapitalizationType, UITextAutocorrectionType, UITextInputTraits,
+    UITextSmartDashesType, UITextSmartInsertDeleteType, UITextSmartQuotesType,
+    UITextSpellCheckingType, UITouch, UITouchPhase, UITouchType, UITraitEnvironment, UIView,
 };
 use smol_str::SmolStr;
 
@@ -20,7 +22,7 @@ use crate::event::{ElementState, Event, Force, KeyEvent, Touch, TouchPhase, Wind
 use crate::keyboard::{Key, KeyCode, KeyLocation, NamedKey, NativeKeyCode, PhysicalKey};
 use crate::platform_impl::platform::DEVICE_ID;
 use crate::platform_impl::KeyEventExtra;
-use crate::window::{WindowAttributes, WindowId as RootWindowId};
+use crate::window::{ImePurpose, WindowAttributes, WindowId as RootWindowId};
 
 pub struct WinitViewState {
     pinch_gesture_recognizer: RefCell<Option<Retained<UIPinchGestureRecognizer>>>,
@@ -32,6 +34,9 @@ pub struct WinitViewState {
     rotation_last_delta: Cell<CGFloat>,
     pinch_last_delta: Cell<CGFloat>,
     pan_last_delta: Cell<CGPoint>,
+
+    // the purpose the text input traits answer for
+    ime_purpose: Cell<ImePurpose>,
 }
 
 declare_class!(
@@ -334,6 +339,40 @@ declare_class!(
     }
 
     unsafe impl UITextInputTraits for WinitView {
+        #[method(isSecureTextEntry)]
+        fn is_secure_text_entry(&self) -> bool {
+            self.text_input_traits().secure_text_entry
+        }
+
+        #[method(autocapitalizationType)]
+        fn autocapitalization_type(&self) -> UITextAutocapitalizationType {
+            self.text_input_traits().autocapitalization
+        }
+
+        #[method(autocorrectionType)]
+        fn autocorrection_type(&self) -> UITextAutocorrectionType {
+            self.text_input_traits().autocorrection
+        }
+
+        #[method(spellCheckingType)]
+        fn spell_checking_type(&self) -> UITextSpellCheckingType {
+            self.text_input_traits().spell_checking
+        }
+
+        #[method(smartQuotesType)]
+        fn smart_quotes_type(&self) -> UITextSmartQuotesType {
+            self.text_input_traits().smart_quotes
+        }
+
+        #[method(smartDashesType)]
+        fn smart_dashes_type(&self) -> UITextSmartDashesType {
+            self.text_input_traits().smart_dashes
+        }
+
+        #[method(smartInsertDeleteType)]
+        fn smart_insert_delete_type(&self) -> UITextSmartInsertDeleteType {
+            self.text_input_traits().smart_insert_delete
+        }
     }
 
     unsafe impl UIKeyInput for WinitView {
@@ -369,6 +408,8 @@ impl WinitView {
             rotation_last_delta: Cell::new(0.0),
             pinch_last_delta: Cell::new(0.0),
             pan_last_delta: Cell::new(CGPoint { x: 0.0, y: 0.0 }),
+
+            ime_purpose: Cell::new(ImePurpose::Normal),
         });
         let this: Retained<Self> = unsafe { msg_send_id![super(this), initWithFrame: frame] };
 
@@ -473,6 +514,23 @@ impl WinitView {
         } else if let Some(recognizer) = self.ivars().rotation_gesture_recognizer.take() {
             self.removeGestureRecognizer(&recognizer);
         }
+    }
+
+    /// Sets the purpose the view's text input traits answer for.
+    ///
+    /// UIKit reads the traits of the first responder when it sets up the keyboard, so when the
+    /// purpose changes while the view is the first responder, its input views are reloaded for
+    /// the keyboard to pick the new traits up.
+    pub(crate) fn set_ime_purpose(&self, purpose: ImePurpose) {
+        let changed = self.ivars().ime_purpose.replace(purpose) != purpose;
+
+        if changed && unsafe { self.isFirstResponder() } {
+            unsafe { self.reloadInputViews() };
+        }
+    }
+
+    fn text_input_traits(&self) -> TextInputTraits {
+        TextInputTraits::new(self.ivars().ime_purpose.get())
     }
 
     fn handle_touches(&self, touches: &NSSet<UITouch>) {
@@ -637,6 +695,59 @@ fn inserted_key_events(text: &str) -> Vec<KeyEvent> {
             )
         })
         .collect()
+}
+
+/// The text input traits the view answers for an [`ImePurpose`].
+///
+/// UIKit reads them from the first responder to set up the keyboard. [`ImePurpose::Password`] and
+/// [`ImePurpose::Terminal`] ask for the text as it is typed: no autocorrection, spell checking,
+/// auto-capitalization or smart punctuation. `Password` also turns on secure text entry, so the
+/// keyboard shows no suggestions and does not learn what is typed.
+///
+/// [`ImePurpose::Normal`] answers the defaults that `UITextInputTraits` documents, which UIKit
+/// also takes for a trait the first responder does not answer, so the keyboard is the one the view
+/// got before it answered any trait.
+#[derive(Debug, Clone, Copy)]
+struct TextInputTraits {
+    secure_text_entry: bool,
+    autocapitalization: UITextAutocapitalizationType,
+    autocorrection: UITextAutocorrectionType,
+    spell_checking: UITextSpellCheckingType,
+    smart_quotes: UITextSmartQuotesType,
+    smart_dashes: UITextSmartDashesType,
+    smart_insert_delete: UITextSmartInsertDeleteType,
+}
+
+impl TextInputTraits {
+    /// The defaults of `UITextInputTraits`.
+    const DEFAULT: Self = Self {
+        secure_text_entry: false,
+        autocapitalization: UITextAutocapitalizationType::Sentences,
+        autocorrection: UITextAutocorrectionType::Default,
+        spell_checking: UITextSpellCheckingType::Default,
+        smart_quotes: UITextSmartQuotesType::Default,
+        smart_dashes: UITextSmartDashesType::Default,
+        smart_insert_delete: UITextSmartInsertDeleteType::Default,
+    };
+
+    /// The text as it is typed.
+    const VERBATIM: Self = Self {
+        secure_text_entry: false,
+        autocapitalization: UITextAutocapitalizationType::None,
+        autocorrection: UITextAutocorrectionType::No,
+        spell_checking: UITextSpellCheckingType::No,
+        smart_quotes: UITextSmartQuotesType::No,
+        smart_dashes: UITextSmartDashesType::No,
+        smart_insert_delete: UITextSmartInsertDeleteType::No,
+    };
+
+    fn new(purpose: ImePurpose) -> Self {
+        match purpose {
+            ImePurpose::Normal => Self::DEFAULT,
+            ImePurpose::Password => Self { secure_text_entry: true, ..Self::VERBATIM },
+            ImePurpose::Terminal => Self::VERBATIM,
+        }
+    }
 }
 
 #[cfg(test)]

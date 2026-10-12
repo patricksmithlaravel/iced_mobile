@@ -1,0 +1,4 @@
+winit/android/*.dex binary
+# The digests in winit/android/classes.dex.inputs are of these bytes.
+winit/android/java/**/*.java text eol=lf
+winit/android/classes.dex.inputs text eol=lf

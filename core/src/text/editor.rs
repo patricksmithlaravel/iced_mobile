@@ -144,6 +144,20 @@ pub enum Motion {
     DocumentStart,
     /// Move to the end of the text.
     DocumentEnd,
+    /// Move back one grapheme cluster in the order of the text, or to the end
+    /// of the previous line: left in a left-to-right line and right in a
+    /// right-to-left one, where [`Motion::Left`] moves left on screen.
+    ///
+    /// Android only: `text_editor` moves by this and [`Motion::Next`] for the
+    /// caret moves the shell makes to apply the system keyboard's edits,
+    /// which go in the order of the text; the keyboard's arrow keys move on
+    /// screen. Elsewhere [`Motion`] has upstream's variants only.
+    #[cfg(target_os = "android")]
+    Previous,
+    /// Move on one grapheme cluster in the order of the text, or to the start
+    /// of the next line (see [`Motion::Previous`]). Android only.
+    #[cfg(target_os = "android")]
+    Next,
 }
 
 impl Motion {
@@ -173,6 +187,10 @@ impl Motion {
             | Self::End
             | Self::PageDown
             | Self::DocumentEnd => Direction::Right,
+            #[cfg(target_os = "android")]
+            Self::Previous => Direction::Left,
+            #[cfg(target_os = "android")]
+            Self::Next => Direction::Right,
         }
     }
 }

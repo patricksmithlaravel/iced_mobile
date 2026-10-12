@@ -45,7 +45,7 @@ None of this was pushed then: the remote had only `tawara/0.14-mobile`, and no `
 **How the owner's answers are reflected**
 
 1. **General-purpose framework.** The template, the config and the commands are app-agnostic, and Tawara is one consumer (§15).
-2. **"You decide."** The fork may carry winit patches only for fixes that cannot live in iced_winit: the A3 recreation freeze, C2 composition and C1 insets. iced_winit takes such a winit as a direct git dependency, never through `[patch]`, because `[patch]` does not reach apps. `icm check` enforces one winit (`deps.single_winit`), so either state of the fork is safe to detect. As built, the fork vendors that winit in its own repository (`vendor/winit`, a path dependency of the workspace), so an app's lock takes it from iced's git source, and `deps.single_winit` names that copy as iced's own.
+2. **"You decide."** The fork may carry winit patches only for fixes that cannot live in iced_winit: the A3 recreation freeze, C2 composition and C1 insets. iced_winit takes such a winit as a direct git dependency, never through `[patch]`, because `[patch]` does not reach apps. `icm check` enforces one winit (`deps.single_winit`), so either state of the fork is safe to detect. As built, the fork vendors that winit in its own repository (`vendor/winit`, a path dependency of the workspace), so an app's lock takes it from iced's git source, and `deps.single_winit` names that copy as iced's own. Composition (C2) needed no winit patch: iced_winit gives the Android keyboard an input connection of its own, from a dex it embeds and loads from memory.
 3. **Stay on 0.14.** Tags are `v0.14.x-mobile.N`, and changes from 0.15 are cherry-picked when they materially improve things. icm does not care which base is underneath, because it never links iced.
 4. **Borrow, don't join.** The Android system-font loading idea and the `run_android` naming are borrowed. icm itself never depends on the iced-mobile org's crates.
 
@@ -86,7 +86,7 @@ The template defaults to iOS 16 and Android minSdk 26 / targetSdk 36 (review ope
 
 **Non-goals for v1.**
 - Running uploads or notarization
-- Java/Kotlin/Swift sources (GameActivity, JNI `InputConnection`, app extensions)
+- Java/Kotlin/Swift sources in apps (GameActivity, app extensions). The keyboard's `InputConnection` is the framework's: a dex inside iced_winit, loaded from memory, so the APK still has no `dex/` (`hasCode=false`)
 - iPad
 - Mac App Store, Microsoft Store, Flathub
 - A scenario DSL. Tawara's checks become hook scripts (§13.6), and lifecycle checks are built in (§13.5).
@@ -905,8 +905,8 @@ Input on a device: `icm input android tap X Y`, `icm input web tap X Y`, `icm in
 
 ## Known limitations of iced_mobile {{framework_tag}}
 {{docs/agents/limitations.md of that tag: the safe area arrives with the window (headless only at a device's
-size); no edit menu on mobile; Android IME is key events only (no composition, accents and CJK input
-unreliable); a drag starting on a button does not scroll; text_editor and rich-text links ignore touch;
+size); no edit menu on mobile; the Android keyboard composes only with NativeActivity from Android 8 and sees only
+the text it typed since it last started over; a drag starting on a button does not scroll; text_editor and rich-text links ignore touch;
 dark-mode switches keep Android's bar icons; lifecycle() messages come late, so save in on_lifecycle and lock
 on Background, never on Inactive; one window on Android; iPad unsupported; non-Latin text depends on system
 fonts (verify on device)}}
@@ -1309,7 +1309,7 @@ altool 27.0.5 has no `--apple-id` for `--upload-package` [V]. `--build-status --
    - `lib/<abi>/lib<lib>.so`
    - `assets/**`
 
-   There is **no `dex/`**, consistent with `hasCode=false`.
+   There is **no `dex/`**, consistent with `hasCode=false`. The framework's keyboard dex is inside `lib<lib>.so` (iced_winit embeds it and loads it from memory), so it changes neither.
 4. `gen/android/BundleConfig.json`:
 
    ```json
@@ -2059,7 +2059,7 @@ jq -e '.exit == 1 and (.checks.failed | index("store.no_agent_bridge") != null)'
 - `icm mcp` (stdio MCP over the same command layer)
 - a non-blocking scheduled cold-agent evaluation
 - iPad
-- a dex path for JNI glue (GameActivity, `InputConnection`)
+- a dex path for JNI glue (GameActivity; the keyboard's `InputConnection` needs none, see the non-goals in §1)
 - localized names
 - universal macOS by default
 - a bridge on physical iOS (CoreDevice tunnel spike)

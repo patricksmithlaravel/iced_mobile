@@ -26,7 +26,9 @@
 //! logger, through [`init_logger`]:
 //!
 //! - `android-native-activity`: runs in Android's `NativeActivity`, which
-//!   needs no Java code. An Android build needs exactly one activity feature.
+//!   needs no Java code in the APK (the keyboard's view is a dex embedded
+//!   in `iced_winit`: [Text input](#text-input)). An Android build needs
+//!   exactly one activity feature.
 //! - `mobile-logger`: lets [`init_logger`] install a logger: logcat,
 //!   os_log, stderr on the desktop, the console on the web.
 //! - `mobile-fira-sans`: embeds Fira Sans and makes it the default font. It
@@ -375,6 +377,234 @@
 //! }
 //! ```
 //!
+//! # Text input
+//!
+//! `text_input` and `text_editor` take the system keyboard's text on both
+//! platforms.
+//!
+//! On Android with NativeActivity (the default) on Android 8 (API 26) and
+//! later, the shell gives the keyboard an input connection of its own: a
+//! small view from a dex embedded in `iced_winit`, loaded at run time, so
+//! the APK still needs no Java code. The keyboard can then compose,
+//! suggest, autocorrect and swipe-type, and accented letters and CJK arrive
+//! whole:
+//!
+//! - Whether the keyboard composes is its choice: Gboard can commit each
+//!   letter as it is typed (it does in Latin-script languages on the
+//!   Android 16 emulator), so `on_input` sees every letter and nothing is
+//!   underlined, while CJK input methods and some other keyboards compose.
+//!   Do not count on `on_input` seeing whole words. A word being composed
+//!   is a preedit: drawn underlined at the caret, not part of the value
+//!   until the keyboard commits it (a space, a suggestion, Enter).
+//!   `on_input` sees the value without it until then. Any touch that
+//!   starts (a tap anywhere, but also the start of a scroll or a drag, or
+//!   another finger), a mouse button pressed, a hardware key other than a
+//!   modifier (Shift, Ctrl, Alt, ...), or the window losing the focus
+//!   commits it first, and the application handles the commit, and builds
+//!   its view again, before the touch: a Send button that is enabled only
+//!   once the field holds text takes the tap that finished the word.
+//! - The keyboard sees only the text it typed since it last started over,
+//!   never the field's earlier text, so its suggestions do not see what was
+//!   there before. Backspace and the arrow keys still reach that text. It
+//!   starts over when the field gets the focus; at a touch that starts, a
+//!   hardware key other than a modifier, or the window losing the focus;
+//!   after its own Enter, Tab, Escape, arrow (but for one that only ends a
+//!   selection the keyboard made, below), Home or End keys and its Select
+//!   all (a cursor swipe on the space bar moves inside the text it typed
+//!   without starting over, and sends arrows only past either end of that
+//!   text); after a caret move from code or a change between a password
+//!   field and another field; once its text passes 4096 UTF-16 units; when
+//!   what it typed starts with a character that joins the one before it (a
+//!   combining mark, vowel sign or virama typed first, or a consonant right
+//!   after a virama it typed before it started over); and, in a password
+//!   field, after every edit that leaves nothing composing: a keyboard that
+//!   composes there (some CJK and third-party keyboards) keeps the password
+//!   it composes in that text, which the application's process holds for
+//!   it, until it commits it. The field asks the keyboard for no automatic
+//!   capitals.
+//! - The keyboard keeps its own copy of the text it typed and takes it that
+//!   the field has all of it. An `on_input` that refuses that text or
+//!   changes its length (a length limit, digits only, formatting that adds
+//!   spaces), a `text_editor`'s `on_action` that drops or changes the
+//!   `Edit::Paste` that text arrives as, or a change of the field's value
+//!   or the editor's content from code while the keyboard has typed into
+//!   it (from a subscription or a task's result), puts it out of step: a
+//!   later edit that reaches back into that text (a Backspace into the
+//!   previous word, an autocorrection undone) can delete or replace
+//!   characters the field shows. Typing does not bring it back in step;
+//!   starting over does. Return an operation that starts it over with the
+//!   refusal or the change: `operation::move_cursor_to_end` on a
+//!   `text_input`, and `operation::focus` on a `text_editor`, which the
+//!   caret operations do not reach (focusing the editor that has the focus
+//!   leaves its caret where it is). Either starts the keyboard over from
+//!   what the field shows; the focus also brings back a keyboard the user
+//!   hid.
+//! - The keyboard's Enter (its key, its action button, or a commit of a
+//!   lone line break) reaches the application as the Enter key, after the
+//!   text typed before it, and submits a `text_input`; Tab (its key, or a
+//!   commit of a lone tab) and Escape are keys too. The application handles
+//!   them, builds its view again and runs the widget operations its
+//!   `update` returns for them before the text the keyboard typed after
+//!   them reaches a field: a field cleared on submit gets that text alone,
+//!   and the field `on_submit` moves the focus to (`focus_next`) gets it.
+//!   A key the application handles later, from a subscription
+//!   (`keyboard::listen`, which is how it takes Tab: `text_input` ignores
+//!   it) or a task, comes after that text, which then goes to the field
+//!   that had the focus. When the key leaves no field with the focus
+//!   (Escape unfocuses a `text_input` or a `text_editor`, an `on_submit`
+//!   may remove the field or unfocus it), what the keyboard sent right
+//!   after it is dropped. A line break or tab inside longer committed text
+//!   is dropped, as on iOS.
+//! - Everything the keyboard types, a single letter and its Paste
+//!   included, reaches the field as an input method's commit, as from a
+//!   desktop input method: `text_input` hands it to `on_input`, never to
+//!   `on_paste`, and `text_editor` gets it as `Edit::Paste`, never as
+//!   `Edit::Insert` (iOS sends typed text as keys, which are
+//!   `Edit::Insert`). An editor that drops `Edit::Paste` to forbid pasting
+//!   takes no typing from the Android keyboard. Its deletions and caret
+//!   moves come as Delete, Backspace and arrow keys, one per cluster
+//!   (`Edit::Delete`, `Edit::Backspace` and `Action::Move` in a
+//!   `text_editor`). The caret moves inside the text it typed go in the
+//!   order of the text: they are ArrowLeft and ArrowRight with no physical
+//!   key (`Physical::Unidentified(NativeCode::Unidentified)`), which a
+//!   `text_editor` takes as `Motion::Previous` and `Motion::Next`, so that
+//!   they go the right way in a right-to-left line too, where its arrows
+//!   move on screen. A `key_binding` that maps the arrows itself should
+//!   hand those two to `Binding::from_key_press`. The keyboard's own arrow
+//!   keys keep their physical key and move as a hardware keyboard's do.
+//! - Those keys are window events, pressed and released, like a hardware
+//!   keyboard's: `keyboard::listen()` and `event::listen` see what the
+//!   field does not capture, such as every release (an autocorrection can
+//!   be several ArrowLeft, Delete and ArrowRight releases). When a
+//!   modifier is held on a hardware keyboard, and for Select all (Ctrl+A),
+//!   a key comes between two `ModifiersChanged`: the first sets the key's
+//!   modifiers, the second puts the window's back.
+//! - The keyboard's edits reach the field as the clusters `text_input`
+//!   moves and deletes by. What it deletes in the text it typed goes with
+//!   Delete from the start of the change, which takes a whole cluster in a
+//!   `text_editor` too, where Backspace deletes one character. Its
+//!   Backspace and Delete keys with nothing of that text to delete are the
+//!   field's own: in a `text_editor` its Backspace then takes one character
+//!   of the field's text, such as an emoji's skin tone, as a hardware
+//!   keyboard's does.
+//! - An application that moves the focus or the caret from code
+//!   (`operation::focus`, `focus_next`, `focus_previous`,
+//!   `move_cursor_to`, `select_all`, or `focusable::unfocus` run with
+//!   `iced::advanced::widget::operate`) while the keyboard types ends what
+//!   it typed there: a focus moved away drops the word being composed, and
+//!   a caret moved in the field commits it where it was typed first, then
+//!   moves (so a position counts the word, and `select_all` selects it
+//!   too). The caret of another field moves and leaves the word alone.
+//!   What the keyboard typed before the operation, and what it sends while
+//!   the operation runs, reaches the field before the caret moves.
+//! - A widget operation the application returns while the keyboard has
+//!   sent edits the field has not had yet, or while the application takes
+//!   its turn after the keyboard's Enter, Tab or Escape, runs once the
+//!   field has them and the application has handled them, a turn of the
+//!   event loop later than without the keyboard, and the operations
+//!   returned after it wait behind it, in order. That holds for every
+//!   operation, a scroll (`snap_to`, `scroll_to`) or a query (`is_focused`,
+//!   `find_focused`, `count`) too: do not count on an operation running in
+//!   the same turn as the `update` that returned it.
+//! - The window gets `input_method::Event::Closed` whenever no field asks
+//!   for the keyboard any more (a tap elsewhere, Escape, the field leaving
+//!   the view) and when the application moves the focus from code after the
+//!   keyboard typed into the field, but never `input_method::Event::Opened`,
+//!   so a custom widget sees `Closed` with no `Opened` before it. The
+//!   desktop sends both, as its input method is turned on and off, and iOS
+//!   neither. `text_input` and `text_editor` only clear their preedit at
+//!   `Closed`.
+//! - The keyboard's keys reach a field only as text, Backspace, Delete,
+//!   Enter, Tab, Escape, the arrows, Home and End. Its Ctrl and Meta
+//!   shortcuts (on keyboards that have a Ctrl key) and its other keys (Page
+//!   Up and Down, function keys, Insert) are dropped, and its keys come
+//!   without modifiers, its own Shift or one held on a hardware keyboard:
+//!   its arrows, Home and End move the caret without selecting, and a Ctrl
+//!   held on a hardware keyboard does not make its deletions delete words.
+//!   An arrow while the keyboard has selected some of the text it typed
+//!   (its Select word, a selection the field does not show) ends that
+//!   selection at its start (Left, Up) or its end (Right, Down) instead, as
+//!   the field's own arrows end a selection. A hardware keyboard's keys
+//!   reach the application as key events, as before, unless the input
+//!   method takes them: while a field asks for the keyboard, one that
+//!   composes a hardware keyboard's letters (CJK input methods) types them
+//!   into the field as its own text, commits and preedits, not `KeyPressed`
+//!   events.
+//! - The keyboard's editing panel (Gboard's text editing tools) works in
+//!   part: Select all selects the field's text (the field's own Ctrl+A),
+//!   and Paste inserts the clipboard's text at the caret without its line
+//!   breaks and tabs. Cut and Copy take only what the keyboard selected in
+//!   the text it typed since it last started over, never the field's other
+//!   text or a password; Gboard offers them only then.
+//! - Whatever the field, the keyboard is told it edits single-line text
+//!   (`TYPE_CLASS_TEXT`, with a password variation for the secure and
+//!   terminal purposes) with no action (`IME_ACTION_NONE`): its action key
+//!   is a plain Enter, never Done, Next, Search or Send, and an application
+//!   cannot ask for one. A `text_editor`'s Enter still breaks the line. The
+//!   keyboard's view is left out of Android's autofill
+//!   (`IMPORTANT_FOR_AUTOFILL_NO`), so autofill (a password manager's, and
+//!   the credentials it suggests in the keyboard) offers nothing, in
+//!   password fields either.
+//! - If the user hides the keyboard while a field keeps the focus, a tap on
+//!   a field brings it back, also on a `text_editor` focused from code,
+//!   which otherwise ignores the tap. A tap elsewhere leaves it hidden, a
+//!   tap on a `text_editor` without the focus included: a tap does not
+//!   focus one. Focusing a field from code (`operation::focus`) brings it
+//!   back too, also the field that has the focus (a `text_editor` an Edit
+//!   button focuses again), and so does the window getting the focus back
+//!   (after the notification shade, a system dialog or another app): the
+//!   shell is not told that the user hid it. A keyboard hidden right after
+//!   it came up stays hidden. Only when it was still up as the window got
+//!   the focus back, or as the focus moved between a password field and
+//!   another kind of field, can hiding it within half a second bring it
+//!   back once (Android 11 and later): the shell cannot tell that hide from
+//!   a show the system dropped, which it shows again.
+//!
+//! When the input connection cannot be installed (before Android 8, or
+//! after a failure, with one warning in the log), the keyboard reaches the
+//! application through key events only, without composition or
+//! suggestions, and text it does not send as keys (many accented letters,
+//! all CJK) can be lost. Password fields are not marked secure there, and
+//! a keyboard the user hid comes back only after the field has lost the
+//! focus once, except when only the keyboard's view could not be added to
+//! the Activity: that warning is logged under the tag `iced_mobile`, not
+//! `iced`, and a tap on the focused field or focusing a field from code
+//! still brings the keyboard back.
+//!
+//! With GameActivity the keyboard types into GameActivity's own input
+//! connection, whose text reaches winit as text events that the vendored
+//! winit drops: what the keyboard commits there, plain letters included,
+//! does not reach the field, and only the keys it sends as key events do.
+//! Password fields are not marked secure, and a keyboard the user hid
+//! comes back only after the field has lost the focus once. GameActivity
+//! has not been run with this; use NativeActivity for text input.
+//!
+//! iOS sends typed text as key events: the app's view takes key input only
+//! (`UIKeyInput`), so the keyboard shows no predictions and capitalises
+//! nothing by itself, and CJK input methods do not compose (there is no
+//! marked text).
+//!
+//! A secure `text_input` (`.secure(true)`) is marked secure to the Android
+//! keyboard with the input connection, which then shows its password
+//! layout without suggestions and is asked not to learn what is typed (an
+//! input type of `TYPE_TEXT_VARIATION_PASSWORD` and
+//! `IME_FLAG_NO_PERSONALIZED_LEARNING`). What a keyboard composes there
+//! reaches the field as typed text, so it is never drawn in clear. On iOS
+//! the view answers `isSecureTextEntry` for it: on the iOS 27.0 Simulator
+//! the keyboard then has no emoji or dictation key, and it switches to and
+//! from that keyboard as the focus moves between the secure field and
+//! another (a physical iPhone has not been tried). When the focus moves
+//! straight from a secure field to another field, with the keyboard up,
+//! that field's keyboard can label its numbers key ".?123" instead of
+//! "123" until its numbers are shown once or it is hidden and shown again;
+//! it types as usual. A keyboard shown while none was up is set up for its
+//! field at once, without that label. The iOS keyboard shows no
+//! suggestions in any field anyway. On both, when a `text_editor` focused
+//! from code also takes the keyboard ([Known
+//! limitations](#known-limitations)), the keyboard is still set up for the
+//! secure field: iced asks for a secure keyboard when any field that wants
+//! it is secure.
+//!
 //! # Events for launchers
 //!
 //! A launcher such as `icm` learns that the app started, drew its first
@@ -692,9 +922,58 @@
 //!   task ends without an id.
 //! - **No edit menu.** A long press in a text field shows no menu and no
 //!   selection handles, and the copy, cut and paste shortcuts of text
-//!   fields fire only from a hardware keyboard on Android. The
-//!   [clipboard](#clipboard) itself works: offer Copy and Paste buttons
-//!   where they matter.
+//!   fields fire only from a hardware keyboard on Android, where the
+//!   keyboard's own Select all and Paste work too, and its Cut and Copy
+//!   only on what it typed. The [clipboard](#clipboard) itself works: offer
+//!   Copy and Paste buttons where they matter.
+//! - **Text input on Android** ([Text input](#text-input)). The keyboard
+//!   sees only the text it typed since it last started over (the focus, any
+//!   touch that starts, its own Enter, Tab, Escape or arrow keys, and
+//!   more); any touch that starts, a scroll included, commits the word
+//!   being composed, which is dropped when the application moves the focus
+//!   itself; when it moves the focus at the keyboard's Tab or Enter from a
+//!   subscription or a task (Tab needs one), text the keyboard sends right
+//!   after the key goes to the field that had the focus; and a combining
+//!   mark, vowel sign or virama typed right after the place the user tapped
+//!   joins the character before it, which `text_input` then deletes with
+//!   it, as it does on the desktop. What the keyboard types reaches
+//!   `text_input` through `on_input` only, never `on_paste`, and
+//!   `text_editor` as `Edit::Paste`, never `Edit::Insert`; its keys reach
+//!   subscriptions with their releases; and it offers no action key (Done,
+//!   Send) and no autofill. In the middle of the text, a consonant and
+//!   virama the keyboard types right before a consonant of the field make
+//!   one conjunct with it, which the keyboard's next Backspace or consonant
+//!   there replaces whole, the field's consonant with it; likewise a
+//!   consonant it types right after a virama the field holds where it
+//!   started over (a tap right after a half-typed conjunct), which its next
+//!   change there replaces with the whole conjunct. An `on_input` that
+//!   refuses the keyboard's text or changes its length, a `text_editor`'s
+//!   `on_action` that drops or changes its `Edit::Paste`, or a change of the
+//!   field's value from code while the keyboard types, puts the keyboard out
+//!   of step until it starts over, which typing does not do. A widget
+//!   operation returned while the field has the keyboard's edits to take
+//!   can run a turn of the event loop later, and the window gets
+//!   `input_method::Event::Closed` with no `Opened`. The keyboard's Ctrl
+//!   and Meta shortcuts do not reach fields, and its keys come without
+//!   modifiers, its own Shift or one held on a hardware keyboard, so its
+//!   arrows never select. While a field asks for the keyboard, an input
+//!   method that composes a hardware keyboard's letters sends them as text,
+//!   not key events. When the input connection cannot be installed (Android
+//!   before 8, or a failure), the keyboard sends key events only, password
+//!   fields are not marked secure and, unless only the keyboard's view could
+//!   not be added, a tap does not bring a hidden keyboard back. With
+//!   GameActivity, what the keyboard commits does not reach fields at all.
+//! - **Text input on iOS** ([Text input](#text-input)). The keyboard shows
+//!   no predictions, capitalises nothing by itself and does not compose
+//!   CJK: the app's view takes key input only. When the focus moves
+//!   straight from a secure field to another field, that field's numbers
+//!   key can read ".?123".
+//! - **`text_editor` ignores touch.** A tap neither focuses a `text_editor`
+//!   nor takes the focus from one, so one focused from code goes on taking
+//!   the keyboard's text alongside a `text_input` the user taps, a password
+//!   too, which the editor shows in clear (the keyboard is still set up for
+//!   the password field, so it neither suggests nor learns it). Move the
+//!   focus away from it from code.
 //! - **Line breaks in inserted text on iOS.** UIKit hands over text one
 //!   insertion at a time. An insertion that is only a line break (`"\n"`,
 //!   `"\r"`, or `"\r\n"` counted once) is one Return, as from the

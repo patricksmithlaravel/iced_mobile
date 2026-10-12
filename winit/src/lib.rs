@@ -32,6 +32,7 @@ pub mod icm;
 
 mod broadcast;
 mod error;
+mod ime;
 #[cfg(any(target_os = "android", test))]
 mod modifiers;
 mod proxy;
@@ -172,6 +173,9 @@ where
             );
 
         safe_area::set_android_app(app.clone());
+
+        #[cfg(feature = "android-native-activity")]
+        ime::set_android_app(app.clone());
 
         let _ = builder.with_android_app(app);
     }
@@ -869,6 +873,17 @@ enum Event<Message: 'static> {
     /// Not a user event, so it takes no slot of the proxy.
     #[cfg(any(target_os = "android", target_os = "ios"))]
     SystemTheme(theme::Mode),
+    /// Android (NativeActivity): run the widget operations that waited for
+    /// the field to take the keyboard's edits (see `ime::operate`). Never
+    /// sent: the event loop replays it. Takes no slot of the proxy.
+    #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+    Deferred,
+    /// Android (NativeActivity): the application's turn after the keyboard's
+    /// Enter, Tab or Escape ended, and an `AboutToWait` applies what the
+    /// keyboard sent after the key (see `ime::Shell::drain`). Never sent:
+    /// the event loop replays it. Takes no slot of the proxy.
+    #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+    Resume,
 }
 
 #[derive(Debug)]
@@ -908,6 +923,12 @@ async fn run_instance<P>(
     let mut window_manager = WindowManager::new();
     let mut is_window_opening = !is_daemon;
     let mut safe_area = safe_area::Shell::new();
+    #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+    let mut keyboard = ime::Shell::new();
+    // Android (NativeActivity): events handled before the next one received
+    // (see `ime::Shell::interrupt`).
+    #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+    let mut replay = std::collections::VecDeque::new();
 
     let mut compositor = None;
     let mut events = Vec::new();
@@ -956,8 +977,29 @@ async fn run_instance<P>(
     log::info!("System theme: {system_theme:?}");
 
     'next_event: loop {
+        // Android (NativeActivity): widget operations that wait for the
+        // keyboard's edits run after an `AboutToWait` that hands them to the
+        // field, ahead of anything else to replay (see `ime::operate`).
+        #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+        if ime::schedule() {
+            replay.push_front(Event::Deferred);
+            replay.push_front(Event::EventLoopAwakened(
+                event::Event::AboutToWait,
+            ));
+        }
+
+        #[cfg(all(target_os = "android", feature = "android-native-activity"))]
+        let replayed = replay.pop_front();
+        #[cfg(not(all(
+            target_os = "android",
+            feature = "android-native-activity"
+        )))]
+        let replayed = None;
+
         // Empty the queue if possible
-        let event = if let Ok(event) = try_next(&mut event_receiver) {
+        let event = if let Some(event) = replayed {
+            Some(event)
+        } else if let Ok(event) = try_next(&mut event_receiver) {
             event
         } else {
             event_receiver.next().await
@@ -1524,6 +1566,36 @@ async fn run_instance<P>(
                             continue;
                         }
 
+                        // Android (NativeActivity): a tap, a mouse button,
+                        // a hardware key (not a modifier) or the loss of the
+                        // focus ends what the keyboard was typing, and its
+                        // edits come first.
+                        // The application takes them, and the views are
+                        // built again, before the event reaches it: a
+                        // button that the finished word enables takes the
+                        // tap that finished it.
+                        #[cfg(all(
+                            target_os = "android",
+                            feature = "android-native-activity"
+                        ))]
+                        if keyboard.interrupt(
+                            &window_event,
+                            &mut window_manager,
+                            &mut events,
+                        ) {
+                            replay.push_back(Event::EventLoopAwakened(
+                                event::Event::AboutToWait,
+                            ));
+                            replay.push_back(Event::EventLoopAwakened(
+                                event::Event::WindowEvent {
+                                    event: window_event,
+                                    window_id,
+                                },
+                            ));
+
+                            continue;
+                        }
+
                         let Some((id, window)) =
                             window_manager.get_mut_alias(window_id)
                         else {
@@ -1626,6 +1698,19 @@ async fn run_instance<P>(
                         safe_area
                             .poll(&mut window_manager, &mut control_sender);
 
+                        // Android (NativeActivity): what the keyboard typed
+                        // since the event loop last turned. After its Enter,
+                        // Tab or Escape the application takes its turn: it
+                        // handles the key, the views are built again and
+                        // the operations it returns run, before the rest.
+                        #[cfg(all(
+                            target_os = "android",
+                            feature = "android-native-activity"
+                        ))]
+                        if keyboard.drain(&mut window_manager, &mut events) {
+                            replay.push_back(Event::Resume);
+                        }
+
                         if events.is_empty()
                             && messages.is_empty()
                             && window_manager.is_idle()
@@ -1652,16 +1737,35 @@ async fn run_instance<P>(
                                 continue;
                             }
 
-                            let (ui_state, statuses) = user_interfaces
+                            let interface = user_interfaces
                                 .get_mut(&id)
-                                .expect("Get user interface")
-                                .update(
-                                    &window_events,
-                                    window.state.cursor(),
-                                    &mut window.renderer,
-                                    &mut clipboard,
-                                    &mut messages,
-                                );
+                                .expect("Get user interface");
+
+                            let (ui_state, statuses) = interface.update(
+                                &window_events,
+                                window.state.cursor(),
+                                &mut window.renderer,
+                                &mut clipboard,
+                                &mut messages,
+                            );
+
+                            // Android (NativeActivity): a tap on the focused
+                            // field brings back the keyboard the user hid,
+                            // at the next redraw.
+                            #[cfg(all(
+                                target_os = "android",
+                                feature = "android-native-activity"
+                            ))]
+                            if ime::touched(
+                                &window_events,
+                                window.state.cursor(),
+                                |operation| {
+                                    interface
+                                        .operate(&window.renderer, operation);
+                                },
+                            ) {
+                                window.raw.request_redraw();
+                            }
 
                             #[cfg(feature = "unconditional-rendering")]
                             window.request_redraw(
@@ -1827,6 +1931,44 @@ async fn run_instance<P>(
                 }
             }
             Event::Exit => break,
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            Event::Deferred => {
+                for operation in ime::deferred() {
+                    run_action(
+                        Action::Widget(operation),
+                        &program,
+                        &mut runtime,
+                        &mut compositor,
+                        &mut events,
+                        &mut messages,
+                        &mut clipboard,
+                        &mut control_sender,
+                        &mut user_interfaces,
+                        &mut window_manager,
+                        &mut ui_caches,
+                        &mut is_window_opening,
+                        &mut system_theme,
+                    );
+                }
+
+                for (_id, window) in window_manager.iter_mut() {
+                    window.raw.request_redraw();
+                }
+            }
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            Event::Resume => {
+                keyboard.resume();
+
+                replay.push_front(Event::EventLoopAwakened(
+                    event::Event::AboutToWait,
+                ));
+            }
             #[cfg(any(target_os = "android", target_os = "ios"))]
             Event::SystemTheme(mode) => {
                 log::info!("System theme: {mode:?}");
@@ -2361,11 +2503,57 @@ fn run_action<'a, P, C>(
             }
         },
         Action::Widget(operation) => {
+            // Android (NativeActivity): what the keyboard sent before the
+            // operation comes first, and the operation waits when that gives
+            // the field edits. One that moves the focus or the caret while
+            // the keyboard types ends what it typed, and one that focuses a
+            // widget shows a keyboard the user hid (see `ime`), so the one
+            // on the window that has the keyboard is watched.
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            let Some((operation, typing)) =
+                ime::operate(operation, window_manager, events)
+            else {
+                return;
+            };
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            let mut moved = ime::Moved::default();
+
             let mut current_operation = Some(operation);
 
             while let Some(mut operation) = current_operation.take() {
                 for (id, ui) in interfaces.iter_mut() {
                     if let Some(window) = window_manager.get_mut(*id) {
+                        #[cfg(all(
+                            target_os = "android",
+                            feature = "android-native-activity"
+                        ))]
+                        if let Some(typing) = typing
+                            && typing.window == *id
+                        {
+                            // The fields the keyboard types into: only
+                            // their carets are the keyboard's.
+                            let mut focused = ime::FocusedInputs::default();
+                            ui.operate(&window.renderer, &mut focused);
+
+                            ui.operate(
+                                &window.renderer,
+                                &mut ime::Watch::new(
+                                    operation.as_mut(),
+                                    &mut moved,
+                                    typing.hold,
+                                    &focused,
+                                ),
+                            );
+
+                            continue;
+                        }
+
                         ui.operate(&window.renderer, operation.as_mut());
                     }
                 }
@@ -2377,6 +2565,14 @@ fn run_action<'a, P, C>(
                         current_operation = Some(next);
                     }
                 }
+            }
+
+            #[cfg(all(
+                target_os = "android",
+                feature = "android-native-activity"
+            ))]
+            if let Some(typing) = typing {
+                ime::operated(typing, moved, window_manager, events);
             }
         }
         Action::Image(action) => match action {

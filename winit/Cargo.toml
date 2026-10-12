@@ -55,6 +55,14 @@ sysinfo.optional = true
 android-activity.workspace = true
 jni.workspace = true
 ndk-context.workspace = true
+# The keyboard's text, compared by grapheme cluster (`ime::edit`).
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+# `ime::dex`'s test compares the Java sources with the digests the dex was
+# built from, and `ime::edit`'s tests run on the host.
+sha2.workspace = true
+unicode-segmentation.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
 block2.workspace = true

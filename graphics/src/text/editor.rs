@@ -854,6 +854,10 @@ fn to_motion(motion: Motion) -> cosmic_text::Motion {
         Motion::PageDown => cosmic_text::Motion::PageDown,
         Motion::DocumentStart => cosmic_text::Motion::BufferStart,
         Motion::DocumentEnd => cosmic_text::Motion::BufferEnd,
+        #[cfg(target_os = "android")]
+        Motion::Previous => cosmic_text::Motion::Previous,
+        #[cfg(target_os = "android")]
+        Motion::Next => cosmic_text::Motion::Next,
     }
 }
 
@@ -880,5 +884,86 @@ where
         cosmic_text::BufferRef::Owned(buffer) => buffer,
         cosmic_text::BufferRef::Borrowed(buffer) => buffer,
         cosmic_text::BufferRef::Arc(_buffer) => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::core::text::editor::Editor as _;
+
+    fn text(editor: &Editor) -> String {
+        (0..editor.line_count())
+            .filter_map(|index| editor.line(index))
+            .map(|line| line.text.into_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// One cluster back or on in the order of the text: `Motion::Previous`
+    /// and `Motion::Next` on Android, where they exist; elsewhere the
+    /// cosmic-text motions they become, as `Action::Move` performs them with
+    /// no selection.
+    fn step(editor: &mut Editor, forward: bool) {
+        #[cfg(target_os = "android")]
+        editor.perform(Action::Move(if forward {
+            Motion::Next
+        } else {
+            Motion::Previous
+        }));
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut font_system =
+                text::font_system().write().expect("Write font system");
+
+            editor.with_internal_mut(|internal| {
+                internal.editor.action(
+                    font_system.raw(),
+                    cosmic_text::Action::Motion(if forward {
+                        cosmic_text::Motion::Next
+                    } else {
+                        cosmic_text::Motion::Previous
+                    }),
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn previous_and_next_move_in_the_order_of_the_text() {
+        // A period put before the space after a word, then the next word
+        // typed after both, as the Android keyboard's own caret moves do it:
+        // the same in a right-to-left line, where Left and Right move on
+        // screen, and never into the next line.
+        for (word, expected) in [
+            ("hello ", "hello. next"),
+            ("שלום ", "שלום. next"),
+            ("مرحبا ", "مرحبا. next"),
+        ] {
+            for after in ["", "\nabc"] {
+                let mut editor = Editor::with_text(&format!("{word}{after}"));
+
+                editor.move_to(Cursor {
+                    position: Position {
+                        line: 0,
+                        column: word.len(),
+                    },
+                    selection: None,
+                });
+
+                step(&mut editor, false);
+                editor.perform(Action::Edit(Edit::Paste(Arc::new(
+                    String::from("."),
+                ))));
+                step(&mut editor, true);
+                editor.perform(Action::Edit(Edit::Paste(Arc::new(
+                    String::from("next"),
+                ))));
+
+                assert_eq!(text(&editor), format!("{expected}{after}"));
+            }
+        }
     }
 }
