@@ -882,15 +882,29 @@ fn a_failed_terminate_command_keeps_the_record_and_is_not_a_stop() {
     assert!(!device.session_path().exists());
 }
 
-/// devicectl can list the recorded pid with no executable, or an empty one.
-/// That is no proof the app is gone: `stop` terminates nothing, lists the
+/// devicectl can list the recorded pid with no executable, an empty one, or
+/// one whose escapes do not decode. That is no proof the app is gone: `stop`
+/// terminates nothing, names the reason it cannot tell, lists the
 /// device as unverified, and keeps the record for the next stop, where it
 /// used to remove the record and count the app stopped. Once the listing
 /// names the app's executable under the pid, the next stop asks again and
 /// terminates the app.
 #[test]
 fn stop_keeps_the_record_when_the_recorded_pid_lists_no_usable_executable() {
-    for (case, executable) in [("no executable", None), ("an empty executable", Some(""))] {
+    let undecodable = "file:///private/var/containers/Bundle/Application/X/50%.app/release-app";
+    for (case, executable, reason) in [
+        ("no executable", None, "without a usable executable path"),
+        (
+            "an empty executable",
+            Some(""),
+            "without a usable executable path",
+        ),
+        (
+            "an executable that does not decode",
+            Some(undecodable),
+            "with an executable path that does not decode",
+        ),
+    ] {
         let device = Device::new();
         let run = device.json(&["run", "ios-device", "--settle", "0s"]);
         assert_eq!(run["exit"], 0, "{case}: {run}");
@@ -922,7 +936,7 @@ fn stop_keeps_the_record_when_the_recorded_pid_lists_no_usable_executable() {
         assert_eq!(warned.len(), 1, "{case}: {stop}");
         let detail = warned[0]["detail"].as_str().unwrap();
         assert!(
-            detail.contains("pid 4242 without a usable executable path"),
+            detail.contains(&format!("pid 4242 {reason}")),
             "{case}: {detail}"
         );
         assert_eq!(device.session()["stop"], stored, "{case}");

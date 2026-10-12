@@ -892,7 +892,8 @@ fn judge_app_process(
     };
     match listing.iter().find(|process| process.pid == pid) {
         Some(process) if process.usable_program().is_none() => AppProcess::Unconfirmed(format!(
-            "the device lists pid {pid} without a usable executable path, so icm cannot tell whether that process is the app"
+            "the device lists pid {pid} {}, so icm cannot tell whether that process is the app",
+            process.why_no_usable_path()
         )),
         Some(process) if install.is_none() => AppProcess::Unconfirmed(format!(
             "the record does not say where the app is installed, so icm cannot tell whether pid {pid} ({}) is the app",
@@ -1611,12 +1612,8 @@ mod tests {
             "{why}"
         );
         // Empty, blank, a bare `file://`, and an escape that does not decode.
-        for executable in [
-            "",
-            "   ",
-            "file://",
-            "file:///private/var/containers/Bundle/Application/X/%ZZ/fixture-app",
-        ] {
+        let undecodable = "file:///private/var/containers/Bundle/Application/X/%ZZ/fixture-app";
+        for executable in ["", "   ", "file://", undecodable] {
             assert!(
                 matches!(
                     judge(&[listed(4242, Some(executable))]),
@@ -1625,6 +1622,17 @@ mod tests {
                 "{executable:?} was taken for another process"
             );
         }
+        // A path that does not decode is named as such, not as a missing one:
+        // the device did list an executable, and icm cannot read it.
+        let AppProcess::Unconfirmed(why) = judge(&[listed(4242, Some(undecodable))]) else {
+            panic!("an undecodable executable was taken for another process");
+        };
+        assert!(
+            why.contains("pid 4242 with an executable path that does not decode")
+                && why.contains("/%ZZ/fixture-app"),
+            "{why}"
+        );
+        assert!(!why.contains("without a usable executable path"), "{why}");
         // An unusable entry under another pid says nothing about the one icm
         // recorded, which no process lists: that is still not running.
         assert!(matches!(

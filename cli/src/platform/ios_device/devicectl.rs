@@ -371,6 +371,22 @@ impl Listed {
         let path = decode_once(path.strip_prefix("file://").unwrap_or(path))?;
         (!path.trim().is_empty()).then_some(path)
     }
+
+    /// Why [`Listed::usable_program`] names no path, for a message. An
+    /// executable whose escapes do not decode is named with its path, since
+    /// the device did list one and icm cannot read it; a missing, empty or
+    /// blank one is without a usable path.
+    pub fn why_no_usable_path(&self) -> String {
+        match self.executable.as_deref() {
+            Some(path) if decode_once(path.strip_prefix("file://").unwrap_or(path)).is_none() => {
+                format!(
+                    "with an executable path that does not decode ({})",
+                    self.program()
+                )
+            }
+            _ => "without a usable executable path".to_string(),
+        }
+    }
 }
 
 /// Every running process in `devicectl device info processes
@@ -528,6 +544,31 @@ mod tests {
         assert_eq!(usable(Some(" \t ")), None);
         assert_eq!(usable(Some("file:///var/%ZZ/app")), None);
         assert_eq!(usable(Some("file:///var/%FF/app")), None);
+    }
+
+    /// The reason an entry has no usable path says what it does name: an
+    /// executable that does not decode is named with its path, and a missing,
+    /// empty or blank one is without a usable path.
+    #[test]
+    fn an_entry_without_a_usable_path_says_why() {
+        let why = |executable: Option<&str>| {
+            Listed {
+                pid: 812,
+                executable: executable.map(str::to_string),
+            }
+            .why_no_usable_path()
+        };
+        for executable in [None, Some(""), Some("file://"), Some(" \t ")] {
+            assert_eq!(
+                why(executable),
+                "without a usable executable path",
+                "{executable:?}"
+            );
+        }
+        assert_eq!(
+            why(Some("file:///var/%ZZ/app")),
+            "with an executable path that does not decode (/var/%ZZ/app)"
+        );
     }
 
     #[test]
