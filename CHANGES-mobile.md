@@ -276,8 +276,9 @@ Text input on Android, and secure fields on Android and iOS:
 - **Android:** while no field asks for the keyboard, the keyboard's view is no text editor, so a
   hardware keyboard's keys reach the app as before, also with input methods that compose hardware
   keys.
-- **Android:** tapping a focused field brings back the keyboard the user hid. Before, the field had
-  to lose the focus once.
+- **Android:** tapping a focused field brings back the keyboard the user hid, also a `text_editor`
+  focused from code, which otherwise ignores the tap. A tap elsewhere leaves it hidden. Before, the
+  field had to lose the focus once.
 - Password fields (`.secure(true)`) are marked secure to the system keyboard: on Android the input
   type is `TYPE_TEXT_VARIATION_PASSWORD` with `IME_FLAG_NO_PERSONALIZED_LEARNING`, and what a
   keyboard composes there reaches the field as typed text, never as a preedit drawn in clear; on

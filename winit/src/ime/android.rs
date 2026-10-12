@@ -18,9 +18,9 @@
 //!   winit's `set_ime_allowed` and `set_ime_purpose`, as without the dex.
 //! - [`enable`] runs at every redraw while a field asks for the keyboard. It
 //!   calls `show(purpose)` when no field asked before, when the purpose
-//!   changed, and once after a tap whose events the application has handled
-//!   while the field still asks for it, which brings back a keyboard the
-//!   user hid. When no field asked before, what the keyboard sent since the
+//!   changed, and once after a tap on the focused field ([`touched`], after
+//!   the application handled it), which brings back a keyboard the user
+//!   hid. When no field asked before, what the keyboard sent since the
 //!   last field belongs to no field: it is dropped, and the engine and the
 //!   Java side are reset if it held anything.
 //! - [`disable`] runs when no field asks any more. The field has lost the
@@ -88,7 +88,7 @@ use super::dex::{self, Method};
 use super::edit::{Edit, Engine, Message, Request};
 use crate::conversion;
 use crate::core::widget::Operation;
-use crate::core::{self, input_method, theme, window};
+use crate::core::{self, input_method, mouse, theme, window};
 use crate::graphics::Compositor;
 use crate::program::Program;
 use crate::window::WindowManager;
@@ -153,6 +153,43 @@ pub(crate) fn enable(
 /// available, and the window must ask winit instead.
 pub(crate) fn disable(window: winit::window::WindowId) -> bool {
     SESSION.with_borrow_mut(|session| session.disable(window))
+}
+
+/// After the application handled `events` of a window, with the cursor at
+/// `cursor`: when one of them pressed on a widget that has the focus now,
+/// as `operate` finds it by running an operation on the window's interface,
+/// the next redraw that still asks for the keyboard shows it again, which
+/// brings back a keyboard the user hid. A press elsewhere leaves it hidden:
+/// a `text_input` gives up the focus then, but a `text_editor`, which
+/// ignores touch, keeps it. True when the window is to redraw for that.
+///
+/// The focus is the one after the press, which may have moved it to
+/// another field, and the bounds are those the press was hit-tested
+/// against.
+pub(crate) fn touched(
+    events: &[core::Event],
+    cursor: mouse::Cursor,
+    operate: impl FnOnce(&mut dyn Operation),
+) -> bool {
+    if !SESSION.with_borrow(Session::is_shown) {
+        return false;
+    }
+
+    let presses = super::presses(events, cursor);
+
+    if presses.is_empty() {
+        return false;
+    }
+
+    // The interface's widgets are not reached with the session borrowed.
+    let mut focused = super::Focused::default();
+    operate(&mut focused);
+
+    let touched = presses.into_iter().any(|press| focused.contains(press));
+
+    SESSION.with_borrow_mut(|session| session.touched = touched);
+
+    touched
 }
 
 /// How a widget operation runs on the window whose field has the keyboard,
@@ -317,44 +354,28 @@ impl Shell {
     {
         use winit::event::{ElementState, TouchPhase, WindowEvent};
 
-        let touch = match event {
+        match event {
             WindowEvent::Touch(touch) if touch.phase == TouchPhase::Started => {
-                true
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 ..
-            } => true,
+            } => {}
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic: false,
                 ..
             } if event.state == ElementState::Pressed
-                && super::ends_typing(&event.logical_key) =>
-            {
-                false
-            }
-            WindowEvent::Focused(false) => false,
+                && super::ends_typing(&event.logical_key) => {}
+            WindowEvent::Focused(false) => {}
             _ => return false,
+        }
+
+        let edits = if std::mem::take(&mut self.replaying) {
+            Vec::new()
+        } else {
+            SESSION.with_borrow_mut(Session::finish)
         };
-
-        let replayed = std::mem::take(&mut self.replaying);
-
-        let edits = SESSION.with_borrow_mut(|session| {
-            if !session.is_installed() {
-                return Vec::new();
-            }
-
-            if touch {
-                session.touch = Touch::Pending;
-            }
-
-            if replayed {
-                return Vec::new();
-            }
-
-            session.finish()
-        });
 
         closed(windows, events);
 
@@ -375,12 +396,6 @@ impl Shell {
         P::Theme: theme::Base,
     {
         let edits = SESSION.with_borrow_mut(|session| {
-            // The application handles this turn's events, the tap's among
-            // them, before the next redraw asks for the keyboard.
-            if session.touch == Touch::Pending {
-                session.touch = Touch::Armed;
-            }
-
             let mut edits = Vec::new();
             session.apply_queue(&mut edits);
 
@@ -411,7 +426,9 @@ struct Session {
     /// The purpose the keyboard was last shown for, while a field asks for
     /// it.
     shown: Option<i32>,
-    touch: Touch,
+    /// A press landed on the focused field (see [`touched`]): the next
+    /// redraw that still asks for the keyboard shows it again.
+    touched: bool,
     /// The window whose field lost the keyboard, which gets
     /// `input_method::Event::Closed`.
     closed: Option<winit::window::WindowId>,
@@ -434,18 +451,6 @@ enum Keyboard {
     Failed,
 }
 
-/// A touch, until it brings the keyboard back.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum Touch {
-    #[default]
-    None,
-    /// A touch started; the application has not handled it yet.
-    Pending,
-    /// The application handled it: the next redraw that still asks for the
-    /// keyboard shows it again.
-    Armed,
-}
-
 impl Session {
     fn enable(
         &mut self,
@@ -458,11 +463,7 @@ impl Session {
             input_method::Purpose::Terminal => dex::PURPOSE_TERMINAL,
         };
 
-        let touched = self.touch == Touch::Armed;
-
-        if touched {
-            self.touch = Touch::None;
-        }
+        let touched = std::mem::take(&mut self.touched);
 
         if !self.install() {
             return false;
@@ -485,7 +486,7 @@ impl Session {
     }
 
     fn disable(&mut self, window: winit::window::WindowId) -> bool {
-        self.touch = Touch::None;
+        self.touched = false;
 
         if !self.is_installed() {
             return false;
@@ -646,7 +647,7 @@ impl Session {
         self.keyboard = Keyboard::Absent;
         self.engine = Engine::new();
         self.shown = None;
-        self.touch = Touch::None;
+        self.touched = false;
         self.closed = None;
         self.deferred.clear();
         self.scheduled = false;

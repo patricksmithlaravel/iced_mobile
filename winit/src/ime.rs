@@ -38,7 +38,7 @@ mod android;
 #[cfg(all(target_os = "android", feature = "android-native-activity"))]
 pub(crate) use android::{
     Shell, deferred, disable, enable, operate, operated, schedule,
-    set_android_app,
+    set_android_app, touched,
 };
 
 #[cfg(any(
@@ -57,7 +57,10 @@ use crate::core::widget::operation::{
     all(target_os = "android", feature = "android-native-activity"),
     test
 ))]
-use crate::core::{self, Rectangle, SmolStr, Vector, input_method, keyboard};
+use crate::core::{
+    self, Point, Rectangle, SmolStr, Vector, input_method, keyboard, mouse,
+    touch,
+};
 
 /// The events an edit becomes for the focused field, in order.
 ///
@@ -173,6 +176,148 @@ fn ends_typing(key: &winit::keyboard::Key) -> bool {
                 | NamedKey::SymbolLock
         )
     )
+}
+
+/// Where `events` press on the window: each finger that touches down, and
+/// the cursor for each mouse button pressed.
+#[cfg(any(
+    all(target_os = "android", feature = "android-native-activity"),
+    test
+))]
+fn presses(events: &[core::Event], cursor: mouse::Cursor) -> Vec<Point> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            core::Event::Touch(touch::Event::FingerPressed {
+                position,
+                ..
+            }) => Some(*position),
+            core::Event::Mouse(mouse::Event::ButtonPressed(_)) => {
+                cursor.position()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// An operation that finds where the focused widgets are drawn: their
+/// bounds, moved by the scroll offset of each scrollable around them and cut
+/// to what those scrollables show. Every focused widget counts: a
+/// `text_editor` focused from code keeps the focus when the user taps a
+/// `text_input`.
+#[cfg(any(
+    all(target_os = "android", feature = "android-native-activity"),
+    test
+))]
+#[derive(Debug, Default)]
+pub(crate) struct Focused {
+    /// The scroll offset of the scrollables around the widgets visited now.
+    translation: Vector,
+    /// What those scrollables show of the window; none: all of it.
+    shown: Option<Rectangle>,
+    /// The scrollable just visited, for the contents it traverses next: its
+    /// offset and its bounds.
+    scrollable: Option<(Vector, Rectangle)>,
+    /// The focused widgets, as much of each as is drawn.
+    focused: Vec<Rectangle>,
+}
+
+#[cfg(any(
+    all(target_os = "android", feature = "android-native-activity"),
+    test
+))]
+impl Focused {
+    /// Whether `point` lands on a focused widget.
+    pub(crate) fn contains(&self, point: Point) -> bool {
+        self.focused.iter().any(|bounds| bounds.contains(point))
+    }
+}
+
+#[cfg(any(
+    all(target_os = "android", feature = "android-native-activity"),
+    test
+))]
+impl Operation for Focused {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        let (translation, shown) = (self.translation, self.shown);
+
+        // A scrollable's contents move by its offset and show inside it,
+        // where the scrollables around it draw it.
+        if let Some((offset, bounds)) = self.scrollable.take() {
+            let viewport = bounds - translation;
+
+            self.shown = Some(match shown {
+                None => viewport,
+                Some(shown) => shown.intersection(&viewport).unwrap_or(
+                    Rectangle::new(viewport.position(), core::Size::ZERO),
+                ),
+            });
+            self.translation = translation + offset;
+        }
+
+        operate(self);
+
+        self.translation = translation;
+        self.shown = shown;
+    }
+
+    fn container(&mut self, _id: Option<&Id>, _bounds: Rectangle) {
+        self.scrollable = None;
+    }
+
+    fn scrollable(
+        &mut self,
+        _id: Option<&Id>,
+        bounds: Rectangle,
+        _content_bounds: Rectangle,
+        translation: Vector,
+        _state: &mut dyn Scrollable,
+    ) {
+        self.scrollable = Some((translation, bounds));
+    }
+
+    fn focusable(
+        &mut self,
+        _id: Option<&Id>,
+        bounds: Rectangle,
+        state: &mut dyn Focusable,
+    ) {
+        self.scrollable = None;
+
+        if !state.is_focused() {
+            return;
+        }
+
+        let drawn = bounds - self.translation;
+        let shown = match self.shown {
+            None => Some(drawn),
+            Some(shown) => shown.intersection(&drawn),
+        };
+
+        self.focused.extend(shown);
+    }
+
+    fn text_input(
+        &mut self,
+        _id: Option<&Id>,
+        _bounds: Rectangle,
+        _state: &mut dyn TextInput,
+    ) {
+        self.scrollable = None;
+    }
+
+    fn text(&mut self, _id: Option<&Id>, _bounds: Rectangle, _text: &str) {
+        self.scrollable = None;
+    }
+
+    fn custom(
+        &mut self,
+        _id: Option<&Id>,
+        _bounds: Rectangle,
+        _state: &mut dyn std::any::Any,
+    ) {
+        self.scrollable = None;
+    }
 }
 
 /// What a widget operation did to the focus and to the text inputs, and
@@ -894,6 +1039,198 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn presses_are_fingers_down_and_mouse_buttons_at_the_cursor() {
+        let finger = Point::new(10.0, 20.0);
+        let pointer = Point::new(3.0, 4.0);
+        let id = touch::Finger(1);
+
+        let events = [
+            core::Event::Touch(touch::Event::FingerPressed {
+                id,
+                position: finger,
+            }),
+            core::Event::Touch(touch::Event::FingerMoved {
+                id,
+                position: pointer,
+            }),
+            core::Event::Touch(touch::Event::FingerLifted {
+                id,
+                position: pointer,
+            }),
+            core::Event::Mouse(mouse::Event::ButtonPressed(
+                mouse::Button::Left,
+            )),
+            core::Event::Mouse(mouse::Event::ButtonReleased(
+                mouse::Button::Left,
+            )),
+            core::Event::Mouse(mouse::Event::CursorMoved { position: finger }),
+        ];
+
+        assert_eq!(
+            presses(&events, mouse::Cursor::Available(pointer)),
+            [finger, pointer]
+        );
+        assert_eq!(presses(&events, mouse::Cursor::Unavailable), [finger]);
+        assert_eq!(
+            presses(&events[1..3], mouse::Cursor::Available(pointer)),
+            []
+        );
+    }
+
+    /// A scrollable's state, which nothing scrolls here.
+    struct Scrolled;
+
+    impl Scrollable for Scrolled {
+        fn snap_to(
+            &mut self,
+            _offset: crate::core::widget::operation::scrollable::RelativeOffset<
+                Option<f32>,
+            >,
+        ) {
+        }
+
+        fn scroll_to(
+            &mut self,
+            _offset: crate::core::widget::operation::scrollable::AbsoluteOffset<
+                Option<f32>,
+            >,
+        ) {
+        }
+
+        fn scroll_by(
+            &mut self,
+            _offset: crate::core::widget::operation::scrollable::AbsoluteOffset,
+            _bounds: Rectangle,
+            _content_bounds: Rectangle,
+        ) {
+        }
+    }
+
+    fn rectangle(x: f32, y: f32, width: f32, height: f32) -> Rectangle {
+        Rectangle::new(Point::new(x, y), core::Size::new(width, height))
+    }
+
+    /// A focusable widget at `bounds`, focused or not.
+    fn widget(operation: &mut dyn Operation, bounds: Rectangle, focused: bool) {
+        let mut input = Input {
+            focused,
+            ..Input::default()
+        };
+
+        operation.text_input(None, bounds, &mut input);
+        operation.focusable(None, bounds, &mut input);
+    }
+
+    /// A scrollable at `bounds`, scrolled by `offset`, whose contents
+    /// `content` hands on, the way `scrollable` operates.
+    fn scrollable(
+        operation: &mut dyn Operation,
+        bounds: Rectangle,
+        offset: Vector,
+        content: &mut dyn FnMut(&mut dyn Operation),
+    ) {
+        operation.scrollable(None, bounds, bounds, offset, &mut Scrolled);
+        operation.traverse(&mut |operation| {
+            operation.container(None, bounds);
+            operation.traverse(content);
+        });
+    }
+
+    #[test]
+    fn the_focused_widget_is_found_where_it_is_drawn() {
+        let mut focused = Focused::default();
+
+        // A toolbar on top, a page scrolled by 150 below it with a focused
+        // editor inside, and a focused field under the page.
+        focused.container(None, rectangle(0.0, 0.0, 200.0, 400.0));
+        focused.traverse(&mut |operation| {
+            widget(operation, rectangle(0.0, 0.0, 200.0, 40.0), false);
+
+            scrollable(
+                operation,
+                rectangle(0.0, 40.0, 200.0, 200.0),
+                Vector::new(0.0, 150.0),
+                &mut |operation| {
+                    widget(
+                        operation,
+                        rectangle(0.0, 40.0, 200.0, 100.0),
+                        false,
+                    );
+                    widget(
+                        operation,
+                        rectangle(0.0, 160.0, 200.0, 100.0),
+                        true,
+                    );
+                },
+            );
+
+            widget(operation, rectangle(0.0, 300.0, 200.0, 40.0), true);
+        });
+
+        // The editor is drawn at 10 to 110, but the page shows it from 40.
+        for (x, y, inside) in [
+            (100.0, 20.0, false),
+            (100.0, 45.0, true),
+            (100.0, 105.0, true),
+            (100.0, 115.0, false),
+            (100.0, 200.0, false),
+            (100.0, 320.0, true),
+            (210.0, 320.0, false),
+        ] {
+            assert_eq!(
+                focused.contains(Point::new(x, y)),
+                inside,
+                "({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
+    fn scrollables_inside_scrollables_add_up() {
+        let mut focused = Focused::default();
+
+        scrollable(
+            &mut focused,
+            rectangle(0.0, 0.0, 300.0, 300.0),
+            Vector::new(0.0, 100.0),
+            &mut |operation| {
+                scrollable(
+                    operation,
+                    rectangle(0.0, 200.0, 300.0, 100.0),
+                    Vector::new(50.0, 0.0),
+                    &mut |operation| {
+                        widget(
+                            operation,
+                            rectangle(60.0, 200.0, 40.0, 40.0),
+                            true,
+                        );
+                    },
+                );
+            },
+        );
+
+        // Drawn at (10, 100) to (50, 140), inside both.
+        assert!(focused.contains(Point::new(20.0, 120.0)));
+        assert!(!focused.contains(Point::new(70.0, 220.0)));
+        assert!(!focused.contains(Point::new(20.0, 220.0)));
+
+        // A focused widget scrolled out of sight is never pressed.
+        let mut focused = Focused::default();
+
+        scrollable(
+            &mut focused,
+            rectangle(0.0, 0.0, 100.0, 100.0),
+            Vector::new(0.0, 500.0),
+            &mut |operation| {
+                widget(operation, rectangle(0.0, 0.0, 100.0, 100.0), true);
+            },
+        );
+
+        assert!(!focused.contains(Point::new(50.0, 50.0)));
+        assert!(!focused.contains(Point::new(50.0, -450.0)));
     }
 
     #[test]

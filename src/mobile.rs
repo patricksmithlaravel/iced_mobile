@@ -428,7 +428,8 @@
 //!   position counts the word, and `select_all` selects it too). What the
 //!   keyboard typed before the operation reaches the field before it runs.
 //! - If the user hides the keyboard while a field keeps the focus, a tap on
-//!   the field brings it back.
+//!   the field brings it back, also on a `text_editor`, which otherwise
+//!   ignores the tap. A tap elsewhere leaves it hidden.
 //!
 //! On Android before 8, when the view cannot be added, and with
 //! GameActivity, the keyboard reaches the application through key events

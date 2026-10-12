@@ -1726,16 +1726,35 @@ async fn run_instance<P>(
                                 continue;
                             }
 
-                            let (ui_state, statuses) = user_interfaces
+                            let interface = user_interfaces
                                 .get_mut(&id)
-                                .expect("Get user interface")
-                                .update(
-                                    &window_events,
-                                    window.state.cursor(),
-                                    &mut window.renderer,
-                                    &mut clipboard,
-                                    &mut messages,
-                                );
+                                .expect("Get user interface");
+
+                            let (ui_state, statuses) = interface.update(
+                                &window_events,
+                                window.state.cursor(),
+                                &mut window.renderer,
+                                &mut clipboard,
+                                &mut messages,
+                            );
+
+                            // Android (NativeActivity): a tap on the focused
+                            // field brings back the keyboard the user hid,
+                            // at the next redraw.
+                            #[cfg(all(
+                                target_os = "android",
+                                feature = "android-native-activity"
+                            ))]
+                            if ime::touched(
+                                &window_events,
+                                window.state.cursor(),
+                                |operation| {
+                                    interface
+                                        .operate(&window.renderer, operation);
+                                },
+                            ) {
+                                window.raw.request_redraw();
+                            }
 
                             #[cfg(feature = "unconditional-rendering")]
                             window.request_redraw(
