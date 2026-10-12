@@ -260,6 +260,24 @@ impl Engine {
         self.generation
     }
 
+    /// The field lost the keyboard: what the keyboard typed and composes
+    /// there is dropped, with the `dropped` messages, which were still
+    /// queued and are not applied. Returns the new generation to give the
+    /// keyboard (`Keyboard.reset`) when it may hold text the engine has not
+    /// dropped, else none.
+    ///
+    /// It may whenever the engine is not idle, and whenever a message was
+    /// dropped: the first report since the origin leaves the engine idle
+    /// until it is applied, while the keyboard's mirror and composition
+    /// already hold its text, which would otherwise reach the next field.
+    pub(crate) fn abandon(&mut self, dropped: &[Message]) -> Option<i32> {
+        if dropped.is_empty() && self.is_idle() {
+            return None;
+        }
+
+        Some(self.reset(&mut Vec::new()))
+    }
+
     /// Nothing to reset: no text typed since the last reset and no preedit.
     ///
     /// Precisely: the mirror's committed text, as the engine last applied
@@ -2845,6 +2863,77 @@ mod tests {
         harness.mirror.commit_text("d", 1);
         harness.drain();
         assert_eq!(harness.value(), "ad");
+    }
+
+    /// The native side drops what is queued when the field loses the
+    /// keyboard (`Session::abandon`), and posts the reset it asks for.
+    fn abandon(harness: &mut Harness) {
+        let dropped: Vec<Message> = harness.mirror.out.drain(..).collect();
+
+        if let Some(generation) = harness.engine.abandon(&dropped) {
+            harness.posted.push_back(Posted::Reset(generation));
+        }
+    }
+
+    #[test]
+    fn a_field_losing_the_keyboard_drops_what_it_sent() {
+        // Nothing typed, nothing queued: the keyboard holds nothing.
+        let mut harness = Harness::new("", "");
+        abandon(&mut harness);
+        assert_eq!(harness.posted, []);
+
+        // A composition the engine applied is dropped, not committed.
+        let _ = harness.run(|m| m.set_composing_text("wor", 1));
+        abandon(&mut harness);
+        assert_eq!(harness.posted, [Posted::Reset(1)]);
+        assert_eq!(harness.value(), "");
+    }
+
+    #[test]
+    fn a_report_still_queued_when_the_field_loses_the_keyboard_is_dropped() {
+        for secure_next in [false, true] {
+            // The user taps field A (the engine is idle) and types "h";
+            // the application moves the focus to field B before the event
+            // loop turns.
+            let mut harness = Harness::new("", "");
+            harness.mirror.set_composing_text("h", 1);
+            assert!(harness.engine.is_idle());
+
+            abandon(&mut harness);
+            assert_eq!(harness.posted, [Posted::Reset(1)]);
+            harness.settle();
+
+            // B's keyboard starts with no text: what was typed for A
+            // reaches neither field, and the next key is B's alone.
+            harness.app = Field::new("", "");
+            harness.restart();
+            assert!(harness.mirror.units.is_empty());
+
+            if secure_next {
+                // A password field's keyboard finishes a composition when
+                // its purpose changes: there is none to finish.
+                assert_eq!(harness.run(Mirror::finish_composing_text), []);
+            }
+
+            assert_eq!(
+                harness.run(|m| m.set_composing_text("i", 1)),
+                [preedit("i", 1)]
+            );
+            assert_eq!(
+                (harness.value().as_str(), harness.preedit()),
+                ("", "i")
+            );
+        }
+
+        // A dropped report of a committed letter too.
+        let mut harness = Harness::new("", "");
+        harness.mirror.commit_text("x", 1);
+        abandon(&mut harness);
+        harness.settle();
+        harness.app = Field::new("", "");
+        harness.restart();
+        assert_eq!(harness.run(|m| m.commit_text("y", 1)), [commit("y")]);
+        assert_eq!(harness.value(), "y");
     }
 
     #[test]

@@ -26,10 +26,12 @@
 //! - [`disable`] runs when no field asks any more. The field has lost the
 //!   focus, so what the keyboard typed and composes there is dropped, as
 //!   desktop input methods drop a composition then: the queue is emptied,
-//!   the engine and the Java side are reset unless the engine is idle, and
-//!   `hide()` follows. The window gets `input_method::Event::Closed` at the
-//!   next drain or interrupt, which clears the preedit every text widget
-//!   keeps (`text_input` and `text_editor` take it whatever their focus).
+//!   the engine and the Java side are reset unless the engine is idle and
+//!   nothing was queued (a queued report may hold text the engine never
+//!   saw), and `hide()` follows. The window gets
+//!   `input_method::Event::Closed` at the next drain or interrupt, which
+//!   clears the preedit every text widget keeps (`text_input` and
+//!   `text_editor` take it whatever their focus).
 //! - A widget operation (`text_input::focus`, `focus_next`, `unfocus`,
 //!   `move_cursor_to`, `select_all`, ...) can move the focus or the caret
 //!   while the keyboard has typed into the field. The event loop runs it
@@ -364,13 +366,7 @@ impl Session {
         if self.shown.is_none() {
             // What the keyboard sent since the last field asked for it
             // belongs to no field.
-            let mut dropped = Vec::new();
-            self.apply_queue(&mut dropped);
-
-            if !self.engine.is_idle() {
-                let generation = self.engine.reset(&mut dropped);
-                self.call(dex::RESET, &[JValue::Int(generation)]);
-            }
+            self.abandon();
 
             set_window(Some(window.clone()));
         }
@@ -402,12 +398,12 @@ impl Session {
 
     /// The field the keyboard typed into lost the focus: what the keyboard
     /// sent, typed and composes there is dropped, and its Java side starts
-    /// over.
+    /// over unless it holds nothing (see [`Engine::abandon`]).
     fn abandon(&mut self) {
-        let _dropped = std::mem::take(&mut queue().messages);
+        let mut dropped = std::mem::take(&mut queue().messages);
 
-        if !self.engine.is_idle() {
-            let generation = self.engine.reset(&mut Vec::new());
+        if let Some(generation) = self.engine.abandon(dropped.make_contiguous())
+        {
             self.call(dex::RESET, &[JValue::Int(generation)]);
         }
     }
