@@ -24,10 +24,12 @@ fn read(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("cannot read {relative}: {error}"))
 }
 
-/// The workflows the fork's CI consists of.
+/// The workflows the fork's CI consists of, and the per-platform ones that
+/// run `.github/ci` scripts.
 const WORKFLOWS: &[&str] = &[
     ".github/workflows/framework.yml",
     ".github/workflows/icm.yml",
+    ".github/workflows/icm-android.yml",
 ];
 
 /// Every file under `.github/workflows` and `.github/ci`, with its text.
