@@ -141,6 +141,40 @@ fn events(
     }
 }
 
+/// Whether a hardware key's press ends what the keyboard typed, as a tap
+/// does (see `android`): any key but a modifier (Shift, Ctrl, Alt, Meta,
+/// the locks, Fn, Sym), which moves no caret and edits nothing. An input
+/// method that composes a hardware keyboard's letters may let Shift through
+/// to the app: its composition stays, as in an Android `EditText` and on
+/// the desktop.
+#[cfg(any(
+    all(target_os = "android", feature = "android-native-activity"),
+    test
+))]
+fn ends_typing(key: &winit::keyboard::Key) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+
+    !matches!(
+        key,
+        Key::Named(
+            NamedKey::Shift
+                | NamedKey::Control
+                | NamedKey::Alt
+                | NamedKey::AltGraph
+                | NamedKey::Super
+                | NamedKey::Meta
+                | NamedKey::Hyper
+                | NamedKey::CapsLock
+                | NamedKey::NumLock
+                | NamedKey::ScrollLock
+                | NamedKey::Fn
+                | NamedKey::FnLock
+                | NamedKey::Symbol
+                | NamedKey::SymbolLock
+        )
+    )
+}
+
 /// What a widget operation did to the focus and to the text inputs, and
 /// what it held back.
 #[cfg(any(
@@ -859,6 +893,48 @@ mod tests {
                     Moved::default()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn modifier_keys_leave_the_keyboard_typing() {
+        use winit::keyboard::{Key, NamedKey, NativeKey};
+
+        for named in [
+            NamedKey::Shift,
+            NamedKey::Control,
+            NamedKey::Alt,
+            NamedKey::AltGraph,
+            NamedKey::Super,
+            NamedKey::Meta,
+            NamedKey::Hyper,
+            NamedKey::CapsLock,
+            NamedKey::NumLock,
+            NamedKey::ScrollLock,
+            NamedKey::Fn,
+            NamedKey::FnLock,
+            NamedKey::Symbol,
+            NamedKey::SymbolLock,
+        ] {
+            assert!(!ends_typing(&Key::Named(named)), "{named:?}");
+        }
+
+        for key in [
+            Key::Character("a".into()),
+            Key::Character("ß".into()),
+            Key::Named(NamedKey::Space),
+            Key::Named(NamedKey::Enter),
+            Key::Named(NamedKey::Tab),
+            Key::Named(NamedKey::Escape),
+            Key::Named(NamedKey::Backspace),
+            Key::Named(NamedKey::Delete),
+            Key::Named(NamedKey::ArrowLeft),
+            Key::Named(NamedKey::Home),
+            Key::Named(NamedKey::BrowserBack),
+            Key::Dead(Some('´')),
+            Key::Unidentified(NativeKey::Android(0)),
+        ] {
+            assert!(ends_typing(&key), "{key:?}");
         }
     }
 

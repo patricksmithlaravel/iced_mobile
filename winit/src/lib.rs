@@ -1561,8 +1561,9 @@ async fn run_instance<P>(
                         }
 
                         // Android (NativeActivity): a tap, a mouse button,
-                        // a hardware key or the loss of the focus ends what
-                        // the keyboard was typing, and its edits come first.
+                        // a hardware key (not a modifier) or the loss of the
+                        // focus ends what the keyboard was typing, and its
+                        // edits come first.
                         // The application takes them, and the views are
                         // built again, before the event reaches it: a
                         // button that the finished word enables takes the

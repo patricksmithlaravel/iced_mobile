@@ -62,15 +62,17 @@
 //!   character that joins the text before it), the Java side is asked to
 //!   rebase, with no new generation.
 //! - [`Shell::interrupt`], before a touch starts, a mouse button is pressed,
-//!   a hardware key is pressed or the window loses the focus reaches the
-//!   application: the queued messages are applied first, then, unless the
-//!   engine is idle, it is reset, which commits a composition, and the Java
-//!   side forgets its text. When that gave the field edits, the event loop
-//!   applies them and builds the views again before the event reaches the
-//!   application (it returns true): a tap on a Send button submits the word
-//!   being composed, even when the button is enabled only once the field
-//!   holds text. The keyboard's text starts again where the caret is after
-//!   the event.
+//!   a hardware key other than a modifier is pressed or the window loses
+//!   the focus reaches the application: the queued messages are applied
+//!   first, then, unless the engine is idle, it is reset, which commits a
+//!   composition, and the Java side forgets its text. When that gave the
+//!   field edits, the event loop applies them and builds the views again
+//!   before the event reaches the application (it returns true): a tap on a
+//!   Send button submits the word being composed, even when the button is
+//!   enabled only once the field holds text. The keyboard's text starts
+//!   again where the caret is after the event. A modifier (Shift, Ctrl,
+//!   Alt, ...) moves no caret and ends nothing: an input method that
+//!   composes a hardware keyboard's letters may let it through.
 //! - Dropping the [`Shell`] at the end of the run uninstalls the Java side,
 //!   deletes its global reference, empties the queue and lets go of the
 //!   window and the `AndroidApp`. The class and its loader stay loaded for
@@ -294,9 +296,9 @@ impl Shell {
     }
 
     /// Before `event` reaches the application: a touch that starts, a mouse
-    /// button pressed, a hardware key pressed or the loss of the window's
-    /// focus ends what the keyboard was typing (see the module's
-    /// documentation).
+    /// button pressed, a hardware key other than a modifier pressed or the
+    /// loss of the window's focus ends what the keyboard was typing (see the
+    /// module's documentation).
     ///
     /// True when the field got edits: the event loop then handles them, and
     /// builds the views again, before it hands `event` to the application,
@@ -327,7 +329,11 @@ impl Shell {
                 event,
                 is_synthetic: false,
                 ..
-            } if event.state == ElementState::Pressed => false,
+            } if event.state == ElementState::Pressed
+                && super::ends_typing(&event.logical_key) =>
+            {
+                false
+            }
             WindowEvent::Focused(false) => false,
             _ => return false,
         };

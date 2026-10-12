@@ -394,10 +394,11 @@
 //!   drawn underlined at the caret, not part of the value until the
 //!   keyboard commits it (a space, a suggestion, Enter). `on_input` sees
 //!   the value without it until then.
-//!   A tap anywhere, a hardware key, or the window losing the focus commits
-//!   it first, and the application handles the commit, and builds its view
-//!   again, before the tap: a Send button that is enabled only once the
-//!   field holds text takes the tap that finished the word.
+//!   A tap anywhere, a hardware key other than a modifier (Shift, Ctrl,
+//!   Alt, ...), or the window losing the focus commits it first, and the
+//!   application handles the commit, and builds its view again, before the
+//!   tap: a Send button that is enabled only once the field holds text
+//!   takes the tap that finished the word.
 //! - The keyboard sees only the text typed since the field got the focus or
 //!   since the last tap, never the field's earlier text, so its suggestions
 //!   and auto-capitalisation do not see what was there before. Backspace and

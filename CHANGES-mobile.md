@@ -263,9 +263,10 @@ Text input on Android, and secure fields on Android and iOS:
   before and after what the keyboard typed, also from keyboards that delete with
   `deleteSurroundingText` (AOSP's keyboard and its forks), and so do the arrow, Home and End keys,
   without dropping keys sent in quick succession.
-- **Android:** a tap, a hardware key or the window losing the focus commits the word being composed,
-  and the app takes the commit, and builds its view again, before the tap: a Send button enabled
-  only once the field holds text takes the tap that finished the word.
+- **Android:** a tap, a hardware key other than a modifier or the window losing the focus commits
+  the word being composed, and the app takes the commit, and builds its view again, before the tap:
+  a Send button enabled only once the field holds text takes the tap that finished the word. Shift,
+  Ctrl, Alt and the other modifiers leave the word alone.
 - **Android:** when the app moves the focus from code (`operation::focus`, `focus_next`,
   `unfocus`) or the field leaves the view, the word being composed is dropped and the field's
   preedit cleared: the window gets `input_method::Event::Closed`, as winit's desktop backends send
