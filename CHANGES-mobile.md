@@ -302,10 +302,14 @@ Text input on Android, and secure fields on Android and iOS:
   dropped. A key the app handles from a subscription (`keyboard::listen`, how an app takes Tab) or a
   task comes after that text, which then goes to the field that had the focus. Since such a message
   may still move the focus, a word the keyboard composes after an Enter, Tab or Escape, its own or a
-  hardware keyboard's, shows in no field, the one that has the focus included, until a tap on that
-  field or a focus move from code after the key; the hold ends with the keyboard's session for the
-  field, and the next session gives its purpose before the keyboard shows. What it commits reaches
-  the field that has the focus at once. Line breaks and tabs inside longer committed text are
+  hardware keyboard's, shows in no field, the one that has the focus included, until a short window
+  closes (100 milliseconds after the key's turn ends): then the first redraw shows it in the field
+  that has the focus, and the shell asks for that redraw itself while a word waits. A tap on the
+  field, or a focus move from code, shows it at the next redraw. A focus move from a subscription
+  that comes after the window is not waited for: a word the keyboard sends before it shows in the
+  field that has the focus until the move ends the session. The hold ends with the keyboard's
+  session, and the next session gives the field's purpose before the keyboard shows. What it commits
+  reaches the field that has the focus at once. Line breaks and tabs inside longer committed text are
   dropped. Backspace and Delete reach the field's text before and after what the keyboard typed,
   also from keyboards that delete with `deleteSurroundingText` (AOSP's keyboard and its forks), and
   so do the arrow, Home and End keys, without dropping keys sent in quick succession. The keyboard's
@@ -383,7 +387,8 @@ Text input on Android, and secure fields on Android and iOS:
   focus move from code) shows in no field until a redraw has decided the purpose of the field that
   has the focus, and in a password field that redraw commits it as typed text. After an Enter, Tab
   or Escape the redraw decides only once a tap on the field or a focus move from code has come after
-  the key, or a keyboard session starts for the field again (above). A field the app makes secure
+  the key, or the short window after the key has closed, or a keyboard session starts for the field
+  again (above). A field the app makes secure
   while the keyboard composes gets its composition as typed text at the next redraw, and what the
   keyboard composes before it is set up for the password field is read as typed text too. On Android
   and iOS the window never draws a password field's preedit (the desktop and the web draw it as

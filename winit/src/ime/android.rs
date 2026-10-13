@@ -35,12 +35,14 @@
 //!   interrupt gives the field these edits before anything else. The
 //!   window draws no preedit over a password field. After an Enter, Tab or
 //!   Escape, from the keyboard or from hardware, a redraw decides only once
-//!   a focus move from code or a tap on the field has come after the key:
-//!   the application may still move the focus in a subscription (see
-//!   `feed`), so the composition otherwise waits for a tap or a focus move.
-//!   The session's end ends that hold (see [`Feed::abandon`]): the session
-//!   that starts again for the field, after the application's turn, gives its
-//!   purpose before the keyboard shows.
+//!   a focus move from code or a tap on the field has come after the key, or
+//!   once the settle window after the key has closed: the application may
+//!   still move the focus in a subscription (see `feed`), so the composition
+//!   waits for the window's end. While it waits, the shell asks for the
+//!   redraw at the window's end, or at once when the window has closed
+//!   ([`Feed::settle_at`], [`settle`]). The session's end ends that hold (see
+//!   [`Feed::abandon`]): the session that starts again for the field, after
+//!   the application's turn, gives its purpose before the keyboard shows.
 //! - [`disable`] runs when no field asks any more. The field has lost the
 //!   focus, so what the keyboard typed and composes there is dropped, as
 //!   desktop input methods drop a composition then: the queue is emptied,
@@ -91,8 +93,8 @@
 //!   returns run (a focus moved to the next field), before the event loop
 //!   replays [`Shell::resume`] and an `AboutToWait` for the rest, which then
 //!   reaches the field the application left the focus in, with no preedit
-//!   until a tap or a focus move lets a redraw tell the shell that field's
-//!   purpose. The Java side
+//!   until the settle window has closed, or a tap or a focus move lets a
+//!   redraw tell the shell that field's purpose. The Java side
 //!   rebases its mirror right after such a key, as after an arrow, Home or
 //!   End, with no new generation, so none of that text is dropped. When a
 //!   message asks to forget the text (the session's text starts with a
@@ -502,7 +504,9 @@ impl Shell {
 
     /// When the event loop is about to wait: applies what the keyboard sent
     /// since it last turned, and gives the edits to the window whose field
-    /// asks for the keyboard. Called before the loop's idle check.
+    /// asks for the keyboard. Called before the loop's idle check. It then
+    /// asks that window for the redraw a composition the hold keeps back
+    /// waits for ([`settle`]), so the loop turns for it.
     ///
     /// True when the application takes its turn after an Enter, Tab or
     /// Escape key, which this gave the field or an earlier call did: the
@@ -534,14 +538,17 @@ impl Shell {
 
         let _ = deliver(edits, windows, events);
 
+        settle(windows);
+
         turn
     }
 
     /// The application's turn after an Enter, Tab or Escape key ended: the
     /// next drain applies what the keyboard sent after it, which reaches the
-    /// field the application left the focus in with no preedit until a tap
-    /// or a focus move lets a redraw tell the shell that field's purpose.
-    /// The window redraws for that, also when the key changed nothing.
+    /// field the application left the focus in with no preedit until the
+    /// settle window has closed, or a tap or a focus move lets a redraw tell
+    /// the shell that field's purpose. The window redraws for that, also when
+    /// the key changed nothing.
     pub(crate) fn resume(&mut self) {
         SESSION.with_borrow_mut(|session| session.feed.resume());
 
@@ -860,6 +867,36 @@ where
     }
 
     true
+}
+
+/// Asks the window whose field has the keyboard for the redraw that decides
+/// a composition the hold keeps back: at the end of the settle window, or now
+/// once it has closed (see [`Feed::settle_at`]). A window without a surface
+/// is not drawn, and `Resumed` asks for its redraw.
+fn settle<P, C>(windows: &mut WindowManager<P, C>)
+where
+    P: Program,
+    C: Compositor<Renderer = P::Renderer>,
+    P::Theme: theme::Base,
+{
+    let Some(at) = SESSION.with_borrow(|session| session.feed.settle_at())
+    else {
+        return;
+    };
+
+    let Some((_id, window)) = windows
+        .iter_mut()
+        .find(|(_id, window)| window.ime_requested())
+    else {
+        return;
+    };
+
+    // An earlier request of the window, an animation's say, stays.
+    if window.surface.is_some()
+        && window.redraw_at.is_none_or(|redraw_at| at < redraw_at)
+    {
+        window.request_redraw(window::RedrawRequest::At(at));
+    }
 }
 
 /// Loads the class if this process has not, then installs the Java side

@@ -236,7 +236,8 @@ this file in the commit that fixes or finds a limitation.
     focused from code): the shell commits it as typed text at the redraw that
     tells it the field's purpose, and no field gets a preedit until that
     decision, which a tap on the field that has the focus or a focus move from
-    code makes (after an Enter, Tab or Escape, see the bullet below). A field
+    code makes, or the end of a short window after an Enter, Tab or Escape (see
+    the bullet below). A field
     the app makes secure while the keyboard composes gets its composition as
     typed text at the next redraw. On Android and iOS the window never draws a
     password field's preedit. On iOS the view tells UIKit that the field is
@@ -272,17 +273,27 @@ this file in the commit that fixes or finds a limitation.
     may suggest and learn words, and what it composed of it reaches the password
     field as typed text, never drawn in clear. A hardware keyboard's Enter, Tab
     and Escape count the same way, and one that waited behind a keyboard key's
-    turn holds even a focus that turn moved, until a tap or until the session
-    ends, since its own message may still move the focus. The app may move the
-    focus after such a key later still, from a subscription (`keyboard::listen`,
-    which is how an app takes Tab: `text_input` ignores it) or a task, and that
-    message arrives after the event loop turned again. So no redraw decides
-    which field a composition belongs to from the key alone: what the keyboard
-    composes after the key shows in no field, the one that has the focus
-    included, until a tap on that field or a focus move from code has let a
-    redraw decide. The keyboard's session ends the hold with it: a session that
-    starts again for the field, after the app's turn, gives its purpose before
-    the keyboard shows, so the underline appears at once then. What the keyboard
+    turn holds even a focus that turn moved, until a tap or until a short
+    settle window closes, since its own message may still move the focus. The
+    app may move the focus after such a key later still, from a subscription
+    (`keyboard::listen`, which is how an app takes Tab: `text_input` ignores
+    it) or a task, and that message arrives after the event loop turned again.
+    So a redraw decides which field a composition belongs to only once that
+    window has closed: 100 milliseconds after the key's turn ends (or after a
+    hardware key). Until then, what the keyboard composes shows in no field,
+    the one that has the focus included, and a redraw inside the window decides
+    nothing. The shell asks for the redraw at the window's end while a
+    composition waits, or at once when the window has closed, so a composition
+    does not wait for an unrelated event. A tap on the field that has the
+    focus, or a focus move from code, lets the next redraw decide at once
+    instead. A focus move from a subscription or a task that arrives after the
+    window has closed is not waited for: a composition the keyboard sends in
+    the gap before the move shows as a preedit in the field that has the focus,
+    and a password it composes there is in clear until the move ends the
+    session, which drops it. The keyboard's session ends the hold with it: a
+    session that starts again for the field, after the app's turn, gives its
+    purpose before the keyboard shows, so the underline appears at once then.
+    What the keyboard
     commits reaches the field that has the focus at once. A composition the
     keyboard still has open when the subscription's focus move ends that session
     is dropped with it, as the focus-move bullet above says: a password it

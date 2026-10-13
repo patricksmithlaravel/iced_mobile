@@ -61,23 +61,32 @@
 //! field as its preedit, which the next drain, operation or interruption
 //! hands the field before anything else.
 //!
-//! A redraw decides only once the focus moved from code, or a tap landed on
-//! the field that has it ([`Feed::refocused`]). After an Enter, Tab or Escape
-//! (from the keyboard, or from hardware: [`Feed::finish`] with `yields`), the
+//! A redraw decides only once a focus moved from code, or a tap landed on
+//! the field that has it ([`Feed::refocused`]), or once the settle window
+//! has closed ([`SETTLE`]). After an Enter, Tab or Escape (from the
+//! keyboard, or from hardware: [`Feed::finish`] with `yields`), the
 //! application may move the focus later still, in a subscription or a task
-//! whose message arrives after the event loop turned again. The redraw that
-//! follows such a key therefore does not decide: the field that has the focus
-//! then may be the one the focus moves to, and a password field's composition
-//! must not show in the field it leaves. The composition waits until a tap on
-//! the field that has the focus, or an operation that moves it, has decided
-//! the purpose, or until the keyboard's session ends: a session that starts
-//! again for the field, after the application's turn, gives its purpose
-//! before the keyboard shows, so nothing is left to wait for
-//! ([`Feed::abandon`]). A focus the application moves in its turn after a
-//! keyboard key is decided at the resume's redraw. A hardware key that waited
-//! behind a keyboard key's turn ends that decision when the event loop
-//! replays it: its own message may still move the focus, so a focus the turn
-//! moved waits for a tap or for the session's end, too.
+//! whose message arrives after the event loop turned again. So the hold
+//! begins when the application's turn ends (or with the key, when no turn is
+//! due), and a redraw inside the window decides nothing: the field that has
+//! the focus then may be the one the focus moves to, and a password field's
+//! composition must not show in the field it leaves. The first redraw from
+//! the window's end decides the purpose, so a composition waits for that
+//! moment and not for a tap. While a composition is held, the shell asks for
+//! that redraw at the window's end, or at once when the window has closed
+//! ([`Feed::settle_at`]). A focus the application moves inside the window, or
+//! a tap on the field, still decides at the next redraw. The keyboard's
+//! session ends the hold too: a session that starts again for the field,
+//! after the application's turn, gives its purpose before the keyboard
+//! shows, so nothing is left to wait for ([`Feed::abandon`]). A focus the
+//! application moves in its turn after a keyboard key is decided at the
+//! resume's redraw. A hardware key that waited behind a keyboard key's turn
+//! ends that decision when the event loop replays it: its own message may
+//! still move the focus, so a focus the turn moved waits for a tap or for the
+//! window's end, too. A focus move that arrives only after the window closed
+//! is not waited for: a composition the keyboard sends in that gap shows in
+//! the field that has the focus until the move ends its session
+//! (`docs/agents/limitations.md`).
 //!
 //! A field that becomes a password field while the engine shows a
 //! composition in it (the application made it secure) gets the
@@ -87,7 +96,46 @@
 //! before it learns the purpose.
 use super::edit::{Edit, Engine, Message, Request};
 
+use crate::core::time::{Duration, Instant};
+
 use std::collections::VecDeque;
+
+/// How long after the application's turn after a key that yields (or after
+/// the key, when it came from hardware) a redraw decides nothing about the
+/// field that has the focus: the window in which a subscription's message
+/// may still move the focus ([`Feed::settle_at`]).
+const SETTLE: Duration = Duration::from_millis(100);
+
+/// The time now.
+#[cfg(not(test))]
+fn now() -> Instant {
+    Instant::now()
+}
+
+/// Under test the clock is virtual: it starts at the same instant in every
+/// test and moves only with [`advance`], so nothing sleeps and no test
+/// depends on how long it takes to run. Each test runs on its own thread,
+/// so the virtual time starts at zero in each.
+#[cfg(test)]
+fn now() -> Instant {
+    static EPOCH: std::sync::LazyLock<Instant> =
+        std::sync::LazyLock::new(Instant::now);
+
+    *EPOCH + ELAPSED.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The virtual time the tests' clock has moved since it started.
+    static ELAPSED: std::cell::Cell<Duration> =
+        const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// Moves the tests' clock on.
+#[cfg(test)]
+fn advance(by: Duration) {
+    ELAPSED.with(|elapsed| elapsed.set(elapsed.get() + by));
+}
 
 /// The queue the Java side fills.
 pub(crate) trait Queue {
@@ -141,16 +189,25 @@ pub(crate) struct Feed {
     /// Until a redraw decides it ([`Feed::secure`]) the field gets no
     /// preedit: the engine still shows the keyboard's composition, and the
     /// decision gives it to the field, or commits it as typed text in a
-    /// password field. The session's end clears it ([`Feed::abandon`]).
+    /// password field. A redraw decides it once [`Feed::redraw_decides`] is
+    /// set, or the settle window has closed ([`Feed::settle_from`]). The
+    /// session's end clears it ([`Feed::abandon`]).
     unknown: bool,
     /// The next redraw may decide the purpose of the field that has the
     /// focus ([`Feed::secure`]): a focus moved from code or by a tap since
     /// the application's turn began, or since the key that yields came from
-    /// hardware. Without it, the redraw after a key that yields holds the
-    /// composition back ([`Feed::unknown`]), since the application may still
-    /// move the focus, in a subscription, after the redraw. The session's end
-    /// clears it too ([`Feed::abandon`]), with the hold.
+    /// hardware. Without it, a redraw decides only once the settle window has
+    /// closed ([`Feed::settle_from`]): the application may still move the
+    /// focus, in a subscription, after the redraw. The session's end clears
+    /// it too ([`Feed::abandon`]), with the hold.
     redraw_decides: bool,
+    /// When the settle window opened, while the hold waits for it
+    /// ([`SETTLE`]): the hold began here, when the application's turn after
+    /// a key that yields ended, or with the key when it came from hardware
+    /// ([`Feed::begin_hold`]). A redraw from its end on decides the purpose
+    /// of the field that has the focus, as one that [`Feed::redraw_decides`]
+    /// allows. The decision and the session's end clear it.
+    settle_from: Option<Instant>,
 }
 
 impl Feed {
@@ -162,17 +219,19 @@ impl Feed {
             pending: Vec::new(),
             unknown: false,
             redraw_decides: false,
+            settle_from: None,
         }
     }
 
     /// At a redraw, the purpose the field that asks for the keyboard has:
     /// whether it is a password field. One never shows a composition
     /// ([`Engine::secure`]): a preedit the engine shows when the field
-    /// becomes one is committed as typed text. After a turn or a focus
-    /// moved, the composition held back from the field until now is shown
-    /// in it, unless it was so committed. The next drain, operation or
-    /// interruption gives the field these edits before anything else. True
-    /// when there are any: the event loop is to turn for them.
+    /// becomes one is committed as typed text. Once a redraw decides (a
+    /// focus moved, or the settle window has closed), the composition held
+    /// back from the field until now is shown in it, unless it was so
+    /// committed. The next drain, operation or interruption gives the field
+    /// these edits before anything else. True when there are any: the event
+    /// loop is to turn for them.
     pub(crate) fn secure(
         &mut self,
         secure: bool,
@@ -184,10 +243,13 @@ impl Feed {
             calls.push(Call::Forget(self.engine.generation()));
         }
 
-        if self.redraw_decides && std::mem::take(&mut self.unknown) {
+        if self.unknown && (self.redraw_decides || self.settled()) {
             // The field now gets the preedit the engine still shows, if any,
             // as the field's own. The clears the engine made above stay: the
             // field may hold a preedit it was given before, which they clear.
+            self.unknown = false;
+            self.settle_from = None;
+
             edits.extend(self.engine.preedit());
         }
 
@@ -207,6 +269,21 @@ impl Feed {
         self.redraw_decides = true;
     }
 
+    /// The hold begins now, when the application's turn after a key that
+    /// yields ends, or the key came from hardware: what the keyboard composes
+    /// is held back from the field until a redraw decides, and the settle
+    /// window opens here ([`SETTLE`]).
+    fn begin_hold(&mut self) {
+        self.unknown = true;
+        self.settle_from = Some(now());
+    }
+
+    /// Whether the settle window has closed: a redraw now decides the purpose
+    /// of the field that has the focus.
+    fn settled(&self) -> bool {
+        self.settle_from.is_some_and(|from| now() >= from + SETTLE)
+    }
+
     /// The application's turn begins, after a key that yields: the redraw
     /// that follows does not decide the purpose of the field that has the
     /// focus, since the application may still move the focus
@@ -214,6 +291,25 @@ impl Feed {
     fn begin_turn(&mut self) {
         self.turn = Turn::Taken;
         self.redraw_decides = false;
+    }
+
+    /// When the shell is to redraw for the composition the hold keeps back,
+    /// so that it never waits for an unrelated event: the end of the settle
+    /// window while the window is open, or now once it has closed, since a
+    /// redraw then decides it. None when no composition is held, or when the
+    /// next redraw decides already, as a focus moved from code or a tap asked
+    /// for it: that request is the shell's own.
+    pub(crate) fn settle_at(&self) -> Option<Instant> {
+        if !self.unknown
+            || self.redraw_decides
+            || self.engine.preedit().is_none()
+        {
+            return None;
+        }
+
+        let from = self.settle_from?;
+
+        Some((from + SETTLE).max(now()))
     }
 
     /// When the event loop is about to wait: applies the queue and pushes
@@ -254,14 +350,14 @@ impl Feed {
 
     /// The application's turn ended: the next drain applies the rest of the
     /// queue, which reaches the field that has the focus now, with no
-    /// preedit until a tap or an operation has decided the purpose of that
-    /// field ([`Feed::secure`], [`Feed::redraw_decides`]). A focus the turn
-    /// moved is decided by the redraw that follows. A turn that is due stays
-    /// so.
+    /// preedit until the settle window has closed, or a tap or an operation
+    /// has decided the purpose of that field ([`Feed::secure`],
+    /// [`Feed::redraw_decides`]). A focus the turn moved is decided by the
+    /// redraw that follows. A turn that is due stays so.
     pub(crate) fn resume(&mut self) {
         if self.turn == Turn::Taken {
             self.turn = Turn::None;
-            self.unknown = true;
+            self.begin_hold();
         }
     }
 
@@ -303,7 +399,8 @@ impl Feed {
     /// `yields` says the event is a hardware Enter, Tab or Escape: the
     /// application may move the focus after it, as after the keyboard's own
     /// key, so the redraw that follows does not decide the field's purpose
-    /// ([`Feed::redraw_decides`]).
+    /// ([`Feed::redraw_decides`]), and the hold lasts the settle window from
+    /// the key ([`Feed::begin_hold`]).
     pub(crate) fn finish(
         &mut self,
         queue: &mut impl Queue,
@@ -314,7 +411,7 @@ impl Feed {
         edits.append(&mut self.pending);
 
         if yields {
-            self.unknown = true;
+            self.begin_hold();
             self.redraw_decides = false;
         }
 
@@ -326,7 +423,7 @@ impl Feed {
         // field that has the focus now.
         if self.turn == Turn::Taken {
             self.turn = Turn::None;
-            self.unknown = true;
+            self.begin_hold();
         }
 
         let from = edits.len();
@@ -347,7 +444,8 @@ impl Feed {
     /// generation for `Keyboard.reset`, when the Java side may hold text
     /// ([`Engine::abandon`]).
     ///
-    /// The session's end clears the hold too ([`Feed::unknown`]) and the
+    /// The session's end clears the hold too ([`Feed::unknown`]), with the
+    /// settle window it may still wait for ([`Feed::settle_from`]), and the
     /// decision a redraw may still make ([`Feed::redraw_decides`]): nothing
     /// queued survives it, and the next session gives the engine the purpose
     /// of the field it shows the keyboard for before the keyboard reports
@@ -360,6 +458,7 @@ impl Feed {
         self.pending.clear();
         self.unknown = false;
         self.redraw_decides = false;
+        self.settle_from = None;
 
         self.engine.abandon(dropped.make_contiguous())
     }
@@ -558,6 +657,9 @@ mod tests {
         submitted: Vec<String>,
         /// The application clears the field it submits.
         clears: bool,
+        /// The focused field is a `text_editor`: its Enter breaks the line,
+        /// as text, and keeps the focus.
+        multiline: bool,
         /// Which fields are password fields (`.secure(true)`).
         secure: [bool; 2],
         /// The preedits the window drew over a field, and the field.
@@ -583,6 +685,9 @@ mod tests {
                     }
                     Edit::Key(Key::Backspace) => {
                         let _ = field.pop();
+                    }
+                    Edit::Key(Key::Enter) if self.multiline => {
+                        field.push('\n');
                     }
                     Edit::Key(Key::Enter) => {
                         self.submitted.push(field.clone());
@@ -1483,14 +1588,96 @@ mod tests {
         assert_eq!(feed.abandon(&mut queue), None);
     }
 
+    /// A field that keeps the focus after the keyboard's Enter: a chat field
+    /// clears its text on submit, a `text_editor` breaks the line. The
+    /// application's turn does nothing, and the window's redraw decides
+    /// nothing. A composition the keyboard sends inside the window is held
+    /// back, and shows as the field's preedit at the window's end, with no tap
+    /// on the field. The next word shows at once, after the commit of the one
+    /// before it.
+    fn a_field_that_keeps_the_focus_after_enter_shows_its_compositions(
+        multiline: bool,
+    ) {
+        let prefix = if multiline { "hi\n" } else { "" };
+        let mut feed = Feed::new();
+        let mut form = Form {
+            clears: !multiline,
+            multiline,
+            ..Form::default()
+        };
+        let mut queue =
+            VecDeque::from([state("hi", false), key(KEYCODE_ENTER), rebase()]);
+        assert!(!form.redraw(&mut feed));
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.answer);
+        assert_eq!(fed.edits, [commit("hi"), Edit::Key(Key::Enter)]);
+        form.handle(&fed.edits);
+
+        // The window's redraw, inside the window, decides nothing.
+        feed.resume();
+        assert!(!form.redraw(&mut feed));
+
+        // The keyboard composes "hel" inside the window: it is held back.
+        queue.push_back(state("hel", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+        assert!(!form.redraw(&mut feed));
+        assert!(form.got.is_empty() && form.drawn.is_empty());
+
+        // The window's end: the next redraw decides, and the composition shows
+        // as the field's preedit, without a tap.
+        advance(SETTLE);
+        assert!(form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [preedit("hel")]);
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+        assert_eq!(form.got, [(0, "hel".to_owned())]);
+        assert_eq!(form.drawn, [(0, "hel".to_owned())]);
+
+        // The keyboard commits "hello", then composes the next word "w": it
+        // shows at once, with no redraw to wait for.
+        queue.push_back(state("hello", false));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [clear(), commit("hello")]);
+        form.handle(&fed.edits);
+
+        // Only the "w" composes: the region is its last character.
+        queue.push_back(Message::State {
+            generation: 0,
+            text: "hello w".to_owned(),
+            selection: (7, 7),
+            composing: (6, 7),
+        });
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [commit(" "), preedit("w")]);
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+
+        assert_eq!(form.fields[0], format!("{prefix}hello "));
+        assert_eq!(form.preedit, "w");
+        assert_eq!(form.got, [(0, "hel".to_owned()), (0, "w".to_owned())]);
+        assert_eq!(form.drawn, [(0, "hel".to_owned()), (0, "w".to_owned())]);
+    }
+
     #[test]
-    fn a_normal_field_after_an_enter_shows_its_composition_once_a_tap_decides()
-    {
-        // A chat field that keeps its text after Enter, and nothing moves the
-        // focus. The composition after the key waits for a tap on the field:
-        // the redraw after a key that yields does not decide, since a
-        // subscription may still move the focus. A text_editor's newline is
-        // the same Enter key.
+    fn a_chat_field_that_keeps_the_focus_after_enter_shows_its_compositions() {
+        a_field_that_keeps_the_focus_after_enter_shows_its_compositions(false);
+    }
+
+    #[test]
+    fn a_text_editor_field_after_an_enter_newline_shows_its_compositions() {
+        a_field_that_keeps_the_focus_after_enter_shows_its_compositions(true);
+    }
+
+    #[test]
+    fn a_normal_field_after_an_enter_shows_its_composition_at_the_window_end_or_a_tap()
+     {
+        // A chat field that keeps its text after Enter. The composition after
+        // the key is held back until the window's end, where the first redraw
+        // shows it; a tap inside the window decides for the field at the next
+        // redraw, as a focus move does.
         let mut feed = Feed::new();
         let mut form = Form::default();
         let mut queue = VecDeque::from([
@@ -1507,7 +1694,7 @@ mod tests {
         assert_eq!(form.submitted, ["hi"]);
 
         // The application's turn does nothing; the composition after it is
-        // held back, and the redraw shows nothing of it.
+        // held back, and the redraw inside the window shows nothing of it.
         feed.resume();
         let fed = drain(&mut feed, &mut queue);
         assert!(!fed.answer && fed.edits.is_empty());
@@ -1515,7 +1702,30 @@ mod tests {
         assert!(!form.redraw(&mut feed));
         assert!(form.got.is_empty() && form.drawn.is_empty());
 
-        // A tap on the field decides for it: the composition is shown.
+        // The window closes with no tap: the next redraw shows it.
+        advance(SETTLE);
+        assert!(form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [preedit("hel")]);
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+        assert_eq!(form.got, [(0, "hel".to_owned())]);
+        assert_eq!(form.drawn, [(0, "hel".to_owned())]);
+
+        // The same inside the window: a tap decides for the field at once.
+        let mut feed = Feed::new();
+        let mut form = Form::default();
+        let mut queue = VecDeque::from([
+            state("hi", false),
+            key(KEYCODE_ENTER),
+            rebase(),
+            state("hel", true),
+        ]);
+        let _ = drain(&mut feed, &mut queue);
+        feed.resume();
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+
         feed.refocused();
         assert!(form.redraw(&mut feed));
         let fed = drain(&mut feed, &mut queue);
@@ -1524,6 +1734,163 @@ mod tests {
         assert!(!form.redraw(&mut feed));
         assert_eq!(form.got, [(0, "hel".to_owned())]);
         assert_eq!(form.drawn, [(0, "hel".to_owned())]);
+    }
+
+    #[test]
+    fn a_redraw_inside_the_settle_window_does_not_release_the_hold() {
+        // A chat field after Enter: however many redraws come before the
+        // window's end, none decides, and the composition stays held back.
+        let mut feed = Feed::new();
+        let mut form = Form {
+            clears: true,
+            ..Form::default()
+        };
+        let mut queue =
+            VecDeque::from([state("hi", false), key(KEYCODE_ENTER), rebase()]);
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.answer);
+        form.handle(&fed.edits);
+        feed.resume();
+
+        queue.push_back(state("h", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+
+        for _ in 0..3 {
+            assert!(!form.redraw(&mut feed));
+            advance(Duration::from_millis(33));
+        }
+
+        // 99 milliseconds after the turn: still inside the window.
+        assert!(!form.redraw(&mut feed));
+        assert!(form.got.is_empty() && form.drawn.is_empty());
+
+        // The window's end: the first redraw from it decides.
+        advance(Duration::from_millis(1));
+        assert!(form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [preedit("h")]);
+        form.handle(&fed.edits);
+        assert_eq!(form.got, [(0, "h".to_owned())]);
+    }
+
+    #[test]
+    fn a_focus_move_inside_the_window_protects_the_password_field_it_enters() {
+        // A login form whose subscription takes Tab and moves the focus to the
+        // password field. The move comes inside the window, and the username's
+        // redraws before it decide nothing, so the composition the keyboard
+        // sends after the Tab is held back from the username. The move decides
+        // the purpose at the next redraw, as it does without a window: the
+        // password is committed as typed text, and the username gets none of
+        // it.
+        let mut feed = Feed::new();
+        let mut form = Form {
+            secure: [false, true],
+            ..Form::default()
+        };
+        let mut queue =
+            VecDeque::from([state("sam", false), key(KEYCODE_TAB), rebase()]);
+        assert!(!form.redraw(&mut feed));
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.answer);
+        assert_eq!(fed.edits, [commit("sam"), Edit::Key(Key::Tab)]);
+        form.handle(&fed.edits);
+
+        // The turn ends; the username's redraw inside the window decides
+        // nothing.
+        feed.resume();
+        advance(Duration::from_millis(30));
+        assert!(!form.redraw(&mut feed));
+
+        // The subscription's message moves the focus, inside the window. The
+        // engine is idle, so nothing it typed ends.
+        let fed = operate(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty());
+        assert!(!feed.follows());
+        form.focus_next();
+        feed.refocused();
+
+        // The keyboard composes the password, inside the window: held back,
+        // until the password field's redraw, which the move asks for.
+        advance(Duration::from_millis(30));
+        queue.extend([state("p", true), state("pw", true)]);
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+
+        assert!(form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [clear(), commit("pw")]);
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+
+        assert_eq!(form.fields, ["sam", "pw"]);
+        assert!(form.got.is_empty() && form.drawn.is_empty());
+    }
+
+    #[test]
+    fn the_shell_asks_for_a_redraw_at_the_window_end_while_a_composition_is_held()
+     {
+        let mut feed = Feed::new();
+        let mut form = Form::default();
+        let mut queue =
+            VecDeque::from([state("hi", false), key(KEYCODE_ENTER), rebase()]);
+
+        let fed = drain(&mut feed, &mut queue);
+        form.handle(&fed.edits);
+        feed.resume();
+        let turn = now();
+
+        // Nothing is held: nothing to wait for.
+        assert_eq!(feed.settle_at(), None);
+
+        // The keyboard composes inside the window: the redraw is asked for at
+        // its end, and that stays the request as time passes in the window.
+        queue.push_back(state("h", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+        assert_eq!(feed.settle_at(), Some(turn + SETTLE));
+
+        advance(Duration::from_millis(60));
+        assert_eq!(feed.settle_at(), Some(turn + SETTLE));
+
+        // At the window's end the request is due: the redraw decides, and
+        // nothing is held any more.
+        advance(Duration::from_millis(40));
+        assert_eq!(feed.settle_at(), Some(now()));
+        assert!(form.redraw(&mut feed));
+        assert_eq!(feed.settle_at(), None);
+    }
+
+    #[test]
+    fn a_composition_held_after_the_window_asks_for_a_redraw_at_once() {
+        // The window closed with nothing held, and no redraw came since: a
+        // composition the keyboard sends now is held back until the shell
+        // redraws, which it asks for at once.
+        let mut feed = Feed::new();
+        let mut form = Form::default();
+        let mut queue =
+            VecDeque::from([state("hi", false), key(KEYCODE_ENTER), rebase()]);
+
+        let fed = drain(&mut feed, &mut queue);
+        form.handle(&fed.edits);
+        feed.resume();
+
+        advance(SETTLE * 2);
+        queue.push_back(state("h", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+        assert_eq!(feed.settle_at(), Some(now()));
+
+        // A tap or a focus move asks for the redraw itself, so the shell asks
+        // for none.
+        feed.refocused();
+        assert_eq!(feed.settle_at(), None);
+
+        // The session's end drops the hold: nothing to wait for either.
+        let _ = feed.abandon(&mut queue);
+        assert_eq!(feed.settle_at(), None);
     }
 
     #[test]
