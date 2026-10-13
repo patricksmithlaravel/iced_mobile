@@ -1,6 +1,10 @@
 #!/bin/sh
 # A fake `security` for icm's iOS release and ios-device tests:
-# `find-identity` prints $ICM_FAKE_STATE/identities.txt.
+# `find-identity` prints $ICM_FAKE_STATE/identities.txt. `list-keychains -d
+# user` prints the user's search list, one path per line in
+# $ICM_FAKE_STATE/search-list.txt, as security does (quoted), or fails when
+# ICM_FAKE_SECURITY_LIST=refuse. Any other `list-keychains` (changing the
+# list) is refused, and security.log shows whether icm asked.
 S="$ICM_FAKE_STATE"
 echo "security $*" >> "$S/security.log"
 case "$1" in
@@ -8,6 +12,18 @@ find-identity)
   printf 'Policy: Code Signing\n  Matching identities\n'
   cat "$S/identities.txt" 2> /dev/null
   printf '\n  Valid identities only\n'
+  ;;
+list-keychains)
+  if [ "$ICM_FAKE_SECURITY_LIST" = refuse ]; then
+    echo "fake security: the search list cannot be read" >&2
+    exit 1
+  fi
+  if [ "$2" = -d ] && [ "$3" = user ] && [ "$#" = 3 ]; then
+    while IFS= read -r path; do printf '    "%s"\n' "$path"; done < "$S/search-list.txt" 2> /dev/null
+  else
+    echo "fake security: list-keychains $* refused" >&2
+    exit 1
+  fi
   ;;
 *)
   echo "fake security: unknown $1" >&2

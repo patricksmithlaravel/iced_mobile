@@ -3,7 +3,12 @@
 # records the identity and the entitlements in $ICM_FAKE_STATE; `-dvv` and
 # `-d --entitlements` report them back; `--verify` succeeds unless the
 # bundle has no _CodeSignature. ICM_FAKE_CODESIGN=hang makes signing wait
-# like a keychain dialog nobody answers.
+# like a keychain dialog nobody answers; ICM_FAKE_CODESIGN=no-identity makes
+# it find no identity at all, and ICM_FAKE_CODESIGN=other-failure makes it
+# fail with a message that is not `no identity found`.
+# ICM_FAKE_CODESIGN_SEARCH=list makes it search
+# only the keychains listed in $ICM_FAKE_STATE/search-list.txt, as macOS 26's
+# codesign does: a --keychain outside that list finds no identity.
 S="$ICM_FAKE_STATE"
 echo "codesign $*" >> "$S/codesign.log"
 for last in "$@"; do :; done
@@ -11,15 +16,29 @@ case "$1" in
 --force)
   identity=""
   entitlements=""
+  keychain=""
   prev=""
   for arg in "$@"; do
     case "$prev" in
     --sign) identity="$arg" ;;
     --entitlements) entitlements="$arg" ;;
+    --keychain) keychain="$arg" ;;
     esac
     prev="$arg"
   done
   if [ "$ICM_FAKE_CODESIGN" = hang ]; then exec sleep 30; fi
+  if [ "$ICM_FAKE_CODESIGN" = no-identity ]; then
+    echo "$identity: no identity found" >&2
+    exit 1
+  fi
+  if [ "$ICM_FAKE_CODESIGN" = other-failure ]; then
+    echo "codesign: resource fork, Finder information, or similar detritus not allowed" >&2
+    exit 1
+  fi
+  if [ -n "$keychain" ] && [ "$ICM_FAKE_CODESIGN_SEARCH" = list ] && ! grep -qxF "$keychain" "$S/search-list.txt" 2> /dev/null; then
+    echo "$identity: no identity found" >&2
+    exit 1
+  fi
   mkdir -p "$last/_CodeSignature"
   echo "$identity" > "$last/_CodeSignature/CodeResources"
   echo "$identity" > "$S/signed-identity"

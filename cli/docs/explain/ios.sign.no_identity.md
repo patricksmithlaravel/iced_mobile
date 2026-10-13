@@ -23,5 +23,7 @@ Under `--sign none` this is a WARN and the bundle is signed ad hoc.
 The owner installs their distribution certificate with its private key:
 Xcode > Settings > Accounts > Manage Certificates > "+" > Apple
 Distribution, or imports the `.p12` they exported earlier. A CI keychain is
-named by `signing_keychain` in host.toml so it never has to join the search
-list.
+named by `signing_keychain` in host.toml. On macOS 26 codesign also needs
+that keychain in the user's search list: when it is not, the id is
+`ios.sign.keychain_not_in_search_list`, with the commands that add it for the
+release (icm never changes the list).

@@ -448,6 +448,9 @@ catalogue! {
     IosSignKeychainPrompt = "ios.sign.keychain_prompt", NeedsOwner, Fail, Owner,
         "codesign is waiting for keychain access",
         "The owner allows codesign access to the key (Always Allow), then reruns.";
+    IosSignKeychainNotInSearchList = "ios.sign.keychain_not_in_search_list", NeedsOwner, Fail, Owner,
+        "codesign cannot find the identity: the signing keychain is not in the user's keychain search list",
+        "The owner appends the keychain to the user's keychain search list for the release, then puts the list back; icm never changes the list.";
     IosSignVerify = "ios.sign.verify", CheckFailed, Fail, Agent,
         "codesign --verify failed on the bundle",
         "Read the step log.";
@@ -706,6 +709,9 @@ catalogue! {
     MacosSignKeychainPrompt = "macos.sign.keychain_prompt", NeedsOwner, Fail, Owner,
         "codesign waited for keychain access",
         "The owner unlocks the keychain and lets codesign use the key, or points host.toml `signing_keychain` (ICM_KEYCHAIN) at an unlocked build keychain.";
+    MacosSignKeychainNotInSearchList = "macos.sign.keychain_not_in_search_list", NeedsOwner, Fail, Owner,
+        "codesign cannot find the identity: the signing keychain is not in the user's keychain search list",
+        "The owner appends the keychain to the user's keychain search list for the release, then puts the list back; icm never changes the list.";
     MacosArch = "macos.arch", CheckFailed, Fail, Agent,
         "The binary lacks an architecture the release needs",
         "Rebuild through icm; `--universal` needs the x86_64-apple-darwin target (`icm doctor desktop --fix --yes`).";

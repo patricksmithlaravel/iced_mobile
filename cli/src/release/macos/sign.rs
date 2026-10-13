@@ -19,9 +19,14 @@
 //!   keychain exercises the signed path.
 //!
 //! codesign always gets the identity's SHA-1 (never a name, which can
-//! match several certificates) and `--keychain` when one is set, so a CI
-//! or test keychain never has to join the user's search list. `--sign
-//! none` signs ad hoc (`--sign -`): Apple silicon runs only signed code.
+//! match several certificates) and `--keychain` when one is set. On macOS
+//! 26 codesign searches only the user's keychain search list, and
+//! `--keychain` narrows that search without adding to it, so a signing
+//! keychain outside the list fails with `no identity found`. icm reports
+//! that as `macos.sign.keychain_not_in_search_list`, with the commands that
+//! append the keychain to the list for the release and put the list back.
+//! icm never changes the list itself ([`crate::keychain`]). `--sign none`
+//! signs ad hoc (`--sign -`): Apple silicon runs only signed code.
 
 use crate::catalogue::CheckId;
 use crate::error::IcmError;

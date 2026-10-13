@@ -24,7 +24,9 @@ The owner acts:
 1. In Apple Developer > Certificates, Identifiers & Profiles, create a
    *Developer ID Application* certificate. Only the team's Account Holder can.
 2. Install it with its private key in the login keychain, or in a build
-   keychain that host.toml `signing_keychain` names.
+   keychain that host.toml `signing_keychain` names. On macOS 26 a build
+   keychain must also be in the user's keychain search list
+   (`macos.sign.keychain_not_in_search_list` says how to add it for a release).
 3. Leave `[desktop.macos] identity = "auto"`, or set it to the certificate's
    SHA-1 (`security find-identity -v -p codesigning` lists it).
 

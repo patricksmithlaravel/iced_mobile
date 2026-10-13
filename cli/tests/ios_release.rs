@@ -645,6 +645,149 @@ fn a_beta_xcode_warns_and_a_hanging_codesign_is_a_keychain_prompt() {
     assert_eq!(result["errors"][0]["id"], "ios.sign.keychain_prompt");
 }
 
+/// macOS 26's codesign searches only the user's keychain search list, so a
+/// signing keychain outside it is `ios.sign.keychain_not_in_search_list`,
+/// with the commands that add it for the release. icm reads the list only
+/// after codesign refused, and never changes it. A keychain the list holds
+/// keeps codesign's own refusal, and so does no keychain. A codesign that
+/// finds the identity outside the list (macOS 27) signs, and nothing reads
+/// the list before it runs.
+#[test]
+fn a_signing_keychain_outside_the_search_list_is_named_on_ios() {
+    let login = "/Users/acme/Library/Keychains/login.keychain-db";
+
+    let mut ios = Ios::new();
+    let keychain = ios.state().join("ci.keychain-db");
+    std::fs::write(ios.state().join("search-list.txt"), format!("{login}\n")).unwrap();
+    ios.set("ICM_FAKE_CODESIGN_SEARCH", "list");
+    let refused = ios.json(&["release", "ios", "--allow-dirty"]);
+    assert_eq!(refused["exit"], 9, "{refused}");
+    let error = &refused["errors"][0];
+    assert_eq!(
+        error["id"], "ios.sign.keychain_not_in_search_list",
+        "{refused}"
+    );
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("ci.keychain-db is not in the list"),
+        "{refused}"
+    );
+    assert_eq!(error["fix"]["by"], "owner", "{refused}");
+    assert_eq!(
+        error["fix"]["commands"],
+        json!([
+            format!(
+                "security list-keychains -d user -s {login} {}",
+                keychain.display()
+            ),
+            format!("security list-keychains -d user -s {login}"),
+        ]),
+        "{refused}"
+    );
+    assert!(
+        ios.log("codesign.log")
+            .contains(&format!("--keychain {}", keychain.display())),
+        "codesign was not given the keychain"
+    );
+    // icm read the list, and never asked to change it.
+    let security = ios.log("security.log");
+    assert!(
+        security
+            .lines()
+            .any(|line| line == "security list-keychains -d user"),
+        "{security}"
+    );
+    assert!(
+        !security
+            .lines()
+            .any(|line| line.split_whitespace().any(|word| word == "-s")),
+        "{security}"
+    );
+
+    // Listed: codesign's own refusal keeps its id.
+    let mut ios = Ios::new();
+    let keychain = ios.state().join("ci.keychain-db");
+    std::fs::write(
+        ios.state().join("search-list.txt"),
+        format!("{login}\n{}\n", keychain.display()),
+    )
+    .unwrap();
+    ios.set("ICM_FAKE_CODESIGN", "no-identity");
+    let listed = ios.json(&["release", "ios", "--allow-dirty"]);
+    assert_eq!(listed["exit"], 9, "{listed}");
+    assert_eq!(
+        listed["errors"][0]["id"], "ios.sign.no_identity",
+        "{listed}"
+    );
+
+    // No signing keychain: the same refusal, and no list is read.
+    let mut ios = Ios::new();
+    ios.set("ICM_KEYCHAIN", "");
+    ios.set("ICM_FAKE_CODESIGN", "no-identity");
+    let none = ios.json(&["release", "ios", "--allow-dirty"]);
+    assert_eq!(none["errors"][0]["id"], "ios.sign.no_identity", "{none}");
+    assert!(!ios.log("security.log").contains("list-keychains"));
+
+    // macOS 27: codesign signs with the keychain outside the list, and icm
+    // reads nothing before it runs.
+    let ios = Ios::new();
+    std::fs::write(ios.state().join("search-list.txt"), format!("{login}\n")).unwrap();
+    let found = ios.json(&["release", "ios", "--allow-dirty"]);
+    assert_eq!(found["exit"], 0, "{found}");
+    assert_eq!(found["release"]["signed"], true, "{found}");
+    assert!(!ios.log("security.log").contains("list-keychains"));
+}
+
+/// The codesign failures that keep their own ids while the signing keychain
+/// is outside the list: codesign failing for another reason (`ios.sign.verify`,
+/// as before), a list that cannot be read, and an empty list (no command puts
+/// it back, so codesign's `no identity found` stays). Only the last two read
+/// the list, and none of them changes it.
+#[test]
+fn a_codesign_failure_outside_the_list_keeps_its_own_id_on_ios() {
+    let login = "/Users/acme/Library/Keychains/login.keychain-db";
+
+    let mut ios = Ios::new();
+    std::fs::write(ios.state().join("search-list.txt"), format!("{login}\n")).unwrap();
+    ios.set("ICM_FAKE_CODESIGN", "other-failure");
+    let other = ios.json(&["release", "ios", "--allow-dirty"]);
+    assert_eq!(other["errors"][0]["id"], "ios.sign.verify", "{other}");
+    assert!(
+        !ios.log("security.log").contains("list-keychains"),
+        "the list was read for another codesign failure"
+    );
+
+    let mut ios = Ios::new();
+    std::fs::write(ios.state().join("search-list.txt"), format!("{login}\n")).unwrap();
+    ios.set("ICM_FAKE_CODESIGN_SEARCH", "list");
+    ios.set("ICM_FAKE_SECURITY_LIST", "refuse");
+    let refused = ios.json(&["release", "ios", "--allow-dirty"]);
+    assert_eq!(
+        refused["errors"][0]["id"], "ios.sign.no_identity",
+        "{refused}"
+    );
+    assert!(
+        ios.log("security.log")
+            .lines()
+            .any(|line| line == "security list-keychains -d user"),
+        "icm did not ask for the list"
+    );
+
+    let mut ios = Ios::new();
+    std::fs::write(ios.state().join("search-list.txt"), "").unwrap();
+    ios.set("ICM_FAKE_CODESIGN_SEARCH", "list");
+    let empty = ios.json(&["release", "ios", "--allow-dirty"]);
+    assert_eq!(empty["errors"][0]["id"], "ios.sign.no_identity", "{empty}");
+    assert!(
+        ios.log("security.log")
+            .lines()
+            .any(|line| line == "security list-keychains -d user"),
+        "icm did not ask for the list"
+    );
+}
+
 #[test]
 fn verify_rejects_a_broken_ipa() {
     let ios = Ios::new();
