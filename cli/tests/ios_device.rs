@@ -1658,6 +1658,93 @@ fn dry_runs_touch_no_device() {
     assert!(!device.dir().join("target/icm/build").exists());
 }
 
+/// `icm run ios-device` signs with host.toml's or `ICM_KEYCHAIN`'s signing
+/// keychain, which codesign searches only in the user's keychain search list
+/// (macOS 26). Outside the list the run stops with
+/// `ios.sign.keychain_not_in_search_list` and the commands that add the
+/// keychain for the run. A relative keychain is named by its absolute path,
+/// since codesign opens it from icm's directory. Listed, codesign's own
+/// refusal keeps `ios.sign.no_identity`. The list is read and never changed.
+#[test]
+fn a_signing_keychain_outside_the_search_list_is_named_by_run_ios_device() {
+    let login = "/Users/acme/Library/Keychains/login.keychain-db";
+    let mut device = Device::new();
+    // A relative keychain, as host.toml gives it. (A relative ICM_KEYCHAIN
+    // is not used here: an environment value named like a keychain that is
+    // not an absolute path is a secret to icm's redaction, so it would be
+    // redacted from the output.)
+    std::fs::create_dir_all(device.dir().join("ci")).unwrap();
+    std::fs::write(device.dir().join("ci/build.keychain-db"), "").unwrap();
+    let host = device.root.path().join("host.toml");
+    std::fs::write(&host, "signing_keychain = \"ci/build.keychain-db\"\n").unwrap();
+    device.set("ICM_HOST_CONFIG", host.to_str().unwrap());
+    let keychain = std::fs::canonicalize(device.dir())
+        .unwrap()
+        .join("ci/build.keychain-db");
+    std::fs::write(device.state().join("search-list.txt"), format!("{login}\n")).unwrap();
+    device.set("ICM_FAKE_CODESIGN_SEARCH", "list");
+
+    let refused = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(refused["exit"], 9, "{refused}");
+    let error = &refused["errors"][0];
+    assert_eq!(
+        error["id"], "ios.sign.keychain_not_in_search_list",
+        "{refused}"
+    );
+    assert_eq!(error["fix"]["by"], "owner", "{refused}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("in {}.", keychain.display())),
+        "{refused}"
+    );
+    assert_eq!(
+        error["fix"]["commands"],
+        json!([
+            format!(
+                "security list-keychains -d user -s {login} {}",
+                keychain.display()
+            ),
+            format!("security list-keychains -d user -s {login}"),
+        ]),
+        "{refused}"
+    );
+    assert!(
+        device
+            .log("codesign.log")
+            .contains("--keychain ci/build.keychain-db"),
+        "codesign was not given the keychain"
+    );
+    let security = device.log("security.log");
+    assert!(
+        security
+            .lines()
+            .any(|line| line == "security list-keychains -d user"),
+        "{security}"
+    );
+    assert!(
+        !security
+            .lines()
+            .any(|line| line.split_whitespace().any(|word| word == "-s")),
+        "{security}"
+    );
+
+    // Listed: codesign's own refusal keeps its id.
+    std::fs::write(
+        device.state().join("search-list.txt"),
+        format!("{login}\n{}\n", keychain.display()),
+    )
+    .unwrap();
+    device.set("ICM_FAKE_CODESIGN", "no-identity");
+    let listed = device.json(&["run", "ios-device", "--settle", "0s"]);
+    assert_eq!(listed["exit"], 9, "{listed}");
+    assert_eq!(
+        listed["errors"][0]["id"], "ios.sign.no_identity",
+        "{listed}"
+    );
+}
+
 /// A console process whose identity icm could not read when it started it
 /// (`ICM_FAKE_IDENTITY_UNREADABLE` makes the read fail, as it does when the
 /// OS will not describe the process) is recorded as such, and the run says

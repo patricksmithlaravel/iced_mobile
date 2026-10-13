@@ -14,7 +14,7 @@
 //!   the gates, the dist directory and `icm verify`. Their real-host runs
 //!   are the CI jobs of `.github/workflows/icm-desktop.yml`.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -469,16 +469,70 @@ fn an_unsigned_macos_release_builds_a_real_app_and_dmg() {
 fn signing_fakes(app: &mut App, identities: &str) {
     let state = app.path("state");
     std::fs::create_dir_all(&state).unwrap();
+    // `list-keychains -d user` prints `state/search-list.txt` as security
+    // does, or fails with `state/list-refused`; any other `list-keychains`
+    // (changing the list) is refused, and security.log shows whether icm
+    // asked.
     let _ = app.fake(
         "security",
-        &format!("#!/bin/sh\ncat <<'EOF'\n{identities}EOF\n"),
+        &format!(
+            r#"#!/bin/sh
+echo "$*" >> '{state}/security.log'
+case "$1" in
+list-keychains)
+    if [ -f '{state}/list-refused' ]; then
+        echo "security: the search list cannot be read" >&2
+        exit 1
+    fi
+    if [ "$2" = -d ] && [ "$3" = user ] && [ "$#" = 3 ]; then
+        while IFS= read -r path; do printf '    "%s"\n' "$path"; done < '{state}/search-list.txt' 2>/dev/null
+        exit 0
+    fi
+    echo "refused: $*" >&2
+    exit 1
+    ;;
+*)
+    cat <<'EOF'
+{identities}EOF
+    ;;
+esac
+"#,
+            state = state.display(),
+            identities = identities,
+        ),
     );
     let log = app.path("codesign.log");
+    // `state/codesign-no-identity`: no keychain holds the identity.
+    // `state/codesign-other-failure`: codesign fails for another reason.
+    // `state/search-list-enforced`: as macOS 26's codesign, a --keychain
+    // outside `state/search-list.txt` finds no identity.
     let _ = app.fake(
         "codesign",
         &format!(
             r#"#!/bin/sh
 echo "$*" >> '{log}'
+identity=
+keychain=
+previous=
+for arg in "$@"; do
+    case "$previous" in
+    --sign) identity=$arg ;;
+    --keychain) keychain=$arg ;;
+    esac
+    previous=$arg
+done
+if [ -n "$identity" ] && [ -f '{state}/codesign-no-identity' ]; then
+    echo "$identity: no identity found" >&2
+    exit 1
+fi
+if [ -n "$identity" ] && [ -f '{state}/codesign-other-failure' ]; then
+    echo "codesign: resource fork, Finder information, or similar detritus not allowed" >&2
+    exit 1
+fi
+if [ -n "$keychain" ] && [ -f '{state}/search-list-enforced' ] && ! grep -qxF "$keychain" '{state}/search-list.txt' 2>/dev/null; then
+    echo "$identity: no identity found" >&2
+    exit 1
+fi
 case " $* " in
     *" -d "*)
         echo "CodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+1 location=embedded" >&2
@@ -561,6 +615,232 @@ const DEVELOPER_ID: &str = r#"Policy: Code Signing
   1) 1111111111111111111111111111111111111111 "Developer ID Application: Acme Ltd (ABCDE12345)"
      1 valid identities found
 "#;
+
+/// macOS 26's codesign searches only the user's keychain search list, so a
+/// signing keychain outside it is `macos.sign.keychain_not_in_search_list`,
+/// with the commands that add it for the release. icm reads the list only
+/// after codesign refused, and never changes it. A keychain the list holds
+/// keeps codesign's own refusal, and so does no keychain. A codesign that
+/// finds the identity outside the list (macOS 27) signs, and nothing reads
+/// the list before it runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_signing_keychain_outside_the_search_list_is_named_on_macos() {
+    let login = "/Users/acme/Library/Keychains/login.keychain-db";
+    let mut app = App::new();
+    let keychain = app.path("build.keychain-db");
+    std::fs::write(&keychain, "").unwrap();
+    app.set("ICM_KEYCHAIN", &keychain);
+    signing_fakes(&mut app, DEVELOPER_ID);
+    app.config("\n[desktop.macos]\nidentity = \"auto\"\n");
+    let state = app.path("state");
+    let security_log = state.join("security.log");
+
+    // macOS 26: codesign finds nothing in a keychain the list lacks.
+    std::fs::write(state.join("search-list.txt"), format!("{login}\n")).unwrap();
+    std::fs::write(state.join("search-list-enforced"), "").unwrap();
+    let _ = std::fs::remove_file(&security_log);
+    let refused = app.json(&["release", "macos", "--allow-dirty"]);
+    assert_eq!(refused["exit"], 9, "{refused}");
+    let error = &refused["errors"][0];
+    assert_eq!(
+        error["id"], "macos.sign.keychain_not_in_search_list",
+        "{refused}"
+    );
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("build.keychain-db is not in the list"),
+        "{refused}"
+    );
+    assert_eq!(
+        error["fix"]["commands"],
+        json!([
+            format!(
+                "security list-keychains -d user -s {login} {}",
+                keychain.display()
+            ),
+            format!("security list-keychains -d user -s {login}"),
+        ]),
+        "{refused}"
+    );
+    // icm read the list once codesign refused, and never asked to change it.
+    let log = std::fs::read_to_string(&security_log).unwrap();
+    assert!(
+        log.lines().any(|line| line == "list-keychains -d user"),
+        "{log}"
+    );
+    assert!(
+        !log.lines()
+            .any(|line| line.split_whitespace().any(|word| word == "-s")),
+        "{log}"
+    );
+
+    // Listed: codesign's own refusal keeps its id.
+    std::fs::write(
+        state.join("search-list.txt"),
+        format!("{login}\n{}\n", keychain.display()),
+    )
+    .unwrap();
+    std::fs::write(state.join("codesign-no-identity"), "").unwrap();
+    let listed = app.json(&["release", "macos", "--allow-dirty"]);
+    assert_eq!(listed["errors"][0]["id"], "tool.failed", "{listed}");
+
+    // No signing keychain: the same refusal, and no list is read.
+    app.set("ICM_KEYCHAIN", "");
+    let _ = std::fs::remove_file(&security_log);
+    let none = app.json(&["release", "macos", "--allow-dirty"]);
+    assert_eq!(none["errors"][0]["id"], "tool.failed", "{none}");
+    let log = std::fs::read_to_string(&security_log).unwrap_or_default();
+    assert!(!log.contains("list-keychains"), "{log}");
+
+    // macOS 27: codesign signs with the keychain outside the list, and icm
+    // reads nothing before it runs.
+    app.set("ICM_KEYCHAIN", &keychain);
+    std::fs::write(state.join("search-list.txt"), format!("{login}\n")).unwrap();
+    std::fs::remove_file(state.join("codesign-no-identity")).unwrap();
+    std::fs::remove_file(state.join("search-list-enforced")).unwrap();
+    let _ = std::fs::remove_file(&security_log);
+    let found = app.json(&["release", "macos", "--allow-dirty"]);
+    assert_eq!(found["exit"], 0, "{found}");
+    assert_eq!(found["release"]["signed"], true, "{found}");
+    let log = std::fs::read_to_string(&security_log).unwrap();
+    assert!(!log.contains("list-keychains"), "{log}");
+}
+
+/// A signing keychain outside the user's search list, which holds only the
+/// login keychain, with macOS 26's codesign.
+#[cfg(target_os = "macos")]
+fn app_with_keychain_outside_the_list() -> App {
+    let mut app = App::new();
+    let keychain = app.path("build.keychain-db");
+    std::fs::write(&keychain, "").unwrap();
+    app.set("ICM_KEYCHAIN", &keychain);
+    signing_fakes(&mut app, DEVELOPER_ID);
+    app.config("\n[desktop.macos]\nidentity = \"auto\"\n");
+    let state = app.path("state");
+    std::fs::write(
+        state.join("search-list.txt"),
+        "/Users/acme/Library/Keychains/login.keychain-db\n",
+    )
+    .unwrap();
+    std::fs::write(state.join("search-list-enforced"), "").unwrap();
+    app
+}
+
+/// Each of these keeps its own id while the signing keychain is outside
+/// the list: codesign failing for another reason, a list that cannot be
+/// read, and an empty list (no command puts it back). Only the first two
+/// read the list when codesign refused, and none of them changes it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_codesign_failure_outside_the_list_keeps_its_own_id_on_macos() {
+    // Another codesign failure: the list is never read.
+    let app = app_with_keychain_outside_the_list();
+    std::fs::write(app.path("state/codesign-other-failure"), "").unwrap();
+    let other = app.json(&["release", "macos", "--allow-dirty"]);
+    assert_eq!(other["errors"][0]["id"], "tool.failed", "{other}");
+    let log = std::fs::read_to_string(app.path("state/security.log")).unwrap_or_default();
+    assert!(!log.contains("list-keychains"), "{log}");
+
+    // A list that cannot be read: icm asked, and keeps codesign's id.
+    let app = app_with_keychain_outside_the_list();
+    std::fs::write(app.path("state/list-refused"), "").unwrap();
+    let refused = app.json(&["release", "macos", "--allow-dirty"]);
+    assert_eq!(refused["errors"][0]["id"], "tool.failed", "{refused}");
+    let log = std::fs::read_to_string(app.path("state/security.log")).unwrap_or_default();
+    assert!(
+        log.lines().any(|line| line == "list-keychains -d user"),
+        "{log}"
+    );
+    assert!(
+        !log.lines()
+            .any(|line| line.split_whitespace().any(|word| word == "-s")),
+        "{log}"
+    );
+
+    // An empty list: no command puts it back, so codesign's id stays.
+    let app = app_with_keychain_outside_the_list();
+    std::fs::write(app.path("state/search-list.txt"), "").unwrap();
+    let empty = app.json(&["release", "macos", "--allow-dirty"]);
+    assert_eq!(empty["errors"][0]["id"], "tool.failed", "{empty}");
+    let log = std::fs::read_to_string(app.path("state/security.log")).unwrap_or_default();
+    assert!(
+        log.lines().any(|line| line == "list-keychains -d user"),
+        "{log}"
+    );
+}
+
+/// The disk image is signed with the same signing keychain as the app, so
+/// the same error names it: stage 2 stops with
+/// `macos.sign.keychain_not_in_search_list` while the keychain is outside
+/// the list, and the same release signs the image once it is listed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_dmg_signed_outside_the_search_list_is_named_on_macos() {
+    let login = "/Users/acme/Library/Keychains/login.keychain-db";
+    let mut app = App::new();
+    let keychain = app.path("build.keychain-db");
+    std::fs::write(&keychain, "").unwrap();
+    app.set("ICM_KEYCHAIN", &keychain);
+    signing_fakes(&mut app, DEVELOPER_ID);
+    app.config("\n[desktop.macos]\nidentity = \"auto\"\n");
+    let state = app.path("state");
+
+    // Stage 1 signs the app while codesign still finds the identity.
+    let stage1 = app.json(&["release", "macos", "--allow-dirty"]);
+    assert_eq!(stage1["exit"], 0, "{stage1}");
+    let bundle = app.abs(&stage1["artifacts"]["app"]);
+    staple(&app, &bundle);
+
+    // macOS 26: the list lacks the keychain, so codesign finds nothing in it.
+    std::fs::write(state.join("search-list.txt"), format!("{login}\n")).unwrap();
+    std::fs::write(state.join("search-list-enforced"), "").unwrap();
+    let _ = std::fs::remove_file(app.path("codesign.log"));
+    let refused = app.json(&["release", "macos", "--dmg", "--allow-dirty"]);
+    assert_eq!(refused["exit"], 9, "{refused}");
+    let error = &refused["errors"][0];
+    assert_eq!(
+        error["id"], "macos.sign.keychain_not_in_search_list",
+        "{refused}"
+    );
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap()
+            .contains("build.keychain-db is not in the list"),
+        "{refused}"
+    );
+    assert_eq!(
+        error["fix"]["commands"],
+        json!([
+            format!(
+                "security list-keychains -d user -s {login} {}",
+                keychain.display()
+            ),
+            format!("security list-keychains -d user -s {login}"),
+        ]),
+        "{refused}"
+    );
+    let log = std::fs::read_to_string(app.path("codesign.log")).unwrap();
+    assert!(
+        log.lines().any(|line| line.ends_with(".dmg")
+            && line.contains(&format!("--keychain {}", keychain.display()))),
+        "the disk image was not signed with the keychain: {log}"
+    );
+
+    // The owner runs the release again with the keychain listed: the same
+    // release signs the disk image.
+    std::fs::write(
+        state.join("search-list.txt"),
+        format!("{login}\n{}\n", keychain.display()),
+    )
+    .unwrap();
+    let listed = app.json(&["release", "macos", "--dmg", "--allow-dirty"]);
+    assert_eq!(listed["exit"], 0, "{listed}");
+    assert_eq!(listed["release"]["uploadable"], true, "{listed}");
+}
 
 #[cfg(target_os = "macos")]
 #[test]

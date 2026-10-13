@@ -1,8 +1,9 @@
 //! Code-signing identities (design §10.5 step 2, §11.1 preconditions):
 //! `security find-identity -p codesigning [<keychain>]`, read only. icm
 //! never imports, unlocks or trusts anything; the keychain is host.toml
-//! `signing_keychain` / `ICM_KEYCHAIN` when set (a CI or test keychain that
-//! never joins the user's search list), else the search list.
+//! `signing_keychain` / `ICM_KEYCHAIN` when set (a CI or test keychain),
+//! else the search list. codesign on macOS 26 also needs that keychain in
+//! the user's search list ([`crate::keychain`]).
 //!
 //! A reference (`[ios.signing] <kind>.identity`) is `auto`, a certificate
 //! SHA-1 or a common name. `auto` takes the valid identities of the role
