@@ -307,7 +307,9 @@ Text input on Android, and secure fields on Android and iOS:
   that has the focus, and the shell asks for that redraw itself while a word waits. A tap on the
   field, or a focus move from code, shows it at the next redraw. A focus move from a subscription
   that comes after the window is not waited for: a word the keyboard sends before it shows in the
-  field that has the focus until the move ends the session. The hold ends with the keyboard's
+  field that has the focus until the move ends the session. A tap, a hardware key or the loss of the
+  window's focus in that gap commits the word shown to that field, so the move finds nothing left to
+  drop. The hold ends with the keyboard's
   session, and the next session gives the field's purpose before the keyboard shows. What it commits
   reaches the field that has the focus at once. Line breaks and tabs inside longer committed text are
   dropped. Backspace and Delete reach the field's text before and after what the keyboard typed,
@@ -387,14 +389,15 @@ Text input on Android, and secure fields on Android and iOS:
   focus move from code) shows in no field until a redraw has decided the purpose of the field that
   has the focus, and in a password field that redraw commits it as typed text. After an Enter, Tab
   or Escape the redraw decides only once a tap on the field or a focus move from code has come after
-  the key, or the short window after the key has closed, or a keyboard session starts for the field
-  again (above). A field the app makes secure while the keyboard composes gets its composition as
-  typed text at the next redraw, and what the keyboard composes before it is set up for the password
-  field is read as typed text too. On Android and iOS the window never draws a password field's
-  preedit (the desktop and the web draw it as upstream does). What the keyboard commits is not held
-  back: a password it commits in the same burst as a Tab the app takes in a subscription reaches the
-  field that had the focus, in clear. A tap that reaches the app while a composition is held back
-  commits it to the field that has the focus (`docs/agents/limitations.md`). On an edit of a
+  the key, or the short window after the key's turn (or after a hardware key) has closed, or a
+  keyboard session starts for the field again (above). A field the app makes secure while the
+  keyboard composes gets its composition as typed text at the next redraw, and what the keyboard
+  composes before it is set up for the password field is read as typed text too. On Android and iOS
+  the window never draws a password field's preedit (the desktop and the web draw it as upstream
+  does). What the keyboard commits is not held back: a password it commits in the same burst as a
+  Tab the app takes in a subscription reaches the field that had the focus, in clear. A tap that
+  reaches the app while a composition is held back, or shown since the window closed, commits it to
+  the field that has the focus (`docs/agents/limitations.md`). On an edit of a
   password field, a `text_input` builds its paragraph from the bullets: the paragraph logs the text
   it is built from at trace level, which in v0.14.1-mobile.2 was the password. On iOS the vendored
   winit implements `Window::set_ime_purpose` (`vendor/patches/winit-0003-ios-ime-purpose.patch`):

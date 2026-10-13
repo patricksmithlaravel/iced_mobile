@@ -1191,11 +1191,13 @@ mod tests {
     }
 
     #[test]
-    fn a_hardware_tab_holds_the_composition_until_a_tap_or_a_focus_move() {
-        // A hardware Tab moves the focus, and the keyboard composes into the
-        // next field, which has the focus until the application moves it.
-        // The redraw of the username must not show what it composes, and a
-        // tap on the username decides for the field it is in.
+    fn a_hardware_tab_holds_the_composition_inside_the_window_until_a_tap() {
+        // A hardware Tab's application may move the focus later, so what the
+        // keyboard composes after the key is held back from the field that
+        // has the focus. Inside the settle window a redraw of that field shows
+        // none of it, and a tap on the field decides for it at the next
+        // redraw. The window's end decides too, which the test after this one
+        // pins.
         let mut feed = Feed::new();
         let mut form = Form {
             secure: [false, false],
@@ -1228,6 +1230,99 @@ mod tests {
         assert!(!form.redraw(&mut feed));
         assert_eq!(form.got, [(0, "p".to_owned())]);
         assert_eq!(form.drawn, [(0, "p".to_owned())]);
+    }
+
+    #[test]
+    fn a_hardware_tab_releases_the_composition_at_the_window_end() {
+        // The same hardware Tab, and no tap: the composition held back inside
+        // the window is shown by the first redraw from the window's end, which
+        // the shell asks for at that instant, as it does after a keyboard key.
+        let mut feed = Feed::new();
+        let mut form = Form::default();
+        let mut queue = VecDeque::from([state("sam", false)]);
+        let fed = drain(&mut feed, &mut queue);
+        form.handle(&fed.edits);
+        assert_eq!(fed.edits, [commit("sam")]);
+
+        let key_at = now();
+        let fed = finish_key(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty());
+        assert_eq!(fed.calls, [Call::Reset(1)]);
+
+        queue.push_back(state_in(1, "p", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+
+        // The window asks for its end, and a redraw before the end shows none
+        // of the composition.
+        assert_eq!(feed.settle_at(true), Some(key_at + SETTLE));
+        advance(SETTLE - Duration::from_millis(1));
+        assert!(!form.redraw(&mut feed));
+        assert!(form.got.is_empty() && form.drawn.is_empty());
+
+        // The window's end: the first redraw from it decides, with no tap.
+        advance(Duration::from_millis(1));
+        assert!(form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [preedit("p")]);
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+        assert_eq!(form.got, [(0, "p".to_owned())]);
+        assert_eq!(form.drawn, [(0, "p".to_owned())]);
+        assert_eq!(feed.settle_at(true), None);
+    }
+
+    #[test]
+    fn a_tap_in_the_gap_after_the_window_commits_what_the_field_shows() {
+        // A username field after a Tab that a subscription moves the focus
+        // away from. The window closes before the move arrives, and the
+        // keyboard's "pw" shows in the username as the preedit it is: the
+        // redraw decided the username is a normal field. A tap on the password
+        // field then reaches the app first. The feed's interrupt commits what
+        // it shows into the field that has the focus, the username, since the
+        // press is handled before the field it lands on has the focus.
+        let mut feed = Feed::new();
+        let mut form = Form {
+            secure: [false, true],
+            ..Form::default()
+        };
+        let mut queue =
+            VecDeque::from([state("sam", false), key(KEYCODE_TAB), rebase()]);
+        assert!(!form.redraw(&mut feed));
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.answer);
+        form.handle(&fed.edits);
+
+        feed.resume();
+        advance(SETTLE);
+        queue.push_back(state("pw", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+        assert!(form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [preedit("pw")]);
+        form.handle(&fed.edits);
+        assert_eq!(form.got, [(0, "pw".to_owned())]);
+
+        // The tap's press: the composition is committed into the field that
+        // has the focus, and the engine starts over.
+        let fed = finish(&mut feed, &mut queue);
+        assert!(!fed.answer);
+        assert_eq!(fed.edits, [clear(), commit("pw")]);
+        assert_eq!(fed.calls, [Call::Reset(1)]);
+        form.handle(&fed.edits);
+        assert_eq!(form.fields, ["sampw", ""]);
+
+        // The tap focuses the password field. It gets none of the username's
+        // session, and nothing is left for the move to drop.
+        form.focus_next();
+        feed.refocused();
+        assert!(!form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+        assert_eq!(form.fields, ["sampw", ""]);
+        assert_eq!(form.got, [(0, "pw".to_owned())]);
     }
 
     #[test]
@@ -2001,8 +2096,8 @@ mod tests {
         // moves the focus to a second normal field (`on_submit`), and then the
         // event loop replays the hardware Enter. Its own message may still move
         // the focus after the redraw, so the redraw does not decide the focus
-        // the turn moved: the composition waits for a tap, as after any
-        // hardware key.
+        // the turn moved: the composition waits for a tap or for the window's
+        // end, as after any hardware key.
         let mut feed = Feed::new();
         let mut form = Form::default();
         let mut queue =

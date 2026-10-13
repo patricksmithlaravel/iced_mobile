@@ -289,6 +289,10 @@ this file in the commit that fixes or finds a limitation.
     waited for: a composition the keyboard sends in the gap before the move
     shows as a preedit in the field that has the focus, and a password it
     composes there is in clear until the move ends the session, which drops it.
+    A tap, a hardware key or the loss of the window's focus that reaches the
+    app in that gap commits the preedit the field shows to the field that has
+    the focus, as it does for any composition shown (see below), so the move
+    that comes later finds nothing left to drop.
     The keyboard's session ends the hold with it: a session that starts again
     for the field, after the app's turn, gives its purpose before the keyboard
     shows, so the underline appears at once then. What the keyboard commits
@@ -302,14 +306,15 @@ this file in the commit that fixes or finds a limitation.
     held back: holding them would hide the text a field gets after an Enter,
     which is most of what the keyboard types, and the shell cannot tell a
     password from other committed text. A tap, a hardware key or the loss of the
-    window's focus that reaches the app while a composition is still held back
-    commits it to the field that has the focus, as it does for any composition:
-    the press is handled before the field it lands on has the focus, so the
-    shell cannot tell which field the composition was for. So a password
-    composed inside the window after a Tab, before the subscription's move
-    arrives, is committed to the username as typed text when the user taps the
-    password field first. Deciding that would need the press's target before the
-    press is handled. When the key leaves no field with the focus (Escape
+    window's focus that reaches the app while a composition is still held back,
+    or shown since the window closed, commits it to the field that has the
+    focus, as it does for any composition: the press is handled before the field
+    it lands on has the focus, so the shell cannot tell which field the
+    composition was for. So a password composed inside the window after a Tab,
+    or in the gap after it, before the subscription's move arrives, is committed
+    to the username as typed text when the user taps the password field first.
+    Deciding that would need the press's target before the press is handled.
+    When the key leaves no field with the focus (Escape
     unfocuses a `text_input` or a `text_editor`, an `on_submit` may remove the
     field or unfocus it), what the keyboard sent right after it is dropped. A
     line break or tab inside longer committed text (a suggestion, a paste from
