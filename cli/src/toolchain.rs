@@ -9,11 +9,18 @@
 
 use crate::catalogue::CheckId;
 use crate::config::Abi;
+use crate::context::{Ctx, probe_end_error};
 use crate::error::{Check, IcmError};
 use crate::process::{self, Cmd};
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// The time limit of each `rustc` probe (its sysroot and its version).
+const RUSTC_LIMIT: Duration = Duration::from_secs(60);
+/// The time limit of `rustup show active-toolchain`.
+const RUSTUP_LIMIT: Duration = Duration::from_secs(30);
 
 /// The toolchain a directory resolves.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -49,29 +56,58 @@ impl Toolchain {
     }
 }
 
-/// Resolves the active toolchain for `dir`.
-pub fn active(dir: &Path) -> Result<Toolchain, IcmError> {
-    let sysroot = rustc(dir, &["--print", "sysroot"])?;
-    let rustc_line = rustc(dir, &["--version"])?;
+/// Resolves the active toolchain for `dir`. A `rustup show active-toolchain`
+/// that runs out of its limit WARNs `step.timeout` through `ctx` and leaves
+/// the toolchain unnamed, as a rustup that fails does. The rustc probes stop
+/// with their timeout as an error.
+pub fn active(ctx: &Ctx, dir: &Path) -> Result<Toolchain, IcmError> {
+    active_with(
+        ctx,
+        dir,
+        &process::tool_path("rustc"),
+        RUSTC_LIMIT,
+        &process::tool_path("rustup"),
+        RUSTUP_LIMIT,
+    )
+}
+
+/// [`active`] with the programs that run and the limits of its probes (a
+/// test passes fake ones that run out of time).
+fn active_with(
+    ctx: &Ctx,
+    dir: &Path,
+    rustc_program: &OsStr,
+    rustc_limit: Duration,
+    rustup_program: &OsStr,
+    rustup_limit: Duration,
+) -> Result<Toolchain, IcmError> {
+    let sysroot = rustc(dir, rustc_program, &["--print", "sysroot"], rustc_limit)?;
+    let rustc_line = rustc(dir, rustc_program, &["--version"], rustc_limit)?;
 
     let mut name = None;
     let mut reason = None;
-    if let Ok(outcome) = process::run(
-        &Cmd::tool("rustup")
-            .args(["show", "active-toolchain"])
-            .cwd(dir)
-            .timeout(Duration::from_secs(30)),
-        None,
-        None,
-    ) && outcome.success()
-    {
-        let text = outcome.stdout_text();
-        let line = text.lines().next().unwrap_or("").trim();
-        if let Some((first, rest)) = line.split_once(' ') {
-            name = Some(first.to_string());
-            reason = Some(rest.trim().trim_matches(['(', ')']).to_string());
-        } else if !line.is_empty() {
-            name = Some(line.to_string());
+    let rustup = Cmd::new(rustup_program)
+        .args(["show", "active-toolchain"])
+        .cwd(dir)
+        .timeout(rustup_limit);
+    if let Ok(outcome) = process::run(&rustup, None, None) {
+        // A rustup that runs out of its limit leaves the toolchain unnamed, as
+        // one that fails does, and WARNs so the stall shows (Appendix D item 23).
+        // Only a timeout is reported here; any other error is left as it was.
+        if let Some(error) =
+            probe_end_error("rustup show active-toolchain", &rustup, &outcome, false)
+        {
+            ctx.warn_if_timeout(error);
+        }
+        if outcome.success() {
+            let text = outcome.stdout_text();
+            let line = text.lines().next().unwrap_or("").trim();
+            if let Some((first, rest)) = line.split_once(' ') {
+                name = Some(first.to_string());
+                reason = Some(rest.trim().trim_matches(['(', ')']).to_string());
+            } else if !line.is_empty() {
+                name = Some(line.to_string());
+            }
         }
     }
 
@@ -83,16 +119,15 @@ pub fn active(dir: &Path) -> Result<Toolchain, IcmError> {
     })
 }
 
-fn rustc(dir: &Path, args: &[&str]) -> Result<String, IcmError> {
-    let outcome = process::run(
-        &Cmd::tool("rustc")
-            .args(args)
-            .cwd(dir)
-            .timeout(Duration::from_secs(60)),
-        None,
-        None,
-    )
-    .map_err(|error| {
+/// One `rustc` probe. A process that runs out of `limit` is a timeout
+/// (`step.timeout`, its fix naming the probe and the limit), not a missing
+/// rustc. A program that cannot start is `env.tool_missing`, and so is one
+/// that exits non-zero (its detail says why: the stderr tail, or the status
+/// when stderr is silent).
+fn rustc(dir: &Path, program: &OsStr, args: &[&str], limit: Duration) -> Result<String, IcmError> {
+    let cmd = Cmd::new(program).args(args).cwd(dir).timeout(limit);
+    let name = format!("rustc {}", args.join(" "));
+    let outcome = process::run(&cmd, None, None).map_err(|error| {
         IcmError::new(
             CheckId::EnvToolMissing,
             format!("cannot run rustc: {error}"),
@@ -100,6 +135,9 @@ fn rustc(dir: &Path, args: &[&str]) -> Result<String, IcmError> {
         .fix("Install Rust with rustup (https://rustup.rs).", &[])
         .by(crate::catalogue::By::Owner)
     })?;
+    if let Some(error) = probe_end_error(&name, &cmd, &outcome, false) {
+        return Err(error);
+    }
 
     if outcome.success() {
         return Ok(outcome.stdout_text().trim().to_string());
@@ -122,11 +160,7 @@ fn rustc(dir: &Path, args: &[&str]) -> Result<String, IcmError> {
 
     Err(IcmError::new(
         CheckId::EnvToolMissing,
-        format!(
-            "rustc {} failed: {}",
-            args.join(" "),
-            outcome.stderr_tail(5)
-        ),
+        format!("{name} failed: {}", outcome.reason(5)),
     ))
 }
 
@@ -277,6 +311,161 @@ mod tests {
         assert_eq!(checks[1].error.fix.by, crate::catalogue::By::DoctorYes);
     }
 
+    /// A `rustc` that answers both probes, for the tests of `rustup`.
+    fn fake_rustc(dir: &Path) -> PathBuf {
+        crate::process::fake_script(
+            dir,
+            "rustc",
+            "if [ \"$1\" = \"--print\" ]; then echo /test/sysroot; else echo \"rustc 1.0.0 (test)\"; fi",
+        )
+    }
+
+    #[test]
+    fn a_rustc_that_runs_out_of_time_is_a_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rustc = crate::process::fake_script(tmp.path(), "rustc", "sleep 30");
+        let rustup = tmp.path().join("no-such-rustup");
+        let error = active_with(
+            &crate::context::test_ctx(),
+            tmp.path(),
+            rustc.as_os_str(),
+            Duration::from_millis(300),
+            rustup.as_os_str(),
+            RUSTUP_LIMIT,
+        )
+        .unwrap_err();
+        assert_eq!(error.id, CheckId::StepTimeout.id(), "{error:?}");
+        assert_eq!(error.exit.code(), 8);
+        assert!(
+            error.detail.contains("rustc --print sysroot"),
+            "{}",
+            error.detail
+        );
+        assert!(error.detail.contains("300ms"), "{}", error.detail);
+        assert!(
+            error.fix.summary.contains("rustc --print sysroot"),
+            "{error:?}"
+        );
+        assert!(error.fix.summary.contains("300ms"), "{error:?}");
+    }
+
+    #[test]
+    fn a_stalled_rustup_warns_and_the_run_goes_on_unnamed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rustc = fake_rustc(tmp.path());
+        let rustup = crate::process::fake_script(tmp.path(), "rustup", "sleep 30");
+        let ctx = crate::context::test_ctx();
+        let toolchain = active_with(
+            &ctx,
+            tmp.path(),
+            rustc.as_os_str(),
+            RUSTC_LIMIT,
+            rustup.as_os_str(),
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        assert_eq!(toolchain.name, None);
+        assert_eq!(toolchain.reason, None);
+        assert_eq!(toolchain.rustc_version(), "1.0.0");
+        assert_eq!(
+            toolchain.add_target_command("aarch64-linux-android"),
+            "rustup target add aarch64-linux-android"
+        );
+        assert_eq!(
+            ctx.rep.warning_ids(),
+            vec![CheckId::StepTimeout.id().to_string()]
+        );
+    }
+
+    #[test]
+    fn a_rustup_that_names_the_toolchain_is_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rustc = fake_rustc(tmp.path());
+        let rustup = crate::process::fake_script(
+            tmp.path(),
+            "rustup",
+            "echo \"1.98.0-aarch64-apple-darwin (overridden by '/x/rust-toolchain.toml')\"",
+        );
+        let ctx = crate::context::test_ctx();
+        let toolchain = active_with(
+            &ctx,
+            tmp.path(),
+            rustc.as_os_str(),
+            RUSTC_LIMIT,
+            rustup.as_os_str(),
+            RUSTUP_LIMIT,
+        )
+        .unwrap();
+        assert_eq!(
+            toolchain.name.as_deref(),
+            Some("1.98.0-aarch64-apple-darwin")
+        );
+        assert_eq!(
+            toolchain.reason.as_deref(),
+            Some("overridden by '/x/rust-toolchain.toml'")
+        );
+        assert!(ctx.rep.warning_ids().is_empty());
+    }
+
+    #[test]
+    fn a_rustup_that_fails_or_is_missing_leaves_the_toolchain_unnamed_silently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rustc = fake_rustc(tmp.path());
+        let failing = crate::process::fake_script(tmp.path(), "rustup", "exit 1");
+        let missing = tmp.path().join("no-such-rustup");
+        for rustup in [failing, missing] {
+            let ctx = crate::context::test_ctx();
+            let toolchain = active_with(
+                &ctx,
+                tmp.path(),
+                rustc.as_os_str(),
+                RUSTC_LIMIT,
+                rustup.as_os_str(),
+                RUSTUP_LIMIT,
+            )
+            .unwrap();
+            assert_eq!(toolchain.name, None);
+            assert_eq!(toolchain.rustc_version(), "1.0.0");
+            assert!(ctx.rep.warning_ids().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_missing_rustc_is_still_a_missing_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rustc = tmp.path().join("no-such-rustc");
+        let rustup = tmp.path().join("no-such-rustup");
+        let error = active_with(
+            &crate::context::test_ctx(),
+            tmp.path(),
+            rustc.as_os_str(),
+            RUSTC_LIMIT,
+            rustup.as_os_str(),
+            RUSTUP_LIMIT,
+        )
+        .unwrap_err();
+        assert_eq!(error.id, CheckId::EnvToolMissing.id(), "{error:?}");
+        assert_eq!(error.exit.code(), 4);
+    }
+
+    #[test]
+    fn a_rustc_that_fails_without_stderr_says_its_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rustc = crate::process::fake_script(tmp.path(), "rustc", "exit 1");
+        let rustup = tmp.path().join("no-such-rustup");
+        let error = active_with(
+            &crate::context::test_ctx(),
+            tmp.path(),
+            rustc.as_os_str(),
+            RUSTC_LIMIT,
+            rustup.as_os_str(),
+            RUSTUP_LIMIT,
+        )
+        .unwrap_err();
+        assert_eq!(error.id, CheckId::EnvToolMissing.id(), "{error:?}");
+        assert!(error.detail.ends_with("failed: exit 1"), "{}", error.detail);
+    }
+
     #[test]
     fn platforms_map_to_targets() {
         assert_eq!(required_targets("web", &[]), vec!["wasm32-unknown-unknown"]);
@@ -294,7 +483,11 @@ mod tests {
     #[test]
     fn the_active_toolchain_resolves_here() {
         // Uses the real rustc that is building these tests.
-        let toolchain = active(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let toolchain = active(
+            &crate::context::test_ctx(),
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        )
+        .unwrap();
         assert!(toolchain.rustc.starts_with("rustc "));
         assert!(toolchain.installed_targets().contains(host_triple()));
     }

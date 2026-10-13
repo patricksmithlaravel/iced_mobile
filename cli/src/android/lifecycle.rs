@@ -467,7 +467,12 @@ impl<'a> Suite<'a> {
             if let Some(log) = &outcome.log {
                 evidence.push(Evidence::file(log));
             }
-            let detail = format!("{}: `{}` failed: {}", step.what, step.line, text.trim());
+            let detail = format!(
+                "{}: `{}` failed: {}",
+                step.what,
+                step.line,
+                outcome.output_or_describe()
+            );
             self.record(step.name, Status::Fail, &detail, None, evidence, Vec::new());
             return Ok(Found {
                 status: Status::Fail,

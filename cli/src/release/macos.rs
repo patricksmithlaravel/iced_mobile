@@ -1166,8 +1166,7 @@ impl Pipeline for Macos {
     fn preconditions(&self, ctx: &mut Ctx, rel: &mut Release) -> Result<()> {
         desktop::require_host(&ctx.env, ReleaseTarget::Macos, "release macos")?;
         if let Some(version) = ctx
-            .probe(&Cmd::tool("sw_vers").arg("-productVersion"))
-            .ok()
+            .optional_probe(&Cmd::tool("sw_vers").arg("-productVersion"))
             .filter(Outcome::success)
             .map(|outcome| outcome.stdout_text().trim().to_string())
             .filter(|version| !version.is_empty())
@@ -1176,7 +1175,7 @@ impl Pipeline for Macos {
         }
 
         if !rel.args.dmg && universal(rel) {
-            let toolchain = crate::toolchain::active(rel.project.dir())?;
+            let toolchain = crate::toolchain::active(ctx, rel.project.dir())?;
             let wanted: Vec<String> = triples(true).iter().map(|(t, _)| t.to_string()).collect();
             let checks = crate::toolchain::check_targets(&toolchain, &wanted);
             let mut first = None;

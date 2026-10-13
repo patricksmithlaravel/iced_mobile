@@ -5,8 +5,10 @@
 use super::{Fix, Probe, Requirement, unsupported};
 use crate::catalogue::{By, CheckId};
 use crate::cli::Platform;
-use crate::error::{Check, Status};
+use crate::context::Ctx;
+use crate::error::{Check, IcmError, Status};
 use crate::managed;
+use crate::process::Cmd;
 use crate::simctl;
 use crate::tools::{self, Xcode};
 use std::time::Duration;
@@ -89,22 +91,40 @@ fn min_os(probe: &Probe<'_>) -> String {
         .unwrap_or_else(|| "16.0".to_string())
 }
 
-fn simctl_json(probe: &Probe<'_>, xcode: &Xcode, args: &[&str]) -> Result<String, String> {
+/// The JSON of `xcrun simctl list -j <args>`.
+fn simctl_json(probe: &Probe<'_>, xcode: &Xcode, args: &[&str]) -> Result<String, IcmError> {
     let cmd = xcode
         .xcrun()
         .args(["simctl", "list", "-j"])
         .args(args)
         .timeout(Duration::from_secs(60));
-    match probe.ctx.probe(&cmd) {
-        Ok(outcome) if outcome.success() => Ok(outcome.stdout_text()),
-        Ok(outcome) => Err(format!(
-            "`{}` failed ({}): {}",
-            cmd.display(),
-            outcome.describe(),
-            outcome.stderr_tail(3)
-        )),
-        Err(error) => Err(error.detail),
+    simctl_listing(probe.ctx, &cmd)
+}
+
+/// The output of a `simctl list` run (`cmd`). A run that runs out of its own
+/// limit keeps its `step.timeout` and fix, which names the command to run by
+/// hand. Any other failure is `tool.failed`, as it was before the timeouts
+/// were reported: a run that cannot start (its detail says it was not found),
+/// or one that exits non-zero (its status or stderr tail).
+fn simctl_listing(ctx: &Ctx, cmd: &Cmd) -> Result<String, IcmError> {
+    let outcome = match ctx.probe(cmd) {
+        Ok(outcome) => outcome,
+        Err(error) if error.check_id() == Some(CheckId::StepTimeout) => return Err(error),
+        Err(error) => return Err(IcmError::new(CheckId::ToolFailed, error.detail)),
+    };
+    if outcome.success() {
+        return Ok(outcome.stdout_text());
     }
+    let tail = outcome.stderr_tail(3);
+    let tail = if tail.is_empty() {
+        String::new()
+    } else {
+        format!(": {tail}")
+    };
+    Err(IcmError::new(
+        CheckId::ToolFailed,
+        format!("`{}` failed ({}){tail}", cmd.display(), outcome.describe()),
+    ))
 }
 
 fn simulator(probe: &Probe<'_>, xcode: &Xcode) -> Vec<Requirement> {
@@ -112,15 +132,15 @@ fn simulator(probe: &Probe<'_>, xcode: &Xcode) -> Vec<Requirement> {
     let min_os = min_os(probe);
     let mut out = Vec::new();
 
-    let runtimes = match simctl_json(probe, xcode, &["runtimes", "available"])
-        .and_then(|json| simctl::parse_runtimes(&json))
-    {
+    let runtimes = match simctl_json(probe, xcode, &["runtimes", "available"]).and_then(|json| {
+        simctl::parse_runtimes(&json).map_err(|detail| IcmError::new(CheckId::ToolFailed, detail))
+    }) {
         Ok(runtimes) => runtimes,
-        Err(detail) => {
+        Err(error) => {
             out.push(Requirement::new(
                 "ios.runtime",
                 platform,
-                Check::fail(CheckId::ToolFailed, detail),
+                Check::from_error(error, Status::Fail),
             ));
             return out;
         }
@@ -171,15 +191,15 @@ fn simulator(probe: &Probe<'_>, xcode: &Xcode) -> Vec<Requirement> {
         ),
     ));
 
-    let devices = match simctl_json(probe, xcode, &["devices"])
-        .and_then(|json| simctl::parse_devices(&json))
-    {
+    let devices = match simctl_json(probe, xcode, &["devices"]).and_then(|json| {
+        simctl::parse_devices(&json).map_err(|detail| IcmError::new(CheckId::ToolFailed, detail))
+    }) {
         Ok(devices) => devices,
-        Err(detail) => {
+        Err(error) => {
             out.push(Requirement::new(
                 "ios.simulator",
                 platform,
-                Check::fail(CheckId::ToolFailed, detail),
+                Check::from_error(error, Status::Fail),
             ));
             return out;
         }
@@ -271,4 +291,46 @@ fn simulator(probe: &Probe<'_>, xcode: &Xcode) -> Vec<Requirement> {
         ),
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::test_ctx;
+    use crate::process::fake_script;
+
+    #[test]
+    fn a_simctl_listing_that_runs_out_of_time_keeps_its_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = fake_script(tmp.path(), "xcrun", "sleep 30");
+        let cmd = Cmd::new(&tool)
+            .args(["simctl", "list", "-j", "devices"])
+            .timeout(Duration::from_millis(300));
+        let error = simctl_listing(&test_ctx(), &cmd).unwrap_err();
+        assert_eq!(error.check_id(), Some(CheckId::StepTimeout));
+        assert_eq!(error.exit.code(), 8);
+        assert!(
+            error.fix.summary.contains("simctl list -j devices"),
+            "{error:?}"
+        );
+        assert!(error.fix.summary.contains("300ms"), "{error:?}");
+    }
+
+    #[test]
+    fn a_failed_simctl_listing_says_its_status_when_stderr_is_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = fake_script(tmp.path(), "xcrun", "exit 1");
+        let error = simctl_listing(&test_ctx(), &Cmd::new(&tool)).unwrap_err();
+        assert_eq!(error.check_id(), Some(CheckId::ToolFailed));
+        assert!(error.detail.ends_with("(exit 1)"), "{}", error.detail);
+    }
+
+    #[test]
+    fn a_simctl_that_cannot_start_is_a_failed_tool_as_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = Cmd::new(tmp.path().join("no-such-xcrun"));
+        let error = simctl_listing(&test_ctx(), &cmd).unwrap_err();
+        assert_eq!(error.check_id(), Some(CheckId::ToolFailed));
+        assert!(error.detail.contains("was not found"), "{}", error.detail);
+    }
 }

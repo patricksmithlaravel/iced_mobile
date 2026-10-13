@@ -410,6 +410,25 @@ Text input on Android, and secure fields on Android and iOS:
   placeholder (iOS sends no preedit). The desktop and the web draw it as upstream does.
 - The known limitations in an app's `AGENTS.md` describe text input as it now is, and say that the
   iOS keyboard shows no predictions in any field: the app's view takes key input only.
+- `icm` reports a tool probe that runs out of its own time limit as a timeout (`step.timeout`, exit
+  8) that names the command and the limit. Before, a stalled `rustc --print sysroot` (60 s) failed
+  `icm run ios-sim --store`'s preflight as `env.tool_missing` with an empty `failed:` detail (GitHub
+  Actions runs 38299868362 and 38340201153, Phase 2 `store-screenshots`). `xcode-select -p`, the JDK
+  search, `adb devices`, `wasm-bindgen --version` and `--dry-run`'s wasm-bindgen step had the same gap. A stalled
+  `rustup show active-toolchain` (30 s) used to leave the toolchain unnamed without a word: it now
+  WARNs `step.timeout`, and the build still goes on unnamed. A probe with its own fixed limit names that limit and the command to run by hand
+  in its fix, since `--timeout` does not reach it. A stalled JDK candidate no longer hides a JDK
+  further on, and doctor gives a JDK timeout no install fix. A tool that exits non-zero with empty
+  stderr now says its status in each failure detail that quotes its stderr. A program that cannot
+  start is still `env.tool_missing`, except in doctor's simctl listings and the web feature checks,
+  which keep the id they had (`tool.failed`, and a skip). A stalled optional probe now WARNs `step.timeout` where it used to pass
+  silently: the rustc version a build records, `stop --shutdown`'s simulator listing, a release's
+  `wasm-opt --version` and the simulator's app data location a hook gets. Doctor's wasm-bindgen
+  requirement no longer offers `icm doctor web --fix` for a `wasm-bindgen --version` that stalled, and
+  doctor's iOS simctl listings now report a timeout as `step.timeout`, not
+  `tool.failed`. The two `plutil -lint` details and the
+  Android lifecycle step's failure detail say the status when their output is empty.
+  `docs/icm/DESIGN.md` Appendix D item 23.
 
 ## Changes in v0.14.1-mobile.2
 

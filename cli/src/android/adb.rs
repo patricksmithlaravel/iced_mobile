@@ -368,18 +368,36 @@ impl Adb {
 
 /// `adb devices -l`.
 pub fn devices(tools: &Toolset) -> Result<Vec<Listed>, IcmError> {
-    let cmd = tools.adb()?.args(["devices", "-l"]);
-    match quick(cmd, Duration::from_secs(30)) {
-        Some(outcome) if outcome.success() => Ok(parse_devices(&outcome.stdout_text())),
-        Some(outcome) => Err(IcmError::new(
-            crate::catalogue::CheckId::ToolFailed,
-            format!("adb devices failed: {}", outcome.stderr_tail(4)),
-        )),
-        None => Err(IcmError::new(
-            crate::catalogue::CheckId::EnvToolMissing,
-            "adb could not be started",
-        )
-        .fix_commands(["icm doctor android --fix --yes"])),
+    listing(
+        tools.adb()?.args(["devices", "-l"]),
+        Duration::from_secs(30),
+    )
+}
+
+/// The devices an `adb devices -l` run (`cmd`) lists, read for at most
+/// `limit`. A run that runs out of its limit is `step.timeout`, not a
+/// failed adb.
+fn listing(cmd: Cmd, limit: Duration) -> Result<Vec<Listed>, IcmError> {
+    match quick(cmd.clone(), limit) {
+        Some(outcome) => {
+            if let Some(error) =
+                crate::context::probe_end_error("adb devices -l", &cmd, &outcome, false)
+            {
+                return Err(error);
+            }
+            if outcome.success() {
+                Ok(parse_devices(&outcome.stdout_text()))
+            } else {
+                Err(IcmError::new(
+                    CheckId::ToolFailed,
+                    format!("adb devices failed: {}", outcome.reason(4)),
+                ))
+            }
+        }
+        None => Err(
+            IcmError::new(CheckId::EnvToolMissing, "adb could not be started")
+                .fix_commands(["icm doctor android --fix --yes"]),
+        ),
     }
 }
 
@@ -539,6 +557,16 @@ pub fn input_text_arg(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_adb_listing_that_runs_out_of_time_is_a_timeout() {
+        let cmd = Cmd::new("/bin/sh").args(["-c", "sleep 30"]);
+        let error = listing(cmd, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(error.id, CheckId::StepTimeout.id(), "{error:?}");
+        assert_eq!(error.exit.code(), 8);
+        assert!(error.detail.contains("adb devices -l"), "{}", error.detail);
+        assert!(error.detail.contains("300ms"), "{}", error.detail);
+    }
 
     #[test]
     fn device_lists() {

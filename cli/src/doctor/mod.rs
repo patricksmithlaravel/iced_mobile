@@ -21,7 +21,7 @@ pub use fix::Fix;
 use crate::catalogue::{By, CheckId};
 use crate::cli::Platform;
 use crate::context::{Ctx, Project};
-use crate::error::{Check, Status};
+use crate::error::{Check, IcmError, Status};
 use crate::host::HostConfig;
 use crate::toolchain::{self, Toolchain};
 use crate::tools::{self, Env};
@@ -218,7 +218,7 @@ pub fn gather(probe: &Probe<'_>, platforms: &[Platform]) -> Vec<Requirement> {
 /// doctor --json").
 pub fn tools_json(probe: &Probe<'_>, platforms: &[Platform]) -> Value {
     let mut tools = Map::new();
-    if let Ok(toolchain) = toolchain::active(probe.dir) {
+    if let Ok(toolchain) = toolchain::active(probe.ctx, probe.dir) {
         let _ = tools.insert("rustc".into(), json!(toolchain.rustc_version()));
         let _ = tools.insert("toolchain".into(), json!(toolchain.name));
     }
@@ -252,7 +252,7 @@ pub fn tools_json(probe: &Probe<'_>, platforms: &[Platform]) -> Value {
 }
 
 fn rust_toolchain(probe: &Probe<'_>, push: &mut impl FnMut(Requirement)) -> Option<Toolchain> {
-    match toolchain::active(probe.dir) {
+    match toolchain::active(probe.ctx, probe.dir) {
         Ok(toolchain) => {
             let mut detail = format!(
                 "rustc {} for {}",
@@ -534,20 +534,37 @@ fn wasm_bindgen(probe: &Probe<'_>) -> Requirement {
                 ),
             ),
         ),
-        Err(error) => {
-            let mut check = Check::from_error(error, Status::Fail);
-            if let Some(package) = lock.named("wasm-bindgen").next() {
-                check = check.evidence(lock.evidence(package));
-            }
-            Requirement::new(key, platform, check).with_fixes(
-                vec![Fix::WasmBindgen {
-                    version: Some(version),
-                    lock: lock_path,
-                }],
-                probe.env,
-            )
-        }
+        Err(error) => wasm_bindgen_missing(error, &lock, version, lock_path, probe.env),
     }
+}
+
+/// The requirement when no wasm-bindgen CLI matches the app's lock. A CLI
+/// that runs out of its own time limit is a stall, not a missing or
+/// wrong-version CLI, so it keeps its `step.timeout` with no install fix (as
+/// doctor's JDK does): the install would rebuild a CLI that is there.
+fn wasm_bindgen_missing(
+    error: IcmError,
+    lock: &crate::cargo::Lock,
+    version: String,
+    lock_path: PathBuf,
+    env: &Env,
+) -> Requirement {
+    let timed_out = error.check_id() == Some(CheckId::StepTimeout);
+    let mut check = Check::from_error(error, Status::Fail);
+    if let Some(package) = lock.named("wasm-bindgen").next() {
+        check = check.evidence(lock.evidence(package));
+    }
+    let requirement = Requirement::new("web.wasm_bindgen", Some(Platform::Web), check);
+    if timed_out {
+        return requirement;
+    }
+    requirement.with_fixes(
+        vec![Fix::WasmBindgen {
+            version: Some(version),
+            lock: lock_path,
+        }],
+        env,
+    )
 }
 
 /// An unsupported-host requirement: FAIL when the platform was asked for,
@@ -566,4 +583,74 @@ fn quoted(detail: &str) -> Option<String> {
     let start = detail.find('`')? + 1;
     let end = start + detail[start..].find('`')?;
     Some(detail[start..end].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lock with one wasm-bindgen package at `version`.
+    fn lock(version: &str) -> crate::cargo::Lock {
+        let text = format!(
+            "version = 3\n\n[[package]]\nname = \"wasm-bindgen\"\nversion = \"{version}\"\n"
+        );
+        crate::cargo::Lock::parse(Path::new("Cargo.lock"), &text).unwrap()
+    }
+
+    #[test]
+    fn a_wasm_bindgen_that_runs_out_of_time_keeps_its_timeout_and_gets_no_fix() {
+        let error = IcmError::new(
+            CheckId::StepTimeout,
+            "step wasm-bindgen --version exceeded its 20s limit",
+        )
+        .fix(
+            "Run `wasm-bindgen --version` by hand to see why it stalls.",
+            &[],
+        );
+        let requirement = wasm_bindgen_missing(
+            error,
+            &lock("0.2.105"),
+            "0.2.105".to_string(),
+            PathBuf::from("Cargo.lock"),
+            &Env::from_pairs(&[], None),
+        );
+        assert_eq!(requirement.key, "web.wasm_bindgen");
+        assert_eq!(requirement.check.id(), CheckId::StepTimeout.id());
+        assert_eq!(requirement.check.error.exit.code(), 8);
+        assert!(
+            requirement
+                .check
+                .error
+                .fix
+                .summary
+                .contains("wasm-bindgen --version"),
+            "{:?}",
+            requirement.check.error.fix
+        );
+        assert!(requirement.fixes.is_empty(), "{:?}", requirement.fixes);
+    }
+
+    #[test]
+    fn a_missing_wasm_bindgen_still_gets_the_install_fix() {
+        let error = IcmError::new(
+            CheckId::DepsWasmBindgenCli,
+            "no wasm-bindgen CLI 0.2.105 (the app's Cargo.lock version)",
+        );
+        let requirement = wasm_bindgen_missing(
+            error,
+            &lock("0.2.105"),
+            "0.2.105".to_string(),
+            PathBuf::from("Cargo.lock"),
+            &Env::from_pairs(&[], None),
+        );
+        assert_eq!(requirement.check.id(), CheckId::DepsWasmBindgenCli.id());
+        assert!(
+            matches!(
+                requirement.fixes.as_slice(),
+                [Fix::WasmBindgen { version: Some(version), .. }] if version == "0.2.105"
+            ),
+            "{:?}",
+            requirement.fixes
+        );
+    }
 }

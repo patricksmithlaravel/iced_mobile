@@ -222,10 +222,12 @@ pub fn lint(ctx: &Ctx, app: &Path) -> Result<Check> {
             "Info.plist and PrivacyInfo.xcprivacy are valid",
         )
     } else {
-        let text = format!("{}{}", outcome.stdout_text(), outcome.stderr_text());
         Check::fail(
             CheckId::IosPlistLint,
-            format!("plutil -lint rejected the bundle's plists: {}", text.trim()),
+            format!(
+                "plutil -lint rejected the bundle's plists: {}",
+                outcome.output_or_describe()
+            ),
         )
         .evidence(Evidence::file(&info))
     })
@@ -382,7 +384,7 @@ pub fn icon_check(
     if !outcome.success() {
         return Err(IcmError::new(
             CheckId::ToolFailed,
-            format!("assetutil --info failed: {}", outcome.stderr_tail(3)),
+            format!("assetutil --info failed: {}", outcome.reason(3)),
         )
         .evidence(Evidence::file(&car)));
     }

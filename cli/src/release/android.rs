@@ -436,7 +436,7 @@ impl Pipeline for Android {
         let ndk = tools.ndk.clone()?;
         let (build_tools, _) = tools.build_tools()?;
         let _ = tools.platform_jar(config.android.target_sdk)?;
-        let toolchain = crate::toolchain::active(rel.project.dir())?;
+        let toolchain = crate::toolchain::active(ctx, rel.project.dir())?;
         let triples: Vec<String> = abis.iter().map(|abi| abi.triple().to_string()).collect();
         if let Some(failed) = crate::toolchain::check_targets(&toolchain, &triples)
             .into_iter()
@@ -833,7 +833,7 @@ fn validate(ctx: &Ctx, bundletool: &Cmd, aab: &Path, report: &mut dyn FnMut(Chec
             format!(
                 "bundletool validate rejects {}: {}",
                 crate::paths::display(aab),
-                outcome.stderr_tail(3)
+                outcome.reason(3)
             ),
         );
         if let Some(log) = &outcome.log {
@@ -859,7 +859,7 @@ fn sign(
     let outcome = ctx.step("keytool.list", &keytool_list(tools, key)?)?;
     let text = format!("{}\n{}", outcome.stdout_text(), outcome.stderr_text());
     if !outcome.success() {
-        let why = bundle::key_failure(&text).unwrap_or_else(|| outcome.stderr_tail(2));
+        let why = bundle::key_failure(&text).unwrap_or_else(|| outcome.reason(2));
         let error = unreadable(rel, key, &why, outcome.log.as_deref());
         rel.needs_owner_later(ctx, error);
         return Ok(None);
@@ -890,10 +890,7 @@ fn sign(
             None => {
                 let mut check = Check::fail(
                     CheckId::AndroidAabSigned,
-                    format!(
-                        "jarsigner could not sign the bundle: {}",
-                        outcome.stderr_tail(3)
-                    ),
+                    format!("jarsigner could not sign the bundle: {}", outcome.reason(3)),
                 );
                 if let Some(log) = &outcome.log {
                     check = check.evidence(Evidence::file(log));
@@ -956,10 +953,7 @@ fn signature_checks(
         let detail = if verified.unsigned {
             format!("{shown} is unsigned (jarsigner: jar is unsigned)")
         } else {
-            format!(
-                "jarsigner does not verify {shown}: {}",
-                outcome.stderr_tail(3)
-            )
+            format!("jarsigner does not verify {shown}: {}", outcome.reason(3))
         };
         report(with_log(Check::fail(CheckId::AndroidAabSigned, detail)));
         return Ok(());
@@ -1207,10 +1201,7 @@ fn universal_apk(
         } else {
             Check::fail(
                 CheckId::AndroidApkSignature,
-                format!(
-                    "apksigner does not verify {shown}: {}",
-                    outcome.stderr_tail(3)
-                ),
+                format!("apksigner does not verify {shown}: {}", outcome.reason(3)),
             )
         },
     );
@@ -1232,7 +1223,7 @@ fn universal_apk(
                 CheckId::AndroidApkZipalign,
                 format!(
                     "{shown} is not aligned to 16 KB pages: {}",
-                    outcome.stderr_tail(3)
+                    outcome.reason(3)
                 ),
             )
         },

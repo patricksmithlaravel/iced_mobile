@@ -143,7 +143,7 @@ pub fn list(ctx: &Ctx, keychain: Option<&Path>) -> Result<Vec<Identity>> {
                 keychain
                     .map(|k| format!(" on {}", crate::paths::display(k)))
                     .unwrap_or_default(),
-                outcome.stderr_tail(3)
+                outcome.reason(3)
             ),
         ));
     }

@@ -57,8 +57,8 @@ use crate::cargo::{Invocation, Select};
 use crate::catalogue::CheckId;
 use crate::cli::{BuildArgs, InputAction, InputArgs, Key, LogsArgs, RunArgs, ShotArgs, Theme};
 use crate::context::{Ctx, Project};
-use crate::error::{Check, Evidence, IcmError, Result};
-use crate::process::{self, Cmd};
+use crate::error::{Check, Evidence, IcmError, Result, Status};
+use crate::process::{self, Cmd, Outcome};
 use crate::screen::Space;
 use crate::tools::{self, Found};
 use client::Session;
@@ -194,7 +194,7 @@ pub fn build(ctx: &mut Ctx, project: &Project, release: bool) -> Result<Built> {
     let bin = project.bin_for(PLATFORM)?;
 
     // The wasm32 target on the toolchain the project resolves (Appendix C 8).
-    let toolchain = crate::toolchain::active(project.dir())?;
+    let toolchain = crate::toolchain::active(ctx, project.dir())?;
     let mut missing = None;
     for check in crate::toolchain::check_targets(&toolchain, &[TRIPLE.to_string()]) {
         if check.failed() && missing.is_none() {
@@ -354,14 +354,34 @@ pub(crate) fn getrandom_backend(ctx: &Ctx, error: IcmError) -> IcmError {
 
 /// iced's features as resolved for wasm32, from `cargo metadata
 /// --filter-platform` (offline: the build just fetched everything).
-pub(crate) fn iced_features(ctx: &Ctx, manifest: &Path) -> Option<Vec<String>> {
+/// `Ok(None)` when cargo does not give them: it cannot run, exits unsuccessfully
+/// or its output does not name them. An error only when the probe ran out of
+/// its limit (`step.timeout`).
+pub(crate) fn iced_features(ctx: &Ctx, manifest: &Path) -> Result<Option<Vec<String>>, IcmError> {
     let cmd = Cmd::tool("cargo")
         .args(["metadata", "--format-version", "1", "--offline"])
         .args(["--filter-platform", TRIPLE])
         .arg("--manifest-path")
         .arg(manifest)
         .timeout(Duration::from_secs(120));
-    let outcome = ctx.probe(&cmd).ok()?;
+    iced_features_of(ctx, &cmd)
+}
+
+/// [`iced_features`] for the `cargo metadata` that `cmd` runs (a test passes
+/// a fake cargo that runs out of time). A cargo that cannot start is `None`,
+/// as it was before timeouts were reported: the feature checks skip with
+/// their note, not with a missing-tool id.
+fn iced_features_of(ctx: &Ctx, cmd: &Cmd) -> Result<Option<Vec<String>>, IcmError> {
+    match ctx.probe(cmd) {
+        Ok(outcome) => Ok(read_iced_features(&outcome)),
+        Err(error) if error.check_id() == Some(CheckId::StepTimeout) => Err(error),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The features [`iced_features`] reads from a `cargo metadata` outcome:
+/// `None` when cargo did not succeed or its output does not name iced.
+fn read_iced_features(outcome: &Outcome) -> Option<Vec<String>> {
     if !outcome.success() {
         return None;
     }
@@ -392,12 +412,19 @@ pub(crate) fn iced_features(ctx: &Ctx, manifest: &Path) -> Option<Vec<String>> {
 /// `web.fonts_embedded` and `web.renderer_fallback` for a dev build (WARN;
 /// a release makes the first a FAIL).
 fn feature_checks(ctx: &Ctx, manifest: &Path) {
-    let Some(features) = iced_features(ctx, manifest) else {
-        ctx.rep.check(Check::skip(
-            CheckId::WebFontsEmbedded,
-            "cannot resolve iced's features for wasm32 (cargo metadata --offline failed)",
-        ));
-        return;
+    let features = match iced_features(ctx, manifest) {
+        Ok(Some(features)) => features,
+        Ok(None) => {
+            ctx.rep.check(Check::skip(
+                CheckId::WebFontsEmbedded,
+                "cannot resolve iced's features for wasm32 (cargo metadata --offline failed)",
+            ));
+            return;
+        }
+        Err(error) => {
+            ctx.rep.check(Check::from_error(error, Status::Skip));
+            return;
+        }
     };
     let has = |name: &str| features.iter().any(|f| f == name);
     let fix_line = FEATURES_FIX;
@@ -1452,6 +1479,52 @@ pub fn stop(project: &Project) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::{Mode, Reporter, RunInfo};
+
+    fn ctx() -> Ctx {
+        let rep = Reporter::with_writers(
+            Mode::default(),
+            RunInfo {
+                run: "20261013T000000Z-web-0000".into(),
+                command: "web".into(),
+                target: Some("web".into()),
+                argv: vec![],
+                save: false,
+            },
+            Box::new(std::io::sink()),
+            Box::new(std::io::sink()),
+        );
+        Ctx::new(crate::cli::GlobalArgs::default(), rep, vec![])
+    }
+
+    #[test]
+    fn iced_features_whose_cargo_runs_out_of_time_are_a_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cargo = crate::process::fake_script(tmp.path(), "cargo", "sleep 30");
+        let cmd = Cmd::new(&cargo).timeout(Duration::from_millis(300));
+        let error = iced_features_of(&ctx(), &cmd).unwrap_err();
+        assert_eq!(error.id, CheckId::StepTimeout.id(), "{error:?}");
+        assert_eq!(error.exit.code(), 8);
+        assert!(error.detail.contains("300ms"), "{}", error.detail);
+        assert!(error.fix.summary.contains("by hand"), "{error:?}");
+    }
+
+    #[test]
+    fn iced_features_that_cargo_does_not_resolve_are_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cargo = crate::process::fake_script(tmp.path(), "cargo", "echo '{}'; exit 1");
+        let cmd = Cmd::new(&cargo);
+        assert!(iced_features_of(&ctx(), &cmd).unwrap().is_none());
+    }
+
+    #[test]
+    fn iced_features_that_cargo_cannot_start_are_unknown_not_a_missing_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmd = Cmd::new(tmp.path().join("no-such-cargo"));
+        let ctx = ctx();
+        assert!(iced_features_of(&ctx, &cmd).unwrap().is_none());
+        assert!(ctx.rep.warning_ids().is_empty());
+    }
 
     #[test]
     fn env_pairs_become_query_parameters() {

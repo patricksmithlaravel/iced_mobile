@@ -224,12 +224,40 @@ impl Ctx {
         Ok(outcome)
     }
 
-    /// Runs a quick probe (no step event, no log). Errors as for [`Ctx::step`].
+    /// Runs a quick probe (no step event, no log). Errors as for [`Ctx::step`],
+    /// with the probe's own limit named in a timeout (see [`probe_end_error`]).
     pub fn probe(&self, cmd: &Cmd) -> Result<Outcome> {
         let (cmd, overall) = self.bounded(cmd);
         let outcome = process::run(&cmd, None, None).map_err(|error| spawn_error(&cmd, &error))?;
-        self.judge_end(&cmd.program_name(), &cmd, &outcome, overall)?;
-        Ok(outcome)
+        match probe_end_error(&cmd.program_name(), &cmd, &outcome, overall) {
+            Some(error) => Err(error),
+            None => Ok(outcome),
+        }
+    }
+
+    /// A probe whose answer the caller can do without: a tool's version for a
+    /// record, a listing for an optional step, a best-effort action. `None`
+    /// when the probe could not run or ran out of its own time limit, and a
+    /// timeout also says so in a WARN (`step.timeout`), since it is not an
+    /// absent tool. A probe that ran and exited non-zero is `Some`, and its
+    /// caller judges it.
+    pub fn optional_probe(&self, cmd: &Cmd) -> Option<Outcome> {
+        match self.probe(cmd) {
+            Ok(outcome) => Some(outcome),
+            Err(error) => {
+                self.warn_if_timeout(error);
+                None
+            }
+        }
+    }
+
+    /// Reports `error` as a WARN (`step.timeout`) when it is a probe's
+    /// timeout, for a caller that goes on without the probe's answer. Any
+    /// other error is dropped here, as the caller has always done.
+    pub fn warn_if_timeout(&self, error: IcmError) {
+        if error.check_id() == Some(CheckId::StepTimeout) {
+            self.rep.check(Check::from_error(error, Status::Warn));
+        }
     }
 
     fn judge_end(&self, name: &str, cmd: &Cmd, outcome: &Outcome, overall: bool) -> Result<()> {
@@ -457,13 +485,11 @@ pub struct ResolveFailure {
 pub fn end_error(name: &str, cmd: &Cmd, outcome: &Outcome, overall: bool) -> Option<IcmError> {
     match outcome.end {
         End::TimedOut(limit) => {
+            let limit = crate::time::format_duration(limit);
             let what = if overall {
-                format!("the overall --timeout ran out during step {name}")
+                format!("the overall --timeout ran out during step {name} (its limit was {limit})")
             } else {
-                format!(
-                    "step {name} exceeded its {} limit",
-                    crate::time::format_duration(limit)
-                )
+                format!("step {name} exceeded its {limit} limit")
             };
             let mut error = IcmError::new(
                 CheckId::StepTimeout,
@@ -476,6 +502,31 @@ pub fn end_error(name: &str, cmd: &Cmd, outcome: &Outcome, overall: bool) -> Opt
         }
         End::Interrupted(signal) => Some(output::interrupted(signal)),
         End::Exited(_) | End::Signaled(_) => None,
+    }
+}
+
+/// [`end_error`] for a probe. A probe that is not bounded by `--timeout`
+/// (`overall` false) runs with a limit of its own, which `--timeout` does not
+/// change, so its timeout's fix names the command to run by hand and that
+/// limit instead of the catalogue's "raise `--timeout`". `overall` keeps
+/// [`end_error`]'s text.
+pub fn probe_end_error(
+    name: &str,
+    cmd: &Cmd,
+    outcome: &Outcome,
+    overall: bool,
+) -> Option<IcmError> {
+    let error = end_error(name, cmd, outcome, overall)?;
+    match outcome.end {
+        End::TimedOut(limit) if !overall => Some(error.fix(
+            format!(
+                "Run `{}` by hand to see why it stalls; its own limit ({}) does not change with --timeout.",
+                cmd.display(),
+                crate::time::format_duration(limit)
+            ),
+            &[],
+        )),
+        _ => Some(error),
     }
 }
 
@@ -817,5 +868,126 @@ impl Project {
             "cargo_lock_sha256": lock_sha,
             "icm_toml_sha256": self.config.sha256(),
         })
+    }
+}
+
+/// A context whose reporter writes nothing, for the tests of the code that
+/// reports through a `Ctx`. Its checks are read with
+/// [`Reporter::warning_ids`].
+#[cfg(test)]
+pub(crate) fn test_ctx() -> Ctx {
+    use crate::output::{Mode, RunInfo};
+    let rep = Reporter::with_writers(
+        Mode::default(),
+        RunInfo {
+            run: "20261013T000000Z-probe-0000".into(),
+            command: "probe".into(),
+            target: None,
+            argv: vec![],
+            save: false,
+        },
+        Box::new(std::io::sink()),
+        Box::new(std::io::sink()),
+    );
+    Ctx::new(GlobalArgs::default(), rep, vec![])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_that_runs_out_of_its_own_limit_names_it_in_its_fix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = crate::process::fake_script(tmp.path(), "stalled-tool", "sleep 30");
+        let cmd = Cmd::new(&tool)
+            .arg("--version")
+            .timeout(Duration::from_millis(300));
+        let outcome = process::run(&cmd, None, None).unwrap();
+        let error = probe_end_error("stalled-tool --version", &cmd, &outcome, false).unwrap();
+        assert_eq!(error.id, CheckId::StepTimeout.id(), "{error:?}");
+        assert_eq!(error.exit.code(), 8);
+        assert!(error.detail.contains("300ms"), "{}", error.detail);
+        assert!(error.fix.summary.contains("stalled-tool"), "{error:?}");
+        assert!(error.fix.summary.contains("300ms"), "{error:?}");
+        assert!(
+            !error.fix.summary.contains("raise `--timeout`"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn an_overall_timeout_keeps_the_catalogue_fix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = crate::process::fake_script(tmp.path(), "stalled-tool", "sleep 30");
+        let cmd = Cmd::new(&tool).timeout(Duration::from_millis(300));
+        let outcome = process::run(&cmd, None, None).unwrap();
+        let error = probe_end_error("stalled-tool", &cmd, &outcome, true).unwrap();
+        assert_eq!(error.id, CheckId::StepTimeout.id(), "{error:?}");
+        assert!(
+            error.detail.contains("overall --timeout"),
+            "{}",
+            error.detail
+        );
+        assert!(error.fix.summary.contains("raise `--timeout`"), "{error:?}");
+    }
+
+    #[test]
+    fn a_probe_that_exits_on_its_own_is_left_to_its_caller() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = crate::process::fake_script(tmp.path(), "quick-tool", "exit 3");
+        let cmd = Cmd::new(&tool);
+        let outcome = process::run(&cmd, None, None).unwrap();
+        assert!(probe_end_error("quick-tool", &cmd, &outcome, false).is_none());
+    }
+
+    #[test]
+    fn an_optional_probe_that_runs_out_of_time_warns_and_gives_no_answer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = crate::process::fake_script(tmp.path(), "stalled-tool", "sleep 30");
+        let ctx = test_ctx();
+        let answer = ctx.optional_probe(&Cmd::new(&tool).timeout(Duration::from_millis(300)));
+        assert!(answer.is_none());
+        assert_eq!(
+            ctx.rep.warning_ids(),
+            vec![CheckId::StepTimeout.id().to_string()]
+        );
+    }
+
+    #[test]
+    fn an_optional_probe_that_exits_non_zero_is_left_to_its_caller() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = crate::process::fake_script(tmp.path(), "quick-tool", "exit 3");
+        let ctx = test_ctx();
+        let outcome = ctx.optional_probe(&Cmd::new(&tool)).unwrap();
+        assert!(!outcome.success());
+        assert!(ctx.rep.warning_ids().is_empty());
+    }
+
+    #[test]
+    fn an_optional_probe_that_cannot_start_is_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx();
+        let answer = ctx.optional_probe(&Cmd::new(tmp.path().join("no-such-tool")));
+        assert!(answer.is_none());
+        assert!(ctx.rep.warning_ids().is_empty());
+    }
+
+    #[test]
+    fn warn_if_timeout_warns_only_for_a_timeout() {
+        let ctx = test_ctx();
+        ctx.warn_if_timeout(IcmError::new(
+            CheckId::EnvRustToolchainMissing,
+            "no toolchain",
+        ));
+        assert!(ctx.rep.warning_ids().is_empty());
+        ctx.warn_if_timeout(IcmError::new(
+            CheckId::StepTimeout,
+            "step x exceeded its limit",
+        ));
+        assert_eq!(
+            ctx.rep.warning_ids(),
+            vec![CheckId::StepTimeout.id().to_string()]
+        );
     }
 }

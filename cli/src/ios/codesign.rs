@@ -167,7 +167,7 @@ pub fn signature(ctx: &Ctx, app: &Path) -> Result<Signature> {
             format!(
                 "codesign -dvv {}: {}",
                 crate::paths::display(app),
-                outcome.stderr_tail(3)
+                outcome.reason(3)
             ),
         )
         .evidence(Evidence::file(app)));
@@ -194,7 +194,7 @@ pub fn entitlements(ctx: &Ctx, app: &Path) -> Result<Option<Map<String, Value>>>
             format!(
                 "codesign cannot read the entitlements of {}: {}",
                 crate::paths::display(app),
-                outcome.stderr_tail(3)
+                outcome.reason(3)
             ),
         ));
     }

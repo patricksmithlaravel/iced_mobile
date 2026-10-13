@@ -67,7 +67,7 @@ pub fn build(
     let triple = abi.triple();
 
     // Fail before a long build when a piece is missing.
-    let toolchain = crate::toolchain::active(project.dir())?;
+    let toolchain = crate::toolchain::active(ctx, project.dir())?;
     let target_checks = crate::toolchain::check_targets(&toolchain, &[triple.to_string()]);
     if let Some(failed) = target_checks.iter().find(|check| check.failed()).cloned() {
         return Err(failed.into_error());

@@ -338,7 +338,7 @@ fn rustc_invocation(rel: &Release, bin: &str, res: &Path) -> crate::cargo::Invoc
 }
 
 fn record_version(ctx: &Ctx, rel: &mut Release, name: &str, cmd: Cmd) {
-    if let Ok(outcome) = ctx.probe(&cmd.timeout(Duration::from_secs(60)))
+    if let Some(outcome) = ctx.optional_probe(&cmd.timeout(Duration::from_secs(60)))
         && outcome.success()
     {
         let text = format!("{}{}", outcome.stdout_text(), outcome.stderr_text());
