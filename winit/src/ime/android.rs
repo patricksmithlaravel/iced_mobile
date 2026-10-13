@@ -871,19 +871,16 @@ where
 
 /// Asks the window whose field has the keyboard for the redraw that decides
 /// a composition the hold keeps back: at the end of the settle window, or now
-/// once it has closed (see [`Feed::settle_at`]). A window without a surface
-/// is not drawn, and `Resumed` asks for its redraw.
+/// once it has closed (see [`Feed::settle_at`]). A window without a surface,
+/// or with no pixels, is not drawn, so it is asked for none: its redraw would
+/// decide nothing, and its resize redraws it. `Resumed` asks for the redraw
+/// of a window without a surface.
 fn settle<P, C>(windows: &mut WindowManager<P, C>)
 where
     P: Program,
     C: Compositor<Renderer = P::Renderer>,
     P::Theme: theme::Base,
 {
-    let Some(at) = SESSION.with_borrow(|session| session.feed.settle_at())
-    else {
-        return;
-    };
-
     let Some((_id, window)) = windows
         .iter_mut()
         .find(|(_id, window)| window.ime_requested())
@@ -891,10 +888,16 @@ where
         return;
     };
 
+    let size = window.state.physical_size();
+    let drawn = window.surface.is_some() && size.width != 0 && size.height != 0;
+
+    let Some(at) = SESSION.with_borrow(|session| session.feed.settle_at(drawn))
+    else {
+        return;
+    };
+
     // An earlier request of the window, an animation's say, stays.
-    if window.surface.is_some()
-        && window.redraw_at.is_none_or(|redraw_at| at < redraw_at)
-    {
+    if drawn && window.redraw_at.is_none_or(|redraw_at| at < redraw_at) {
         window.request_redraw(window::RedrawRequest::At(at));
     }
 }

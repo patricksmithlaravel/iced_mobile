@@ -388,27 +388,27 @@ Text input on Android, and secure fields on Android and iOS:
   has the focus, and in a password field that redraw commits it as typed text. After an Enter, Tab
   or Escape the redraw decides only once a tap on the field or a focus move from code has come after
   the key, or the short window after the key has closed, or a keyboard session starts for the field
-  again (above). A field the app makes secure
-  while the keyboard composes gets its composition as typed text at the next redraw, and what the
-  keyboard composes before it is set up for the password field is read as typed text too. On Android
-  and iOS the window never draws a password field's preedit (the desktop and the web draw it as
-  upstream does). What the keyboard commits is not held back: a password it commits in the same
-  burst as a Tab the app takes in a subscription reaches the field that had the focus, in clear
-  (`docs/agents/limitations.md`). On an edit of a password field, a `text_input` builds its
-  paragraph from the bullets: the paragraph logs the text it is built from at trace level, which in
-  v0.14.1-mobile.2 was the password. On iOS the vendored winit implements `Window::set_ime_purpose`
-  (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers `isSecureTextEntry` and
-  turns off autocorrection, spell checking, auto-capitalisation and smart punctuation for a
-  password, the terminal purpose turns off the same without secure entry, and a changed purpose
-  reloads the keyboard that is shown. `iced_winit` gives the view a field's purpose before it makes
-  the view the first responder, so a keyboard shown while none was up is set up for its field at
-  once, with no reload. On the iOS 27.0 Simulator the password keyboard has no emoji or dictation
-  key, and the keyboard switches to and from it as the focus moves between a password field and
-  another; a physical iPhone has not been tried. When the focus moves straight from a password field
-  to another field, with the keyboard up, the keyboard there can label its numbers key ".?123"
-  instead of "123" until its numbers are shown once or it is hidden and shown again; it types as
-  usual. The iOS keyboard shows no suggestions in any field anyway. Before, the keyboard was not
-  told that a field held a password.
+  again (above). A field the app makes secure while the keyboard composes gets its composition as
+  typed text at the next redraw, and what the keyboard composes before it is set up for the password
+  field is read as typed text too. On Android and iOS the window never draws a password field's
+  preedit (the desktop and the web draw it as upstream does). What the keyboard commits is not held
+  back: a password it commits in the same burst as a Tab the app takes in a subscription reaches the
+  field that had the focus, in clear. A tap that reaches the app while a composition is held back
+  commits it to the field that has the focus (`docs/agents/limitations.md`). On an edit of a
+  password field, a `text_input` builds its paragraph from the bullets: the paragraph logs the text
+  it is built from at trace level, which in v0.14.1-mobile.2 was the password. On iOS the vendored
+  winit implements `Window::set_ime_purpose` (`vendor/patches/winit-0003-ios-ime-purpose.patch`):
+  the view answers `isSecureTextEntry` and turns off autocorrection, spell checking,
+  auto-capitalisation and smart punctuation for a password, the terminal purpose turns off the same
+  without secure entry, and a changed purpose reloads the keyboard that is shown. `iced_winit` gives
+  the view a field's purpose before it makes the view the first responder, so a keyboard shown while
+  none was up is set up for its field at once, with no reload. On the iOS 27.0 Simulator the
+  password keyboard has no emoji or dictation key, and the keyboard switches to and from it as the
+  focus moves between a password field and another; a physical iPhone has not been tried. When the
+  focus moves straight from a password field to another field, with the keyboard up, the keyboard
+  there can label its numbers key ".?123" instead of "123" until its numbers are shown once or it is
+  hidden and shown again; it types as usual. The iOS keyboard shows no suggestions in any field
+  anyway. Before, the keyboard was not told that a field held a password.
 - On Android and iOS, a `text_editor` focused from code gives up its focus when the user taps
   outside it, as a `text_input` does. Before, only a mouse press outside it took the focus, and a
   touch is the only press there, so it kept the focus when the user tapped another field and took

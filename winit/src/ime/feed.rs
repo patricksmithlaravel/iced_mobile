@@ -299,8 +299,14 @@ impl Feed {
     /// redraw then decides it. None when no composition is held, or when the
     /// next redraw decides already, as a focus moved from code or a tap asked
     /// for it: that request is the shell's own.
-    pub(crate) fn settle_at(&self) -> Option<Instant> {
-        if !self.unknown
+    ///
+    /// `drawn` says whether the window is drawn at all, which needs a surface
+    /// and pixels. A redraw of a window that is not drawn decides nothing, so
+    /// the loop would wake for it again and again: it is asked for none, and
+    /// the window's size changing from none redraws it, which decides then.
+    pub(crate) fn settle_at(&self, drawn: bool) -> Option<Instant> {
+        if !drawn
+            || !self.unknown
             || self.redraw_decides
             || self.engine.preedit().is_none()
         {
@@ -1804,18 +1810,31 @@ mod tests {
         advance(Duration::from_millis(30));
         assert!(!form.redraw(&mut feed));
 
+        // The keyboard composes "p" in the username before the subscription's
+        // message moves the focus. It is held back, and the username's redraw
+        // inside the window does not release it: a redraw that did would show
+        // it in the field the focus is about to leave.
+        queue.push_back(state("p", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+        assert!(!form.redraw(&mut feed));
+        assert!(form.got.is_empty() && form.drawn.is_empty());
+
         // The subscription's message moves the focus, inside the window. The
-        // engine is idle, so nothing it typed ends.
+        // engine follows the caret, so the session ends with the composition
+        // it holds, which is dropped.
         let fed = operate(&mut feed, &mut queue);
         assert!(!fed.answer && fed.edits.is_empty());
-        assert!(!feed.follows());
+        assert!(feed.follows());
+        assert_eq!(feed.abandon(&mut queue), Some(1));
         form.focus_next();
         feed.refocused();
 
-        // The keyboard composes the password, inside the window: held back,
-        // until the password field's redraw, which the move asks for.
+        // The keyboard composes the password in its new generation, inside the
+        // window: held back, until the password field's redraw, which the move
+        // asks for.
         advance(Duration::from_millis(30));
-        queue.extend([state("p", true), state("pw", true)]);
+        queue.extend([state_in(1, "p", true), state_in(1, "pw", true)]);
         let fed = drain(&mut feed, &mut queue);
         assert!(fed.edits.is_empty());
 
@@ -1827,6 +1846,88 @@ mod tests {
 
         assert_eq!(form.fields, ["sam", "pw"]);
         assert!(form.got.is_empty() && form.drawn.is_empty());
+    }
+
+    #[test]
+    fn a_composition_the_keyboard_finishes_before_a_redraw_is_committed_once() {
+        // The application's turn after a Tab moves the focus to a password
+        // field. The keyboard composes "pw" in it before any redraw decides
+        // the purpose, then finishes the composition, which reports "pw" as
+        // text with no composing region (`finishComposingText`). The text
+        // reaches the field once, and the redraw that decides afterwards has
+        // nothing left to give it.
+        let mut feed = Feed::new();
+        let mut form = Form {
+            secure: [false, true],
+            ..Form::default()
+        };
+        let mut queue =
+            VecDeque::from([state("sam", false), key(KEYCODE_TAB), rebase()]);
+        assert!(!form.redraw(&mut feed));
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.answer);
+        form.handle(&fed.edits);
+
+        // The turn moves the focus, and the keyboard composes "pw".
+        let fed = operate(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty());
+        form.focus_next();
+        feed.refocused();
+
+        feed.resume();
+        queue.push_back(state("pw", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty());
+
+        // The keyboard finishes the composition: the text is committed, with
+        // the preedit it held cleared, and reaches the field that has the
+        // focus once.
+        queue.push_back(state("pw", false));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [clear(), commit("pw")]);
+        form.handle(&fed.edits);
+
+        // The redraw decides the purpose, and nothing is given again.
+        assert!(!form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+        assert_eq!(form.fields, ["sam", "pw"]);
+        assert!(form.got.is_empty() && form.drawn.is_empty());
+    }
+
+    #[test]
+    fn a_window_that_is_not_drawn_is_asked_for_no_redraw() {
+        // A window without pixels, a zero size while it is resized or hidden,
+        // runs no redraw that decides. A composition held back in it is asked
+        // for no redraw, so the loop does not wake for it again and again. The
+        // size coming back redraws the window, and that redraw decides.
+        let mut feed = Feed::new();
+        let mut form = Form::default();
+        let mut queue =
+            VecDeque::from([state("hi", false), key(KEYCODE_ENTER), rebase()]);
+
+        let fed = drain(&mut feed, &mut queue);
+        form.handle(&fed.edits);
+        feed.resume();
+
+        // The window's end has passed with a composition held.
+        advance(SETTLE * 2);
+        queue.push_back(state("h", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.edits.is_empty());
+
+        assert_eq!(feed.settle_at(false), None);
+        advance(SETTLE);
+        assert_eq!(feed.settle_at(false), None);
+
+        // Drawn again, the request is at once, and the redraw decides it.
+        assert_eq!(feed.settle_at(true), Some(now()));
+        assert!(form.redraw(&mut feed));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [preedit("h")]);
+        form.handle(&fed.edits);
+        assert_eq!(form.got, [(0, "h".to_owned())]);
     }
 
     #[test]
@@ -1843,24 +1944,24 @@ mod tests {
         let turn = now();
 
         // Nothing is held: nothing to wait for.
-        assert_eq!(feed.settle_at(), None);
+        assert_eq!(feed.settle_at(true), None);
 
         // The keyboard composes inside the window: the redraw is asked for at
         // its end, and that stays the request as time passes in the window.
         queue.push_back(state("h", true));
         let fed = drain(&mut feed, &mut queue);
         assert!(fed.edits.is_empty());
-        assert_eq!(feed.settle_at(), Some(turn + SETTLE));
+        assert_eq!(feed.settle_at(true), Some(turn + SETTLE));
 
         advance(Duration::from_millis(60));
-        assert_eq!(feed.settle_at(), Some(turn + SETTLE));
+        assert_eq!(feed.settle_at(true), Some(turn + SETTLE));
 
         // At the window's end the request is due: the redraw decides, and
         // nothing is held any more.
         advance(Duration::from_millis(40));
-        assert_eq!(feed.settle_at(), Some(now()));
+        assert_eq!(feed.settle_at(true), Some(now()));
         assert!(form.redraw(&mut feed));
-        assert_eq!(feed.settle_at(), None);
+        assert_eq!(feed.settle_at(true), None);
     }
 
     #[test]
@@ -1881,16 +1982,16 @@ mod tests {
         queue.push_back(state("h", true));
         let fed = drain(&mut feed, &mut queue);
         assert!(fed.edits.is_empty());
-        assert_eq!(feed.settle_at(), Some(now()));
+        assert_eq!(feed.settle_at(true), Some(now()));
 
         // A tap or a focus move asks for the redraw itself, so the shell asks
         // for none.
         feed.refocused();
-        assert_eq!(feed.settle_at(), None);
+        assert_eq!(feed.settle_at(true), None);
 
         // The session's end drops the hold: nothing to wait for either.
         let _ = feed.abandon(&mut queue);
-        assert_eq!(feed.settle_at(), None);
+        assert_eq!(feed.settle_at(true), None);
     }
 
     #[test]
