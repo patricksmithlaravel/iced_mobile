@@ -14,7 +14,7 @@
 //!   the gates, the dist directory and `icm verify`. Their real-host runs
 //!   are the CI jobs of `.github/workflows/icm-desktop.yml`.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -656,7 +656,7 @@ fn a_signing_keychain_outside_the_search_list_is_named_on_macos() {
     );
     assert_eq!(
         error["fix"]["commands"],
-        json!([
+        serde_json::json!([
             format!(
                 "security list-keychains -d user -s {login} {}",
                 keychain.display()
@@ -814,7 +814,7 @@ fn a_dmg_signed_outside_the_search_list_is_named_on_macos() {
     );
     assert_eq!(
         error["fix"]["commands"],
-        json!([
+        serde_json::json!([
             format!(
                 "security list-keychains -d user -s {login} {}",
                 keychain.display()
