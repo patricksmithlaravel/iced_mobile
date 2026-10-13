@@ -25,7 +25,11 @@
 //! 6. `xattr -cr`, then `codesign --force --options runtime` with the
 //!    identity (a secure timestamp for a Developer ID) and the
 //!    entitlements `[app.permissions]` needs; a codesign that waits two
-//!    minutes is `macos.sign.keychain_prompt` (the owner's);
+//!    minutes is `macos.sign.keychain_prompt` (the owner's); on macOS 26
+//!    codesign finds no identity in a signing keychain that is outside the
+//!    user's keychain search list, which is
+//!    `macos.sign.keychain_not_in_search_list` (the owner's, and icm never
+//!    changes the list: [`crate::keychain`]);
 //! 7. gates: `macos.sign.verify` (`codesign --verify --strict --deep`),
 //!    `macos.hardened_runtime` (`codesign -d` shows the `runtime` flag),
 //!    and Gatekeeper's verdict explained (INFO `macos.gatekeeper`: spctl
@@ -71,6 +75,7 @@ use crate::catalogue::CheckId;
 use crate::cli::{ReleaseTarget, SignMode};
 use crate::context::Ctx;
 use crate::error::{Check, Evidence, IcmError, Result, Status};
+use crate::keychain;
 use crate::plan::{Plan, Step};
 use crate::platform::ios_sim::macho;
 use crate::process::{Cmd, Outcome};
@@ -127,11 +132,23 @@ fn dsym_zip_name(rel: &Release) -> String {
 /// The notices' path inside the `.app`.
 pub const NOTICES_IN_APP: &str = "Contents/Resources/THIRD_PARTY_NOTICES.txt";
 
-/// codesign, with a timeout read as a keychain prompt.
+/// codesign, with a timeout read as a keychain prompt, and `no identity
+/// found` for a signing keychain outside the user's search list read as
+/// `macos.sign.keychain_not_in_search_list` (see [`crate::keychain`]).
 fn codesign(ctx: &Ctx, name: &str, cmd: &Cmd, signer: &Signer) -> Result<()> {
     match ctx.step(name, cmd) {
         Ok(outcome) if outcome.success() => Ok(()),
-        Ok(outcome) => Err(ctx.step_failure(name, CheckId::ToolFailed, &outcome)),
+        Ok(outcome) => {
+            let identity = signer.identity.as_ref().map_or("", |i| i.sha1.as_str());
+            Err(keychain::outside_search_list(
+                ctx,
+                CheckId::MacosSignKeychainNotInSearchList,
+                signer.keychain.as_deref(),
+                identity,
+                &outcome,
+            )
+            .unwrap_or_else(|| ctx.step_failure(name, CheckId::ToolFailed, &outcome)))
+        }
         Err(error) if error.id == CheckId::StepTimeout.id() && signer.identity.is_some() => {
             Err(IcmError::new(
                 CheckId::MacosSignKeychainPrompt,

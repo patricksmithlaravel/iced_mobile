@@ -5,6 +5,7 @@
 use crate::catalogue::CheckId;
 use crate::context::Ctx;
 use crate::error::{Evidence, IcmError, Result};
+use crate::keychain;
 use crate::process::{Cmd, Outcome};
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -30,6 +31,9 @@ pub const AD_HOC: &str = "-";
 
 /// `codesign --force --sign <identity> [--entitlements <plist>]
 /// --timestamp=none --generate-entitlement-der [--keychain <kc>] <App.app>`.
+/// On macOS 26 `--keychain` only narrows codesign's search of the user's
+/// keychain search list, so the keychain must be in that list too (see
+/// [`crate::keychain`]).
 pub fn sign_cmd(
     app: &Path,
     identity: &str,
@@ -67,7 +71,10 @@ pub fn clear_xattrs(ctx: &Ctx, app: &Path) -> Result<()> {
 }
 
 /// Signs the bundle. A codesign that outlives the watchdog is waiting for
-/// keychain access: `ios.sign.keychain_prompt` (exit 9).
+/// keychain access: `ios.sign.keychain_prompt` (exit 9). A codesign that
+/// finds no identity while `keychain` is outside the user's keychain search
+/// list is `ios.sign.keychain_not_in_search_list` (exit 9); the list is
+/// never changed.
 pub fn sign(
     ctx: &Ctx,
     app: &Path,
@@ -96,6 +103,15 @@ pub fn sign(
         Err(error) => return Err(error),
     };
     if !outcome.success() {
+        if let Some(error) = keychain::outside_search_list(
+            ctx,
+            CheckId::IosSignKeychainNotInSearchList,
+            keychain,
+            identity,
+            &outcome,
+        ) {
+            return Err(error);
+        }
         let text = outcome.stderr_text();
         let id = if text.contains("no identity found") || text.contains("ambiguous") {
             CheckId::IosSignNoIdentity

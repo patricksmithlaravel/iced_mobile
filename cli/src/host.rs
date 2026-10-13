@@ -23,8 +23,10 @@ pub struct HostConfig {
     /// The Chrome (or Chromium) executable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chrome: Option<String>,
-    /// A keychain file Apple signing searches instead of the user's
-    /// keychain search list (a CI keychain); `ICM_KEYCHAIN` overrides it.
+    /// A keychain file Apple signing searches for identities (a CI
+    /// keychain); `ICM_KEYCHAIN` overrides it. codesign on macOS 26 also
+    /// needs it in the user's keychain search list, which icm reports when
+    /// it is missing and never changes ([`crate::keychain`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_keychain: Option<String>,
     /// `[ios]`.
@@ -73,8 +75,9 @@ impl HostConfig {
     /// The keychain Apple signing searches: `ICM_KEYCHAIN`, else
     /// `signing_keychain`; `None` means the user's keychain search list.
     /// Release pipelines pass it to `security find-identity` and
-    /// `codesign --keychain`, so a CI or test keychain never has to join
-    /// the search list.
+    /// `codesign --keychain`. codesign on macOS 26 searches only the user's
+    /// search list, so a keychain outside it fails there with `no identity
+    /// found` ([`crate::keychain`]).
     pub fn signing_keychain(&self, env: &crate::tools::Env) -> Option<PathBuf> {
         env.var("ICM_KEYCHAIN").map(PathBuf::from).or_else(|| {
             self.signing_keychain

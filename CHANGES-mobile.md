@@ -429,6 +429,21 @@ Text input on Android, and secure fields on Android and iOS:
   `tool.failed`. The two `plutil -lint` details and the
   Android lifecycle step's failure detail say the status when their output is empty.
   `docs/icm/DESIGN.md` Appendix D item 23.
+- **icm:** signing keychains outside the user's keychain search list. On macOS 26 codesign needs
+  the signing keychain (host.toml `signing_keychain` or `ICM_KEYCHAIN`) in the user's keychain
+  search list: codesign searches only that list, and `--keychain` only narrows the search, so a
+  keychain outside it fails with `no identity found` although `security find-identity` lists the
+  identity. The docs said a CI or test keychain never has to join the list; that was wrong for
+  macOS 26. Now, when codesign refuses that way and the keychain is not listed, the release stops
+  with `macos.sign.keychain_not_in_search_list` or `ios.sign.keychain_not_in_search_list` (exit 9,
+  the owner's). Its fix gives the `security list-keychains -d user -s` commands that append the
+  keychain for the release and put the list back. icm reads the list only after codesign refused,
+  and never changes it: it reports the problem and gives the commands. No release checks the list
+  before codesign runs, so a codesign that finds the identity outside it (macOS 27) is unaffected.
+  Before, the macOS failure was `tool.failed` and the iOS one `ios.sign.no_identity`, with no hint.
+  The failure keeps its own id when the keychain is listed, when no keychain is set, when codesign
+  refuses for another reason, and when the list cannot be read or is empty. A list read that runs
+  out of its 30 s limit also WARNs `step.timeout`, as the other optional probes do.
 
 ## Changes in v0.14.1-mobile.2
 

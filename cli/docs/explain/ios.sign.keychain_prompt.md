@@ -16,5 +16,6 @@ tools access once, with the keychain's password:
 security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" ci.keychain-db
 ```
 
-and names the keychain in host.toml (`signing_keychain`), so it never joins
-the user's search list.
+and names the keychain in host.toml (`signing_keychain`). On macOS 26 that
+keychain must also be in the user's keychain search list, or codesign finds
+no identity and never reaches the dialog (`ios.sign.keychain_not_in_search_list`).
