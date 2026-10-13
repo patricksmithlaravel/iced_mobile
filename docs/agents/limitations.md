@@ -272,29 +272,31 @@ this file in the commit that fixes or finds a limitation.
     may suggest and learn words, and what it composed of it reaches the password
     field as typed text, never drawn in clear. A hardware keyboard's Enter, Tab
     and Escape count the same way, and one that waited behind a keyboard key's
-    turn holds even a focus that turn moved, until a tap, since its own message
-    may still move the focus. The app may move the focus after such a key later
-    still, from a subscription (`keyboard::listen`, which is how an app takes
-    Tab: `text_input` ignores it) or a task, and that message arrives after the
-    event loop turned again. So no redraw decides which field a composition
-    belongs to from the key alone: what the keyboard composes after the key
-    shows in no field, the one that has the focus included, until a tap on that
-    field or a focus move from code has let a redraw decide (the underline
-    appears only then). What the keyboard commits reaches the field that has the
-    focus at once. A composition the keyboard still has open when the
-    subscription's focus move ends that session is dropped with it, as the
-    focus-move bullet above says: a password it composes after such a Tab is
-    never committed to either field. A password it commits is not: a commit
-    reaches the field that has the focus, where it is drawn in clear and stays
-    until that field is cleared, when the keyboard sent it in the same burst as
-    the Tab, before the focus move arrived. Commits are not held back: holding
-    them would hide the text a field gets after an Enter, which is most of what
-    the keyboard types, and the shell cannot tell a password from other
-    committed text. When the key leaves no field with the focus (Escape
-    unfocuses a `text_input` or a `text_editor`, an `on_submit` may remove the
-    field or unfocus it), what the keyboard sent right after it is dropped. A
-    line break or tab inside longer committed text (a suggestion, a paste from
-    the keyboard's clipboard) is dropped.
+    turn holds even a focus that turn moved, until a tap or until the session
+    ends, since its own message may still move the focus. The app may move the
+    focus after such a key later still, from a subscription (`keyboard::listen`,
+    which is how an app takes Tab: `text_input` ignores it) or a task, and that
+    message arrives after the event loop turned again. So no redraw decides
+    which field a composition belongs to from the key alone: what the keyboard
+    composes after the key shows in no field, the one that has the focus
+    included, until a tap on that field or a focus move from code has let a
+    redraw decide. The keyboard's session ends the hold with it: a session that
+    starts again for the field, after the app's turn, gives its purpose before
+    the keyboard shows, so the underline appears at once then. What the keyboard
+    commits reaches the field that has the focus at once. A composition the
+    keyboard still has open when the subscription's focus move ends that session
+    is dropped with it, as the focus-move bullet above says: a password it
+    composes after such a Tab is never committed to either field. A password it
+    commits is not: a commit reaches the field that has the focus, where it is
+    drawn in clear and stays until that field is cleared, when the keyboard sent
+    it in the same burst as the Tab, before the focus move arrived. Commits are
+    not held back: holding them would hide the text a field gets after an Enter,
+    which is most of what the keyboard types, and the shell cannot tell a
+    password from other committed text. When the key leaves no field with the
+    focus (Escape unfocuses a `text_input` or a `text_editor`, an `on_submit`
+    may remove the field or unfocus it), what the keyboard sent right after it
+    is dropped. A line break or tab inside longer committed text (a suggestion,
+    a paste from the keyboard's clipboard) is dropped.
   - On iOS, Return and Tab count only when UIKit inserts them alone, as
     the Return and Tab keys do (`"\r\n"` is one Return). A line break or
     tab inside longer inserted text (dictation, a keyboard suggestion, a

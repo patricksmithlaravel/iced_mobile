@@ -67,14 +67,17 @@
 //! application may move the focus later still, in a subscription or a task
 //! whose message arrives after the event loop turned again. The redraw that
 //! follows such a key therefore does not decide: the field that has the focus
-//! then may be the one the focus moves to, and a password field's
-//! composition must not show in the field it leaves. The composition waits
-//! until a tap on the field that has the focus, or an operation that moves
-//! it, has decided the purpose. A focus the application moves in its turn
-//! after a keyboard key is decided at the resume's redraw. A hardware key
-//! that waited behind a keyboard key's turn ends that decision when the event
-//! loop replays it: its own message may still move the focus, so a focus the
-//! turn moved waits for a tap too.
+//! then may be the one the focus moves to, and a password field's composition
+//! must not show in the field it leaves. The composition waits until a tap on
+//! the field that has the focus, or an operation that moves it, has decided
+//! the purpose, or until the keyboard's session ends: a session that starts
+//! again for the field, after the application's turn, gives its purpose
+//! before the keyboard shows, so nothing is left to wait for
+//! ([`Feed::abandon`]). A focus the application moves in its turn after a
+//! keyboard key is decided at the resume's redraw. A hardware key that waited
+//! behind a keyboard key's turn ends that decision when the event loop
+//! replays it: its own message may still move the focus, so a focus the turn
+//! moved waits for a tap or for the session's end, too.
 //!
 //! A field that becomes a password field while the engine shows a
 //! composition in it (the application made it secure) gets the
@@ -145,7 +148,8 @@ pub(crate) struct Feed {
     /// the application's turn began, or since the key that yields came from
     /// hardware. Without it, the redraw after a key that yields holds the
     /// composition back ([`Feed::unknown`]), since the application may still
-    /// move the focus, in a subscription, after the redraw.
+    /// move the focus, in a subscription, after the redraw. The session's end
+    /// clears it too ([`Feed::abandon`]), with the hold.
     redraw_decides: bool,
 }
 
@@ -343,11 +347,14 @@ impl Feed {
     /// generation for `Keyboard.reset`, when the Java side may hold text
     /// ([`Engine::abandon`]).
     ///
-    /// The session's end clears the hold too ([`Feed::unknown`]): nothing
+    /// The session's end clears the hold too ([`Feed::unknown`]) and the
+    /// decision a redraw may still make ([`Feed::redraw_decides`]): nothing
     /// queued survives it, and the next session gives the engine the purpose
     /// of the field it shows the keyboard for before the keyboard reports
-    /// anything ([`Feed::secure`]). A hold left from this session would keep
-    /// that field's compositions back for no reason.
+    /// anything ([`Feed::secure`]). A hold or a pending decision left from
+    /// this session would outlive it, and the next session's field already
+    /// has its purpose before the keyboard shows, so the hold would keep its
+    /// compositions back for no reason.
     pub(crate) fn abandon(&mut self, queue: &mut impl Queue) -> Option<i32> {
         let mut dropped = queue.take();
         self.pending.clear();
@@ -1722,5 +1729,135 @@ mod tests {
         assert!(!form.redraw(&mut feed));
         assert_eq!(form.got, [(1, "b".to_owned())]);
         assert_eq!(form.drawn, [(1, "b".to_owned())]);
+    }
+
+    /// A tap on a field while the keyboard is hidden, in the order the
+    /// session runs it: `touched` calls `refocused` first, then `enable`
+    /// starts the session with `abandon`, which clears the flags that tap
+    /// set, and gives the field's purpose with `secure` before the keyboard
+    /// shows. The composition after the tap shows at once, or is committed
+    /// in a password field.
+    fn a_tap_while_the_keyboard_is_hidden(later_secure: bool) {
+        let mut feed = Feed::new();
+        let mut form = Form {
+            secure: [false, later_secure],
+            ..Form::default()
+        };
+
+        // The first field's keyboard types "sam" and Escape, which unfocuses
+        // the field: the hold stays on, and the session ends with it.
+        assert!(!form.redraw(&mut feed));
+        let mut queue = VecDeque::from([
+            state("sam", false),
+            key(KEYCODE_ESCAPE),
+            rebase(),
+            state("p", true),
+        ]);
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.answer);
+        form.handle(&fed.edits);
+        feed.resume();
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty());
+        assert_eq!(feed.abandon(&mut queue), Some(1));
+        assert!(queue.is_empty());
+
+        // The tap focuses the second field while the keyboard is hidden. The
+        // redraw starts the session: nothing is queued, so its `abandon`
+        // returns nothing, and the field's purpose is given before the
+        // keyboard shows.
+        form.focus_next();
+        feed.refocused();
+        assert_eq!(feed.abandon(&mut queue), None);
+        assert!(!form.redraw(&mut feed));
+
+        // The keyboard, shown for the field, composes "b" and then "bc".
+        queue.push_back(state_in(1, "b", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(
+            fed.edits,
+            if later_secure {
+                vec![commit("b")]
+            } else {
+                vec![preedit("b")]
+            }
+        );
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+
+        queue.push_back(state_in(1, "bc", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(
+            fed.edits,
+            if later_secure {
+                vec![commit("c")]
+            } else {
+                vec![preedit("bc")]
+            }
+        );
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+
+        if later_secure {
+            assert_eq!(form.fields, ["sam", "bc"]);
+            assert!(form.got.is_empty() && form.drawn.is_empty());
+        } else {
+            assert_eq!(form.fields, ["sam", ""]);
+            assert_eq!(form.got, [(1, "b".to_owned()), (1, "bc".to_owned())]);
+            assert_eq!(form.drawn, [(1, "b".to_owned()), (1, "bc".to_owned())]);
+        }
+    }
+
+    #[test]
+    fn a_normal_field_tapped_while_the_keyboard_is_hidden_shows_it() {
+        a_tap_while_the_keyboard_is_hidden(false);
+    }
+
+    #[test]
+    fn a_password_field_tapped_while_the_keyboard_is_hidden_commits_it() {
+        a_tap_while_the_keyboard_is_hidden(true);
+    }
+
+    #[test]
+    fn a_session_started_again_for_the_same_field_shows_at_once() {
+        let mut feed = Feed::new();
+        let mut form = Form::default();
+
+        // The field's keyboard types "sam" and Escape, which unfocuses it: the
+        // hold stays on, and the session ends with it.
+        assert!(!form.redraw(&mut feed));
+        let mut queue = VecDeque::from([
+            state("sam", false),
+            key(KEYCODE_ESCAPE),
+            rebase(),
+            state("p", true),
+        ]);
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(fed.answer);
+        form.handle(&fed.edits);
+        feed.resume();
+
+        let fed = drain(&mut feed, &mut queue);
+        assert!(!fed.answer && fed.edits.is_empty());
+        assert_eq!(feed.abandon(&mut queue), Some(1));
+        assert!(queue.is_empty());
+
+        // The field asks for the keyboard again, with no tap or focus move
+        // reported to the feed. Its redraw starts a session: `secure` gives
+        // the purpose before the keyboard shows, so the hold has nothing left
+        // to wait for, and the composition shows at once.
+        assert_eq!(feed.abandon(&mut queue), None);
+        assert!(!form.redraw(&mut feed));
+
+        queue.push_back(state_in(1, "p", true));
+        let fed = drain(&mut feed, &mut queue);
+        assert_eq!(fed.edits, [preedit("p")]);
+        form.handle(&fed.edits);
+        assert!(!form.redraw(&mut feed));
+        assert_eq!(form.got, [(0, "p".to_owned())]);
+        assert_eq!(form.drawn, [(0, "p".to_owned())]);
     }
 }

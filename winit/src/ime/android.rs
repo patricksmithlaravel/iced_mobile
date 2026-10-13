@@ -38,6 +38,9 @@
 //!   a focus move from code or a tap on the field has come after the key:
 //!   the application may still move the focus in a subscription (see
 //!   `feed`), so the composition otherwise waits for a tap or a focus move.
+//!   The session's end ends that hold (see [`Feed::abandon`]): the session
+//!   that starts again for the field, after the application's turn, gives its
+//!   purpose before the keyboard shows.
 //! - [`disable`] runs when no field asks any more. The field has lost the
 //!   focus, so what the keyboard typed and composes there is dropped, as
 //!   desktop input methods drop a composition then: the queue is emptied,
