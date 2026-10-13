@@ -6,10 +6,25 @@
 //! the server.
 
 use super::Toolset;
+use crate::catalogue::CheckId;
 use crate::error::IcmError;
 use crate::process::{self, Cmd, Outcome};
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long a device that adb lists but does not answer gets before icm
+/// calls it gone. adb lists an emulator offline for a moment after a heavy
+/// step (the CI runner's CPU-only emulator did so right after `am kill`), and
+/// such a device answers again within this wait. A run's `--timeout` clips it.
+pub const ANSWER_WAIT: Duration = Duration::from_secs(30);
+
+/// The pause between two asks of a device that does not answer yet.
+pub const ANSWER_POLL: Duration = Duration::from_secs(1);
+
+/// The longest one read of adb takes in the wait: an ask of the device's
+/// clock and the closing listing. Each gets less when less of the wait (or
+/// of the run's `--timeout`) is left.
+const ASK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// One line of `adb devices -l`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +88,72 @@ pub fn quote(value: &str) -> String {
 pub fn quick(cmd: Cmd, timeout: Duration) -> Option<Outcome> {
     process::run(&cmd.timeout(timeout), None, None).ok()
 }
+
+/// When a wait of `wait` from `now` ends, and whether the run's `--timeout`
+/// (`deadline`) ends it first (then `true`).
+fn wait_end(now: Instant, wait: Duration, deadline: Option<Instant>) -> (Instant, bool) {
+    let until = now + wait;
+    match deadline {
+        Some(deadline) if deadline < until => (deadline, true),
+        _ => (until, false),
+    }
+}
+
+/// The instant the answer waits measure from.
+#[cfg(not(test))]
+fn now() -> Instant {
+    Instant::now()
+}
+
+/// Pauses between two asks of a device that does not answer.
+#[cfg(not(test))]
+fn pause(duration: Duration) {
+    std::thread::sleep(duration);
+}
+
+// Under test the waits run on a clock that only [`pause`] moves. Each
+// thread's clock starts at the real instant it is first read, so a wait's
+// asks and its end are exact and take no real time.
+#[cfg(test)]
+thread_local! {
+    static CLOCK: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn now() -> Instant {
+    CLOCK.with(|clock| match clock.get() {
+        Some(now) => now,
+        None => {
+            let now = Instant::now();
+            clock.set(Some(now));
+            now
+        }
+    })
+}
+
+#[cfg(test)]
+fn pause(duration: Duration) {
+    let next = now() + duration;
+    CLOCK.with(|clock| clock.set(Some(next)));
+}
+
+// Under test, the timeouts the wait gives its asks ("ask") and its closing
+// listing ("listing"), in the order they run. A fake adb answers at once, so
+// these are what the tests check the bound by.
+#[cfg(test)]
+thread_local! {
+    static TIMEOUTS: std::cell::RefCell<Vec<(&'static str, Duration)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Notes the timeout one of the wait's reads was given (under test only).
+#[cfg(test)]
+fn note_timeout(read: &'static str, timeout: Duration) {
+    TIMEOUTS.with(|timeouts| timeouts.borrow_mut().push((read, timeout)));
+}
+
+#[cfg(not(test))]
+fn note_timeout(_read: &'static str, _timeout: Duration) {}
 
 /// adb bound to one device.
 #[derive(Clone, Debug)]
@@ -141,11 +222,126 @@ impl Adb {
 
     /// The device clock as `seconds.nanoseconds` (the log mark).
     pub fn epoch(&self) -> Option<String> {
-        let text = self.shell_text("date +%s.%N", Duration::from_secs(15))?;
+        self.epoch_within(ASK_TIMEOUT)
+    }
+
+    /// [`Adb::epoch`], giving the ask at most `timeout`.
+    fn epoch_within(&self, timeout: Duration) -> Option<String> {
+        let text = self.shell_text("date +%s.%N", timeout)?;
         let mark = text.lines().next()?.trim().to_string();
         // toybox prints a literal %N on very old images.
         let mark = mark.replace(".%N", ".0");
         mark.parse::<f64>().ok().map(|_| mark)
+    }
+
+    /// The device clock once the device answers `date`, for the lifecycle
+    /// suite's step probe and its restore. adb lists a device offline for a
+    /// moment, and a single ask then would end the run as if the device were
+    /// gone. An unanswered ask is repeated every [`ANSWER_POLL`] for up to
+    /// [`ANSWER_WAIT`], or until the run's `--timeout` (`deadline`) when that
+    /// comes first. An ask is given no more time than the wait has left (at
+    /// most [`ASK_TIMEOUT`]), and no ask is made once none is left. A device
+    /// still silent then is `android.device.none`.
+    pub fn answering(&self, deadline: Option<Instant>) -> Result<String, IcmError> {
+        let (until, clipped) = wait_end(now(), ANSWER_WAIT, deadline);
+        self.answer_until(until, clipped, deadline)
+    }
+
+    /// [`Adb::answering`] with its end given. `clipped` says that the run's
+    /// `--timeout` (`deadline`) ends the wait, which the error says.
+    fn answer_until(
+        &self,
+        until: Instant,
+        clipped: bool,
+        deadline: Option<Instant>,
+    ) -> Result<String, IcmError> {
+        loop {
+            let left = until.saturating_duration_since(now());
+            if left.is_zero() {
+                return Err(self.not_answering(clipped, deadline));
+            }
+            let timeout = left.min(ASK_TIMEOUT);
+            note_timeout("ask", timeout);
+            if let Some(mark) = self.epoch_within(timeout) {
+                return Ok(mark);
+            }
+            if let Some(signal) = crate::signals::pending() {
+                return Err(crate::output::interrupted(signal));
+            }
+            pause(ANSWER_POLL.min(until.saturating_duration_since(now())));
+        }
+    }
+
+    /// Whether adb lists this device now, read for at most `timeout`:
+    /// `Some(false)` when it lists other devices only, `None` when adb's
+    /// listing cannot be read in time.
+    fn listed(&self, timeout: Duration) -> Option<bool> {
+        // The tools' environment (JAVA_HOME, ANDROID_HOME, PATH, ...) stays
+        // with the base; its `-s <serial>` goes, since the listing is of all
+        // the devices.
+        let base = Cmd {
+            args: Vec::new(),
+            ..self.base.clone()
+        };
+        note_timeout("listing", timeout);
+        let outcome = quick(base.args(["devices", "-l"]), timeout)?;
+        outcome.success().then(|| {
+            parse_devices(&outcome.stdout_text())
+                .iter()
+                .any(|device| device.serial == self.serial)
+        })
+    }
+
+    /// The error for a device that does not answer `date` once the wait is
+    /// over. The detail says what adb lists now, and the fix fits a device
+    /// that is there but silent: the catalogue's default (create the managed
+    /// emulator, or connect a device) does not. The listing gets no more time
+    /// than the run's `--timeout` has left, and none when that is gone: the
+    /// detail then says only that the device does not answer `date`.
+    fn not_answering(&self, clipped: bool, deadline: Option<Instant>) -> IcmError {
+        let serial = &self.serial;
+        let when = if clipped {
+            "before the --timeout ran out".to_string()
+        } else {
+            format!("within {} s", ANSWER_WAIT.as_secs())
+        };
+        let left = deadline.map(|deadline| deadline.saturating_duration_since(now()));
+        let listing = match left {
+            Some(left) if left.is_zero() => None,
+            Some(left) => self.listed(left.min(ASK_TIMEOUT)),
+            None => self.listed(ASK_TIMEOUT),
+        };
+        let detail = match listing {
+            Some(true) => format!("{serial} is listed by adb but does not answer `date` {when}"),
+            Some(false) => {
+                format!("{serial} is not listed by adb and does not answer `date` {when}")
+            }
+            None => format!("{serial} does not answer `date` {when}"),
+        };
+        let check = format!("adb -s {serial} shell date");
+        if serial.starts_with("emulator-") {
+            // `--shutdown` stops only an emulator icm booted for the project
+            // or a managed `icm-*` AVD; any other one is quit by hand.
+            let kill = format!("adb -s {serial} emu kill");
+            IcmError::new(CheckId::AndroidDeviceNone, detail).fix(
+                format!(
+                    "Check that the device answers `{check}`. If it does not, restart it: `icm stop android --shutdown` stops only an emulator icm booted for this project or a managed icm-* AVD, so quit any other emulator or run `{kill}`, then run `icm run android`."
+                ),
+                &[
+                    check.as_str(),
+                    kill.as_str(),
+                    "icm stop android --shutdown",
+                    "icm run android",
+                ],
+            )
+        } else {
+            IcmError::new(CheckId::AndroidDeviceNone, detail).fix(
+                format!(
+                    "Check that the device answers `{check}`. If it does not, restart it: reconnect its USB cable and allow USB debugging, then run `icm run android`."
+                ),
+                &[check.as_str(), "icm run android"],
+            )
+        }
     }
 
     /// The emulator's AVD name (`adb emu avd name`), for emulators.
@@ -479,5 +675,349 @@ mod tests {
         assert_eq!(input_text_arg("hello world"), "hello%sworld");
         assert_eq!(input_text_arg("it's"), "'it'\\''s'");
         assert_eq!(input_text_arg("a&b"), "'a&b'");
+    }
+
+    /// The listing the fake adb gives its emulator: adb lists it offline.
+    const LISTED: Option<&str> = Some("emulator-5580 offline");
+
+    /// A device adb lists offline for a moment answers the ask after the
+    /// moment, and the wait takes the two seconds of its two unanswered asks.
+    #[test]
+    fn a_device_listed_offline_for_a_moment_answers_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let adb = fake::device(dir.path(), 2, LISTED, true);
+        let start = now();
+        assert_eq!(adb.answering(None).unwrap(), "1791334000.123456789");
+        assert_eq!(fake::asks_of(dir.path()), 3);
+        assert_eq!(now() - start, Duration::from_secs(2));
+    }
+
+    /// The timeouts the wait gave its reads since the last call.
+    fn take_timeouts() -> Vec<(&'static str, Duration)> {
+        TIMEOUTS.with(|timeouts| std::mem::take(&mut *timeouts.borrow_mut()))
+    }
+
+    /// The wait is 30 s through the call `answering` makes: a device that
+    /// stays offline is asked once a second, the last time within the wait's
+    /// last second, then is gone with the restart fix. A wait of any other
+    /// length asks another number of times, so this fails when the default
+    /// stops being used.
+    #[test]
+    fn the_default_wait_is_thirty_seconds_and_ends_with_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let adb = fake::device(dir.path(), u32::MAX, LISTED, true);
+        take_timeouts();
+        let start = now();
+        let error = adb.answering(None).unwrap_err();
+        assert_eq!(now() - start, ANSWER_WAIT);
+        assert_eq!(fake::asks_of(dir.path()), 30);
+        let timeouts = take_timeouts();
+        assert_eq!(timeouts.first(), Some(&("ask", ASK_TIMEOUT)));
+        assert_eq!(timeouts.last(), Some(&("listing", ASK_TIMEOUT)));
+        assert_eq!(
+            timeouts[timeouts.len() - 2],
+            ("ask", Duration::from_secs(1)),
+            "the last ask is given the wait's last second"
+        );
+        assert_eq!(error.id, "android.device.none");
+        assert_eq!(
+            error.detail,
+            "emulator-5580 is listed by adb but does not answer `date` within 30 s"
+        );
+        assert!(
+            error.fix.summary.contains("restart it"),
+            "{}",
+            error.fix.summary
+        );
+        for command in [
+            "adb -s emulator-5580 shell date",
+            "adb -s emulator-5580 emu kill",
+            "icm stop android --shutdown",
+            "icm run android",
+        ] {
+            assert!(
+                error.fix.commands.iter().any(|c| c == command),
+                "{command} is missing: {:?}",
+                error.fix.commands
+            );
+        }
+        assert!(
+            !error.fix.commands.iter().any(|c| c.contains("doctor")),
+            "the catalogue's default fix creates the managed emulator: {:?}",
+            error.fix.commands
+        );
+    }
+
+    /// The run's `--timeout` ends the wait when it comes first: five asks a
+    /// second apart, and none at the deadline, which has no time left for an
+    /// ask. The error says the `--timeout` ended the wait, and does not say
+    /// what adb lists, since the listing has no time left either.
+    #[test]
+    fn the_run_deadline_ends_the_wait_when_it_comes_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let adb = fake::device(dir.path(), u32::MAX, LISTED, true);
+        let start = now();
+        let error = adb
+            .answering(Some(start + Duration::from_secs(5)))
+            .unwrap_err();
+        assert_eq!(now() - start, Duration::from_secs(5));
+        assert_eq!(fake::asks_of(dir.path()), 5);
+        assert_eq!(
+            error.detail,
+            "emulator-5580 does not answer `date` before the --timeout ran out"
+        );
+    }
+
+    /// An ask gets no more time than the budget has left: with three seconds
+    /// left the asks are given three, two and one, never the 15 s of an ask
+    /// with the whole wait ahead, and the wait ends at the deadline.
+    #[test]
+    fn an_ask_gets_no_more_than_the_budget_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let adb = fake::device(dir.path(), u32::MAX, LISTED, true);
+        take_timeouts();
+        let start = now();
+        let error = adb
+            .answering(Some(start + Duration::from_secs(3)))
+            .unwrap_err();
+        assert_eq!(now() - start, Duration::from_secs(3));
+        assert_eq!(fake::asks_of(dir.path()), 3);
+        assert_eq!(
+            take_timeouts(),
+            [
+                ("ask", Duration::from_secs(3)),
+                ("ask", Duration::from_secs(2)),
+                ("ask", Duration::from_secs(1)),
+            ]
+        );
+        assert_eq!(
+            error.detail,
+            "emulator-5580 does not answer `date` before the --timeout ran out"
+        );
+    }
+
+    /// A run whose `--timeout` is already used up makes no ask, as the restore
+    /// does after a run that spent its budget: an ask can take its whole
+    /// timeout, so the error comes at once, and the listing is not asked
+    /// either. A deadline that is this very instant is used up too.
+    #[test]
+    fn an_expired_budget_makes_no_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let adb = fake::device(dir.path(), u32::MAX, LISTED, true);
+        take_timeouts();
+        let start = now();
+        let deadline = start + Duration::from_secs(5);
+        pause(Duration::from_secs(5));
+        let error = adb.answering(Some(deadline)).unwrap_err();
+        assert_eq!(error.id, "android.device.none");
+        assert_eq!(
+            error.detail,
+            "emulator-5580 does not answer `date` before the --timeout ran out"
+        );
+        assert_eq!(now() - start, Duration::from_secs(5));
+        assert_eq!(fake::asks_of(dir.path()), 0);
+        assert!(take_timeouts().is_empty(), "a read ran with no budget left");
+
+        let error = adb.answering(Some(now())).unwrap_err();
+        assert_eq!(error.id, "android.device.none");
+        assert_eq!(fake::asks_of(dir.path()), 0);
+        assert!(take_timeouts().is_empty(), "a read ran with no budget left");
+    }
+
+    /// The closing listing gets the budget that is left, at most its own
+    /// timeout: with one second left after the wait's 30 s, it is given one.
+    #[test]
+    fn the_closing_listing_gets_only_the_budget_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let adb = fake::device(dir.path(), u32::MAX, LISTED, true);
+        take_timeouts();
+        let start = now();
+        let error = adb
+            .answering(Some(start + Duration::from_secs(31)))
+            .unwrap_err();
+        assert_eq!(now() - start, ANSWER_WAIT);
+        assert_eq!(
+            take_timeouts().last(),
+            Some(&("listing", Duration::from_secs(1)))
+        );
+        assert_eq!(
+            error.detail,
+            "emulator-5580 is listed by adb but does not answer `date` within 30 s"
+        );
+    }
+
+    /// A deadline after the default's end does not shorten the default wait.
+    #[test]
+    fn a_later_deadline_leaves_the_default_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let adb = fake::device(dir.path(), u32::MAX, LISTED, true);
+        let start = now();
+        let error = adb
+            .answering(Some(start + Duration::from_secs(60)))
+            .unwrap_err();
+        assert_eq!(now() - start, ANSWER_WAIT);
+        assert_eq!(fake::asks_of(dir.path()), 30);
+        assert!(error.detail.ends_with("within 30 s"), "{}", error.detail);
+    }
+
+    /// The detail says what adb lists when the wait ends on its own: a device
+    /// that is no longer listed is not said to be, and an unreadable listing
+    /// says nothing.
+    #[test]
+    fn the_detail_says_what_adb_lists_when_the_wait_ends() {
+        let start = now();
+        let later = Some(start + Duration::from_secs(60));
+
+        let gone_dir = tempfile::tempdir().unwrap();
+        let gone = fake::device(gone_dir.path(), u32::MAX, Some(""), true);
+        let error = gone.answering(later).unwrap_err();
+        assert_eq!(
+            error.detail,
+            "emulator-5580 is not listed by adb and does not answer `date` within 30 s"
+        );
+
+        let unreadable_dir = tempfile::tempdir().unwrap();
+        let unreadable = fake::device(unreadable_dir.path(), u32::MAX, None, true);
+        let error = unreadable.answering(later).unwrap_err();
+        assert_eq!(
+            error.detail,
+            "emulator-5580 does not answer `date` within 30 s"
+        );
+    }
+
+    /// The listing runs with the tools' environment, as every other adb
+    /// command does: a listing without it finds no SDK tools. The fake adb
+    /// lists its device only when the variable the base carries is set.
+    #[test]
+    fn the_listing_keeps_the_tools_environment() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tools = dir.path().join("platform-tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let path = tools.join("adb");
+        let script = "#!/bin/sh\n\
+            if [ \"$*\" = 'devices -l' ] && [ \"$ICM_TEST_TOOLS\" = set ]; then\n\
+              printf 'List of devices attached\\nemulator-5580 device\\n'; exit 0\n\
+            fi\n\
+            exit 1\n";
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut adb = Adb::from_program(&path, "emulator-5580");
+        assert_eq!(adb.listed(ASK_TIMEOUT), None);
+        adb.base = adb.base.env("ICM_TEST_TOOLS", "set");
+        assert_eq!(adb.listed(ASK_TIMEOUT), Some(true));
+    }
+
+    /// A phone that does not answer is fixed at its cable, and gets none of
+    /// the emulator's commands.
+    #[test]
+    fn a_silent_phone_is_fixed_at_its_cable() {
+        let dir = tempfile::tempdir().unwrap();
+        fake::device(dir.path(), u32::MAX, Some("R58M123 device"), true);
+        let phone = Adb::from_program(&dir.path().join("platform-tools/adb"), "R58M123");
+        let error = phone
+            .answering(Some(now() + Duration::from_secs(60)))
+            .unwrap_err();
+        assert_eq!(
+            error.detail,
+            "R58M123 is listed by adb but does not answer `date` within 30 s"
+        );
+        assert!(
+            error.fix.summary.contains("USB cable"),
+            "{}",
+            error.fix.summary
+        );
+        assert!(
+            !error
+                .fix
+                .commands
+                .iter()
+                .any(|c| c.contains("emu kill") || c.contains("--shutdown")),
+            "{:?}",
+            error.fix.commands
+        );
+    }
+
+    /// The run's `--timeout` clips the wait only when it comes before the
+    /// default's end, and then the clip is what ends it.
+    #[test]
+    fn the_deadline_clips_the_wait_only_when_it_comes_first() {
+        let now = Instant::now();
+        let five = Duration::from_secs(5);
+        assert_eq!(wait_end(now, ANSWER_WAIT, None), (now + ANSWER_WAIT, false));
+        assert_eq!(
+            wait_end(now, ANSWER_WAIT, Some(now + Duration::from_secs(60))),
+            (now + ANSWER_WAIT, false)
+        );
+        assert_eq!(
+            wait_end(now, ANSWER_WAIT, Some(now + five)),
+            (now + five, true)
+        );
+    }
+}
+
+/// Fake adbs for the tests of the android module.
+#[cfg(test)]
+pub(in crate::android) mod fake {
+    use super::Adb;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    /// A fake adb at `dir/platform-tools/adb`, bound to `emulator-5580`. Every
+    /// invocation but `devices -l` is an ask, and the first `offline` asks fail
+    /// as adb does for a device it lists offline. The asks after them run: `date`
+    /// answers the device clock, and any other line is logged in `dir/shells`
+    /// and exits 0 (`shell_ok`) or 1. `devices -l` prints `listing` (`None`:
+    /// it fails). The asks are counted in `dir/asks`.
+    pub(in crate::android) fn device(
+        dir: &Path,
+        offline: u32,
+        listing: Option<&str>,
+        shell_ok: bool,
+    ) -> Adb {
+        let tools = dir.join("platform-tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let path = tools.join("adb");
+        let devices = match listing {
+            Some(text) => format!("printf 'List of devices attached\\n%s\\n' '{text}'; exit 0"),
+            None => "exit 1".to_string(),
+        };
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$*\" = 'devices -l' ]; then {devices}; fi\n\
+             [ \"$1\" = -s ] && shift 2\n\
+             n=$(cat '{asks}' 2>/dev/null || echo 0)\n\
+             n=$((n + 1))\n\
+             echo \"$n\" > '{asks}'\n\
+             if [ \"$n\" -le {offline} ]; then echo 'error: device offline' >&2; exit 1; fi\n\
+             case \"$*\" in\n\
+             'shell date +%s.%N') echo 1791334000.123456789 ;;\n\
+             *) echo \"$*\" >> '{shells}'; exit {status} ;;\n\
+             esac\n",
+            asks = dir.join("asks").display(),
+            shells = dir.join("shells").display(),
+            status = if shell_ok { 0 } else { 1 },
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Adb::from_program(&path, "emulator-5580")
+    }
+
+    /// The asks `device` has counted in `dir`.
+    pub(in crate::android) fn asks_of(dir: &Path) -> u32 {
+        std::fs::read_to_string(dir.join("asks"))
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    /// The shell lines (other than `date`) `device` has run in `dir`.
+    pub(in crate::android) fn shells_of(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("shells"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 }

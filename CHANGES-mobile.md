@@ -187,6 +187,21 @@ Fixes from the re-verification of `v0.14.1-mobile.2`.
   kill` is reported as still running with the failure, not as having ignored the kill. A recorded
   emulator process that the OS would not describe settles nothing either: adb is asked, as it is
   when there is no process.
+- **Android:** `icm test --on android --lifecycle` waits for a device that adb lists offline for a
+  moment. Its step probe (`adb shell date`, the log mark) and its restore of the settings asked
+  once, so one offline ask ended the suite with `android.device.none` (CI run 38299962009, after
+  `am kill`) or left the settings changed. Each now asks every second until 30 s have passed, or
+  until the run's `--timeout` when that comes first. The wait never runs past the `--timeout`: an
+  ask is given at most 15 s and no more than the time left, and once none is left no ask is made,
+  so a restore after a run that used up its `--timeout` fails at once, as before. A device still
+  silent then fails with `android.device.none`, whose detail says what adb lists at that moment
+  (its closing listing gets the time left, at most 15 s); a `--timeout` that ends the wait leaves no
+  time for the listing, so the detail says only that the device does not answer `date`. The fix
+  checks the device with `adb -s <serial> shell date` and restarts it: an emulator icm did not boot
+  is left running by `icm stop android --shutdown`, so the fix names quitting it or
+  `adb -s <serial> emu kill`. Other reads of the suite and of the other commands keep one ask. A
+  device whose `date` takes longer than the time left for an ask is not seen to answer, since that
+  ask times out at its bound.
 - `icm stop ios-device` (and `icm stop --all`) terminates the app on the phone only after the device
   lists the recorded pid as the app. The record's `devicectl device process terminate --pid` names
   a pid of the phone, which the phone reuses like any other, so `stop` asks `devicectl device info
