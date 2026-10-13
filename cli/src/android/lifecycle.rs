@@ -451,12 +451,9 @@ impl<'a> Suite<'a> {
         let ctx = self.ctx;
         let adb = self.adb().clone();
         let app_id = self.app_id().to_string();
-        let mark = adb.epoch().ok_or_else(|| {
-            IcmError::new(
-                CheckId::AndroidDeviceNone,
-                format!("{} does not answer `date`", adb.serial),
-            )
-        })?;
+        // The step's log mark. A device adb lists offline for a moment (right
+        // after the previous step's `am kill`, say) answers the ask after it.
+        let mark = adb.answering(ctx.deadline())?;
         let before = self.pid;
         ctx.rep.progress(format!("lifecycle: {}", step.what));
         let started = Instant::now();
@@ -935,10 +932,14 @@ impl<'a> Suite<'a> {
         let adb = self.adb().clone();
         let restore = self.settings.restore_line();
         if !restore.is_empty() {
-            let restored = ctx.step(
-                "lifecycle.restore",
-                &adb.shell(&restore).timeout(Duration::from_secs(60)),
-            );
+            // The settings go back once the device answers, so a moment in
+            // which adb lists it offline does not leave them changed.
+            let restored = adb.answering(ctx.deadline()).and_then(|_| {
+                ctx.step(
+                    "lifecycle.restore",
+                    &adb.shell(&restore).timeout(Duration::from_secs(60)),
+                )
+            });
             if !restored.as_ref().is_ok_and(|outcome| outcome.success()) {
                 ctx.rep.check(Check::warn(
                     CheckId::TestLifecycle,
@@ -1032,6 +1033,7 @@ fn describe(presence: Presence) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn the_steps_follow_back_and_the_api_level() {
@@ -1096,5 +1098,225 @@ mod tests {
             "cmd uimode night no ; settings put system user_rotation 0 ; settings put system accelerometer_rotation 1 ; settings put system font_scale 1.0 ; settings delete secure font_weight_adjustment"
         );
         assert_eq!(Settings::default().restore_line(), "");
+    }
+
+    /// The events a recording context wrote, one JSON line each.
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Sink {
+        /// The check events written with the id `id`.
+        fn checks(&self, id: &str) -> Vec<Value> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|event| event["type"] == "check" && event["id"] == id)
+                .collect()
+        }
+    }
+
+    /// A JSON context for a run, and the sink its events go to.
+    fn recording() -> (Ctx, Sink) {
+        let sink = Sink::default();
+        let rep = crate::output::Reporter::with_writers(
+            crate::output::Mode {
+                json: true,
+                ..crate::output::Mode::default()
+            },
+            crate::output::RunInfo {
+                run: "20261012T000000Z-test-0000".into(),
+                command: "test".into(),
+                target: Some("android".into()),
+                argv: vec![],
+                save: false,
+            },
+            Box::new(sink.clone()),
+            Box::new(std::io::sink()),
+        );
+        (
+            Ctx::new(crate::cli::GlobalArgs::default(), rep, vec![]),
+            sink,
+        )
+    }
+
+    /// The project of a throwaway app whose icm.toml is written in `dir`'s
+    /// text: the back key, and the app's id.
+    fn project(dir: &Path) -> crate::context::Project {
+        let path = dir.join("icm.toml");
+        let text = "schema = 1\n\n[app]\nname = \"Notes\"\nid = \"com.acme.notes\"\n\n[android]\nback = \"system\"\n";
+        let config = crate::config::parse(&path, text)
+            .unwrap_or_else(|errors| panic!("the test icm.toml has {} problems", errors.len()));
+        let target_dir = dir.join("target");
+        crate::context::Project {
+            config,
+            metadata: crate::cargo::Metadata {
+                packages: Vec::new(),
+                workspace_members: Vec::new(),
+                workspace_root: dir.to_path_buf(),
+                target_directory: target_dir.clone(),
+            },
+            package: crate::cargo::Package {
+                name: "app".into(),
+                version: "0.1.0".into(),
+                id: "path+file:///app#app@0.1.0".into(),
+                manifest_path: dir.join("Cargo.toml"),
+                targets: Vec::new(),
+                dependencies: Vec::new(),
+                features: Default::default(),
+                source: None,
+            },
+            icm_dir: target_dir.join("icm"),
+            target_dir,
+        }
+    }
+
+    /// A suite with its app launched on the fake device of `dir` (see
+    /// `fake::device`): nothing has run yet.
+    fn suite_on<'a>(
+        ctx: &'a Ctx,
+        dir: &Path,
+        offline: u32,
+        shell_ok: bool,
+        settings: Settings,
+    ) -> Suite<'a> {
+        let adb = crate::android::adb::fake::device(
+            dir,
+            offline,
+            Some("emulator-5580 offline"),
+            shell_ok,
+        );
+        let tools = crate::android::Toolset::discover(
+            &crate::host::HostConfig {
+                android_sdk: Some(dir.display().to_string()),
+                ..Default::default()
+            },
+            &crate::tools::Env::from_pairs(&[], Some(dir)),
+        )
+        .unwrap();
+        let launched = Launched {
+            project: project(dir),
+            tools,
+            adb,
+            app_id: "com.acme.notes".into(),
+            dir: dir.join("run"),
+            mark: "1791334000.000000000".into(),
+            pids: BTreeSet::new(),
+            session: Default::default(),
+            apk: dir.join("app.apk"),
+            device_name: "emulator-5580 (test)".into(),
+            lock: crate::locks::acquire(
+                &dir.join("locks"),
+                "test",
+                None,
+                "20261012T000000Z-test-0000",
+            )
+            .unwrap(),
+        };
+        Suite {
+            ctx,
+            launched,
+            pid: None,
+            speaks: false,
+            api: 36,
+            settings,
+            axis: None,
+            results: Vec::new(),
+            hooks: Vec::new(),
+        }
+    }
+
+    /// The first step of the suite, which turns the app's dark mode on.
+    fn dark_mode() -> Planned {
+        Planned {
+            name: "dark-mode",
+            what: "dark mode",
+            line: "cmd uimode night yes".into(),
+            expect: Expect::Kept,
+        }
+    }
+
+    /// A step's probe waits for a device adb lists offline at its first ask:
+    /// the step then runs, which the one-shot probe never reached. The fake
+    /// refuses the step's line, so the step ends at once with its failure.
+    #[test]
+    fn the_step_probe_waits_for_a_device_offline_at_its_first_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _sink) = recording();
+        let mut suite = suite_on(&ctx, dir.path(), 1, false, Settings::default());
+        let Ok(found) = suite.step(&dark_mode()) else {
+            panic!("the probe gave up on a device that answers the second ask");
+        };
+        assert_eq!(found.status, Status::Fail);
+        assert!(
+            crate::android::adb::fake::shells_of(dir.path())
+                .contains(&"shell cmd uimode night yes".to_string()),
+            "the step's line did not run"
+        );
+    }
+
+    /// A device that stays offline past the wait fails the step with the
+    /// restart fix, and the step's line never runs on it.
+    #[test]
+    fn a_step_on_a_device_that_stays_offline_fails_with_the_restart_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _sink) = recording();
+        let mut suite = suite_on(&ctx, dir.path(), u32::MAX, false, Settings::default());
+        let Err(error) = suite.step(&dark_mode()) else {
+            panic!("a device that never answers passed the probe");
+        };
+        assert_eq!(error.id, "android.device.none");
+        assert!(
+            error.detail.ends_with("does not answer `date` within 30 s"),
+            "{}",
+            error.detail
+        );
+        assert!(
+            error
+                .fix
+                .commands
+                .iter()
+                .any(|c| c == "adb -s emulator-5580 emu kill"),
+            "{:?}",
+            error.fix.commands
+        );
+        assert_eq!(crate::android::adb::fake::asks_of(dir.path()), 30);
+        assert!(
+            crate::android::adb::fake::shells_of(dir.path()).is_empty(),
+            "the step ran on a device that does not answer"
+        );
+    }
+
+    /// The restore waits for a device adb lists offline at its first ask, so
+    /// the device's settings go back and no warning is written.
+    #[test]
+    fn the_restore_waits_for_a_device_offline_at_its_first_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, sink) = recording();
+        let settings = Settings {
+            user_rotation: Some("0".into()),
+            ..Settings::default()
+        };
+        let suite = suite_on(&ctx, dir.path(), 1, true, settings);
+        assert!(suite.finish(Ok(())).is_ok());
+        assert!(
+            crate::android::adb::fake::shells_of(dir.path())
+                .contains(&"shell settings put system user_rotation 0".to_string()),
+            "the settings were not restored"
+        );
+        assert!(
+            sink.checks("test.lifecycle").is_empty(),
+            "a warning was written for a restore that ran"
+        );
     }
 }
