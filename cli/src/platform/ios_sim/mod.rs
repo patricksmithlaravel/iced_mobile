@@ -3,8 +3,9 @@
 //!
 //! `run`:
 //! 1. Prelude: macOS host, Xcode (exit 9 when missing), the project's Rust
-//!    toolchain and simulator target (exit 4), then the simulator runtime
-//!    and device (exit 4 / 7; created when missing). The toolchain comes
+//!    toolchain and simulator target (exit 4; a probe that runs out of its
+//!    limit is `step.timeout`, exit 8), then the simulator runtime and
+//!    device (exit 4 / 7; created when missing). The toolchain comes
 //!    first, so nothing is created or booted before its probes: a first
 //!    boot loads the host so hard that a probe's 60 s limit can pass during
 //!    it (Appendix D, "iOS Simulator"). `--no-build` checks its previous
@@ -168,7 +169,7 @@ struct Built {
 fn resolve_toolchain(ctx: &mut Ctx, project: &Project, xcode: &Xcode) -> Result<Toolchain> {
     let package = project.package_for(PLATFORM)?;
     let triple = crate::toolchain::ios_sim_triple();
-    let toolchain = crate::toolchain::active(package.dir())?;
+    let toolchain = crate::toolchain::active(ctx, package.dir())?;
     for check in crate::toolchain::check_targets(&toolchain, &[triple.to_string()]) {
         if check.failed() {
             return Err(check.into_error());
@@ -404,7 +405,7 @@ fn list_json(ctx: &Ctx, xcode: &Xcode, what: &[&str]) -> Result<String> {
             format!(
                 "xcrun simctl list -j {} failed: {}",
                 what.join(" "),
-                outcome.stderr_tail(4)
+                outcome.reason(4)
             ),
         ));
     }
@@ -747,7 +748,7 @@ fn end_previous(ctx: &Ctx, xcode: &Xcode, sessions_dir: &Path, udid: &str) {
     }
     stop_collector(&mut previous);
     if previous.device.udid != udid && previous.app_alive() {
-        let _ = ctx.probe(
+        let _ = ctx.optional_probe(
             &simctl(xcode)
                 .args(["terminate", &previous.device.udid, &previous.app_id])
                 .timeout(Duration::from_secs(30)),
@@ -946,7 +947,7 @@ fn capture(ctx: &Ctx, xcode: &Xcode, udid: &str, path: &Path, step: Option<&str>
         };
         return Err(IcmError::new(
             id,
-            format!("simctl io screenshot failed: {}", outcome.stderr_tail(3)),
+            format!("simctl io screenshot failed: {}", outcome.reason(3)),
         ));
     }
     Ok(())
@@ -1167,7 +1168,7 @@ fn system_log(
     } else {
         Err(format!(
             "the system log could not be read (is the simulator booted?): {}",
-            outcome.stderr_tail(2)
+            outcome.reason(2)
         ))
     }
 }
@@ -1374,7 +1375,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     // Boot while cargo builds.
     let booted = start_boot(ctx, &xcode, &target.device)?;
     if args.show {
-        let _ = ctx.probe(
+        let _ = ctx.optional_probe(
             &Cmd::tool("open")
                 .args(["-a", "Simulator", "--args", "-CurrentDeviceUDID"])
                 .arg(&target.device.udid)
@@ -1752,7 +1753,7 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     // The project's `[checks] ios-sim` scripts (design §13.6).
     if crate::hooks::configured(&project, PLATFORM) {
         let sim_data = ctx
-            .probe(
+            .optional_probe(
                 &simctl(&xcode)
                     .args([
                         "get_app_container",
@@ -1762,7 +1763,6 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
                     ])
                     .timeout(Duration::from_secs(30)),
             )
-            .ok()
             .filter(|outcome| outcome.success())
             .map(|outcome| PathBuf::from(outcome.stdout_text().trim()));
         crate::hooks::run_for(

@@ -202,7 +202,8 @@ pub fn metadata(dir: &Path, offline: bool, limit: Option<Duration>) -> Result<Me
         )
     })?;
     // Killed at its limit or by a signal to icm: not a config problem.
-    if let Some(error) = crate::context::end_error("cargo.metadata", &cmd, &outcome, overall) {
+    if let Some(error) = crate::context::probe_end_error("cargo.metadata", &cmd, &outcome, overall)
+    {
         return Err(error);
     }
 
@@ -223,7 +224,7 @@ pub fn metadata(dir: &Path, offline: bool, limit: Option<Duration>) -> Result<Me
         }
         return Err(IcmError::new(
             CheckId::ConfigInvalid,
-            format!("cargo metadata failed: {}", outcome.stderr_tail(8)),
+            format!("cargo metadata failed: {}", outcome.reason(8)),
         )
         .evidence(Evidence::file(&manifest)));
     }

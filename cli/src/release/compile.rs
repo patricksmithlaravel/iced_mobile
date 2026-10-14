@@ -21,6 +21,7 @@ use crate::catalogue::CheckId;
 use crate::cli::ReleaseTarget;
 use crate::context::{CargoOutput, Ctx};
 use crate::error::{IcmError, Result};
+use crate::toolchain::Toolchain;
 use std::path::PathBuf;
 
 /// A cargo profile and the `--config` settings that define it.
@@ -120,8 +121,9 @@ impl Release {
                 stamp = Some(prepared);
             }
         }
-        if let Ok(toolchain) = crate::toolchain::active(self.project.dir()) {
-            self.tool("rustc", toolchain.rustc_version());
+        if let Some(version) = rustc_version(ctx, crate::toolchain::active(ctx, self.project.dir()))
+        {
+            self.tool("rustc", version);
         }
 
         let output = ctx.cargo(name, invocation, &env)?;
@@ -155,9 +157,61 @@ impl Release {
     }
 }
 
+/// The rustc version a build records, from its active toolchain. A probe
+/// that runs out of its limit WARNs `step.timeout` and leaves the version
+/// out; the build goes on, since the version is a record, not an input.
+/// Any other error leaves it out silently, as it always has.
+fn rustc_version(ctx: &Ctx, active: Result<Toolchain>) -> Option<String> {
+    match active {
+        Ok(toolchain) => Some(toolchain.rustc_version().to_string()),
+        Err(error) => {
+            ctx.warn_if_timeout(error);
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stalled_rustc_probe_warns_and_records_no_version() {
+        let ctx = crate::context::test_ctx();
+        let stalled = IcmError::new(
+            CheckId::StepTimeout,
+            "rustc --print sysroot exceeded its 60s limit",
+        );
+        assert_eq!(rustc_version(&ctx, Err(stalled)), None);
+        assert_eq!(
+            ctx.rep.warning_ids(),
+            vec![CheckId::StepTimeout.id().to_string()]
+        );
+    }
+
+    #[test]
+    fn a_missing_rustc_records_no_version_and_no_warning() {
+        let ctx = crate::context::test_ctx();
+        let missing = IcmError::new(CheckId::EnvToolMissing, "cannot run rustc");
+        assert_eq!(rustc_version(&ctx, Err(missing)), None);
+        assert!(ctx.rep.warning_ids().is_empty());
+    }
+
+    #[test]
+    fn the_rustc_version_is_the_toolchains() {
+        let ctx = crate::context::test_ctx();
+        let toolchain = Toolchain {
+            name: Some("1.98.0-aarch64-apple-darwin".to_string()),
+            reason: None,
+            sysroot: PathBuf::from("/test/sysroot"),
+            rustc: "rustc 1.98.0 (88d9e12ae 2026-08-18)".to_string(),
+        };
+        assert_eq!(
+            rustc_version(&ctx, Ok(toolchain)).as_deref(),
+            Some("1.98.0")
+        );
+        assert!(ctx.rep.warning_ids().is_empty());
+    }
 
     #[test]
     fn every_target_has_a_profile() {

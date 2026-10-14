@@ -23,6 +23,7 @@ use crate::host::HostConfig;
 use crate::process::{self, Cmd};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -439,11 +440,25 @@ pub fn java_major(version: &str) -> Option<u32> {
     }
 }
 
+/// The time limit of each JDK probe: a home's `java -version` and
+/// `/usr/libexec/java_home -v 17+`.
+const JDK_PROBE_LIMIT: Duration = Duration::from_secs(20);
+
+/// The tool that names the JDK 17+ the system picks.
+const JAVA_HOME_TOOL: &str = "/usr/libexec/java_home";
+
 /// Reads a JDK home's version from its `release` file, or by running
-/// `bin/java -version`.
-pub fn jdk_at(home: &Path, source: &str) -> Option<Jdk> {
+/// `bin/java -version`. `Ok(None)` when the home holds no readable JDK; a
+/// `java -version` that runs out of its limit is an error (`step.timeout`),
+/// not a home without a JDK.
+pub fn jdk_at(home: &Path, source: &str) -> Result<Option<Jdk>, IcmError> {
+    jdk_at_within(home, source, JDK_PROBE_LIMIT)
+}
+
+/// [`jdk_at`] with the limit of its `java -version` probe.
+fn jdk_at_within(home: &Path, source: &str, limit: Duration) -> Result<Option<Jdk>, IcmError> {
     if !home.join("bin").join("java").exists() {
-        return None;
+        return Ok(None);
     }
 
     let from_release = std::fs::read_to_string(home.join("release"))
@@ -455,32 +470,66 @@ pub fn jdk_at(home: &Path, source: &str) -> Option<Jdk> {
             })
         });
 
-    let version = from_release.or_else(|| {
-        let outcome = process::run(
-            &Cmd::new(home.join("bin").join("java"))
+    let version = match from_release {
+        Some(version) => version,
+        None => {
+            let cmd = Cmd::new(home.join("bin").join("java"))
                 .arg("-version")
-                .timeout(Duration::from_secs(20)),
-            None,
-            None,
-        )
-        .ok()?;
-        let text = format!("{}{}", outcome.stdout_text(), outcome.stderr_text());
-        let start = text.find('"')? + 1;
-        let end = start + text[start..].find('"')?;
-        Some(text[start..end].to_string())
-    })?;
+                .timeout(limit);
+            let Ok(outcome) = process::run(&cmd, None, None) else {
+                return Ok(None);
+            };
+            if let Some(error) =
+                crate::context::probe_end_error("java -version", &cmd, &outcome, false)
+            {
+                return Err(error);
+            }
+            let text = format!("{}{}", outcome.stdout_text(), outcome.stderr_text());
+            let Some(start) = text.find('"').map(|at| at + 1) else {
+                return Ok(None);
+            };
+            let Some(end) = text[start..].find('"').map(|at| start + at) else {
+                return Ok(None);
+            };
+            text[start..end].to_string()
+        }
+    };
 
-    Some(Jdk {
+    Ok(java_major(&version).map(|major| Jdk {
         home: home.to_path_buf(),
-        major: java_major(&version)?,
+        major,
         version,
         source: source.to_string(),
-    })
+    }))
 }
 
 /// Finds a JDK 17 or newer. `probe_java_home` runs
 /// `/usr/libexec/java_home -v 17+` (off in tests).
 pub fn jdk(host: &HostConfig, env: &Env, probe_java_home: bool) -> Result<Jdk, IcmError> {
+    jdk_within(
+        host,
+        env,
+        probe_java_home,
+        Path::new(JAVA_HOME_TOOL),
+        JDK_PROBE_LIMIT,
+    )
+}
+
+/// [`jdk`] with the `java_home` that runs and the limit of the JDK probes (a
+/// test passes fake ones that run out of time).
+///
+/// A home whose `java -version` runs out of its limit does not end the
+/// search: that home may hold any JDK, so a JDK 17+ further on is still the
+/// answer, and the timeout is returned only when none is found. A timed-out
+/// `java_home -v 17+` does end it, at its place in the order, since a home
+/// below it could be another JDK than the one it would have named.
+fn jdk_within(
+    host: &HostConfig,
+    env: &Env,
+    probe_java_home: bool,
+    java_home: &Path,
+    limit: Duration,
+) -> Result<Jdk, IcmError> {
     let mut candidates: Vec<(PathBuf, String)> = Vec::new();
 
     if let Some(path) = host.java_home.as_deref().filter(|p| !p.is_empty()) {
@@ -489,23 +538,11 @@ pub fn jdk(host: &HostConfig, env: &Env, probe_java_home: bool) -> Result<Jdk, I
     if let Some(path) = env.var("JAVA_HOME") {
         candidates.push((env.expand(path), "$JAVA_HOME".to_string()));
     }
-    if probe_java_home
-        && Path::new("/usr/libexec/java_home").exists()
-        && let Ok(outcome) = process::run(
-            &Cmd::new("/usr/libexec/java_home")
-                .args(["-v", "17+"])
-                .timeout(Duration::from_secs(20)),
-            None,
-            None,
-        )
-    {
-        let path = outcome.stdout_text().trim().to_string();
-        if outcome.success() && !path.is_empty() {
-            candidates.push((
-                PathBuf::from(path),
-                "/usr/libexec/java_home -v 17+".to_string(),
-            ));
-        }
+    if probe_java_home {
+        // Its place in the order, marked by its source (no other candidate has
+        // it): `java_home_v17` runs when the search gets there, so the homes
+        // above it come first.
+        candidates.push((PathBuf::new(), JAVA_HOME_V17.to_string()));
     }
     for prefix in ["/opt/homebrew/opt", "/usr/local/opt"] {
         for formula in ["openjdk@21", "openjdk@17", "openjdk"] {
@@ -556,17 +593,34 @@ pub fn jdk(host: &HostConfig, env: &Env, probe_java_home: bool) -> Result<Jdk, I
     );
 
     let mut rejected: Vec<String> = Vec::new();
+    let mut stalled: Option<IcmError> = None;
     for (home, source) in candidates {
-        match jdk_at(&home, &source) {
-            Some(found) if found.major >= MIN_JDK_MAJOR => return Ok(found),
-            Some(found) => rejected.push(format!(
+        // java_home -v 17+ ends the search when it runs out of its limit (see
+        // `jdk_within`); a home that stalls is remembered and the search goes on.
+        let (home, source) = if source == JAVA_HOME_V17 {
+            match java_home_v17(java_home, limit)? {
+                Some(candidate) => candidate,
+                None => continue,
+            }
+        } else {
+            (home, source)
+        };
+        match jdk_at_within(&home, &source, limit) {
+            Ok(Some(found)) if found.major >= MIN_JDK_MAJOR => return Ok(found),
+            Ok(Some(found)) => rejected.push(format!(
                 "{} is Java {} ({})",
                 found.home.display(),
                 found.version,
                 found.source
             )),
-            None => {}
+            Ok(None) => {}
+            Err(error) => {
+                stalled.get_or_insert(error);
+            }
         }
+    }
+    if let Some(error) = stalled {
+        return Err(error);
     }
 
     let mut detail = format!("no JDK {MIN_JDK_MAJOR} or newer found");
@@ -574,6 +628,28 @@ pub fn jdk(host: &HostConfig, env: &Env, probe_java_home: bool) -> Result<Jdk, I
         detail.push_str(&format!("; too old: {}", rejected.join("; ")));
     }
     Err(IcmError::new(CheckId::EnvJdkMissing, detail).fix_commands(["brew install openjdk@21"]))
+}
+
+/// The source of the JDK that `/usr/libexec/java_home -v 17+` names.
+const JAVA_HOME_V17: &str = "/usr/libexec/java_home -v 17+";
+
+/// The home `java_home -v 17+` (`program`) names, with its source, when it
+/// names one (`None` when the tool is absent or names nothing). A run that
+/// runs out of its limit is an error (`step.timeout`).
+fn java_home_v17(program: &Path, limit: Duration) -> Result<Option<(PathBuf, String)>, IcmError> {
+    if !program.exists() {
+        return Ok(None);
+    }
+    let cmd = Cmd::new(program).args(["-v", "17+"]).timeout(limit);
+    let Ok(outcome) = process::run(&cmd, None, None) else {
+        return Ok(None);
+    };
+    if let Some(error) = crate::context::probe_end_error(JAVA_HOME_V17, &cmd, &outcome, false) {
+        return Err(error);
+    }
+    let path = outcome.stdout_text().trim().to_string();
+    Ok((outcome.success() && !path.is_empty())
+        .then(|| (PathBuf::from(path), JAVA_HOME_V17.to_string())))
 }
 
 /// The environment Android tool children need (Appendix C item 2):
@@ -696,32 +772,35 @@ pub fn parse_xcodebuild_version(text: &str) -> Option<(String, String)> {
     Some((version, build))
 }
 
+/// `xcode-select -p`: the selected developer directory. `program` is the
+/// tool that runs and `limit` its time limit (a test passes a fake that runs
+/// out of time). A run killed at its limit is `step.timeout`, not a missing
+/// Xcode.
+fn selected_developer_dir(program: &OsStr, limit: Duration) -> Result<PathBuf, IcmError> {
+    let cmd = Cmd::new(program).arg("-p").timeout(limit);
+    let outcome = process::run(&cmd, None, None).map_err(|error| {
+        IcmError::new(CheckId::EnvXcodeMissing, format!("xcode-select: {error}"))
+    })?;
+    if let Some(error) = crate::context::probe_end_error("xcode-select -p", &cmd, &outcome, false) {
+        return Err(error);
+    }
+    if !outcome.success() {
+        return Err(IcmError::new(
+            CheckId::EnvXcodeMissing,
+            format!("xcode-select -p failed: {}", outcome.reason(3)),
+        ));
+    }
+    Ok(PathBuf::from(outcome.stdout_text().trim()))
+}
+
 /// Finds the selected Xcode and reads its version.
 pub fn xcode(env: &Env) -> Result<Xcode, IcmError> {
     let (developer_dir, source) = match env.var("DEVELOPER_DIR") {
         Some(dir) => (PathBuf::from(dir), "$DEVELOPER_DIR".to_string()),
-        None => {
-            let outcome = process::run(
-                &Cmd::tool("xcode-select")
-                    .arg("-p")
-                    .timeout(Duration::from_secs(20)),
-                None,
-                None,
-            )
-            .map_err(|error| {
-                IcmError::new(CheckId::EnvXcodeMissing, format!("xcode-select: {error}"))
-            })?;
-            if !outcome.success() {
-                return Err(IcmError::new(
-                    CheckId::EnvXcodeMissing,
-                    format!("xcode-select -p failed: {}", outcome.stderr_tail(3)),
-                ));
-            }
-            (
-                PathBuf::from(outcome.stdout_text().trim()),
-                "xcode-select -p".to_string(),
-            )
-        }
+        None => (
+            selected_developer_dir(&process::tool_path("xcode-select"), Duration::from_secs(20))?,
+            "xcode-select -p".to_string(),
+        ),
     };
 
     if developer_dir.ends_with("CommandLineTools") || !developer_dir.join("usr/bin").is_dir() {
@@ -742,7 +821,8 @@ pub fn xcode(env: &Env) -> Result<Xcode, IcmError> {
     let outcome = process::run(&version, None, None)
         .map_err(|error| IcmError::new(CheckId::EnvXcodeMissing, format!("xcodebuild: {error}")))?;
     // Killed at its limit or by a signal to icm: Xcode may be fine.
-    if let Some(error) = crate::context::end_error("xcodebuild.version", &version, &outcome, false)
+    if let Some(error) =
+        crate::context::probe_end_error("xcodebuild.version", &version, &outcome, false)
     {
         return Err(error);
     }
@@ -758,9 +838,16 @@ pub fn xcode(env: &Env) -> Result<Xcode, IcmError> {
     }
 
     let (version, build) = parse_xcodebuild_version(&text).ok_or_else(|| {
+        // Silent output says so, and how the command ended, rather than
+        // leaving the detail empty.
+        let shown = if text.trim().is_empty() {
+            format!("the version output was empty ({})", outcome.describe())
+        } else {
+            text.trim().to_string()
+        };
         IcmError::new(
             CheckId::EnvXcodeMissing,
-            format!("cannot read the Xcode version: {}", text.trim()),
+            format!("cannot read the Xcode version: {shown}"),
         )
     })?;
 
@@ -840,8 +927,27 @@ pub fn wasm_bindgen_install(version: &str) -> String {
     )
 }
 
+/// The time limit of the `wasm-bindgen --version` probe.
+const WASM_BINDGEN_PROBE_LIMIT: Duration = Duration::from_secs(20);
+
 /// Finds a wasm-bindgen CLI whose version equals the app's lock version.
 pub fn wasm_bindgen(version: &str, env: &Env) -> Result<Found, IcmError> {
+    wasm_bindgen_on(
+        version,
+        env,
+        crate::paths::which("wasm-bindgen"),
+        WASM_BINDGEN_PROBE_LIMIT,
+    )
+}
+
+/// [`wasm_bindgen`] with the CLI found on `PATH` (`on_path`) and the limit of
+/// its `--version` probe (a test passes a fake CLI that runs out of time).
+fn wasm_bindgen_on(
+    version: &str,
+    env: &Env,
+    on_path: Option<PathBuf>,
+    limit: Duration,
+) -> Result<Found, IcmError> {
     if let Some(path) = env.tool_override("wasm-bindgen") {
         return Ok(Found {
             path,
@@ -860,29 +966,38 @@ pub fn wasm_bindgen(version: &str, env: &Env) -> Result<Found, IcmError> {
     }
 
     let mut mismatch = None;
-    if let Some(path) = crate::paths::which("wasm-bindgen")
-        && let Ok(outcome) = process::run(
-            &Cmd::new(&path)
-                .arg("--version")
-                .timeout(Duration::from_secs(20)),
-            None,
-            None,
-        )
-    {
-        let found = outcome
-            .stdout_text()
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("")
-            .to_string();
-        if found == version {
-            return Ok(Found {
-                path,
-                version: Some(found),
-                source: "PATH".to_string(),
-            });
+    if let Some(path) = on_path {
+        let cmd = Cmd::new(&path).arg("--version").timeout(limit);
+        if let Ok(outcome) = process::run(&cmd, None, None) {
+            // Killed at its limit: the CLI was not read, so it is a timeout,
+            // not a CLI of another version.
+            if let Some(error) =
+                crate::context::probe_end_error("wasm-bindgen --version", &cmd, &outcome, false)
+            {
+                return Err(error);
+            }
+            let found = outcome
+                .stdout_text()
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .to_string();
+            if found.is_empty() {
+                mismatch = Some(format!(
+                    "{} printed no version ({})",
+                    path.display(),
+                    outcome.reason(3)
+                ));
+            } else if found == version {
+                return Ok(Found {
+                    path,
+                    version: Some(found),
+                    source: "PATH".to_string(),
+                });
+            } else {
+                mismatch = Some(format!("{} is version {found}", path.display()));
+            }
         }
-        mismatch = Some(format!("{} is version {found}", path.display()));
     }
 
     let mut detail = format!("no wasm-bindgen CLI {version} (the app's Cargo.lock version)");
@@ -1079,7 +1194,41 @@ mod tests {
         assert_eq!(java_major("1.8.0_431"), Some(8));
         assert_eq!(java_major("17"), Some(17));
         assert_eq!(java_major("21.0.12.1"), Some(21));
-        assert_eq!(jdk_at(&old, "x").unwrap().major, 8);
+        assert_eq!(jdk_at(&old, "x").unwrap().unwrap().major, 8);
+    }
+
+    #[test]
+    fn a_java_that_runs_out_of_time_is_a_timeout_not_a_missing_jdk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("jdk");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        crate::process::fake_script(&home.join("bin"), "java", "sleep 30");
+        let error = jdk_at_within(&home, "test", Duration::from_millis(300)).unwrap_err();
+        assert_eq!(error.id, CheckId::StepTimeout.id(), "{error:?}");
+        assert_eq!(error.exit.code(), 8);
+        assert!(error.detail.contains("java -version"), "{}", error.detail);
+        assert!(error.detail.contains("300ms"), "{}", error.detail);
+    }
+
+    #[test]
+    fn a_selected_developer_dir_that_runs_out_of_time_is_a_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = crate::process::fake_script(tmp.path(), "xcode-select", "sleep 30");
+        let error =
+            selected_developer_dir(tool.as_os_str(), Duration::from_millis(300)).unwrap_err();
+        assert_eq!(error.id, CheckId::StepTimeout.id(), "{error:?}");
+        assert_eq!(error.exit.code(), 8);
+        assert!(error.detail.contains("xcode-select -p"), "{}", error.detail);
+        assert!(error.detail.contains("300ms"), "{}", error.detail);
+    }
+
+    #[test]
+    fn a_silent_xcode_select_failure_says_its_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = crate::process::fake_script(tmp.path(), "xcode-select", "exit 1");
+        let error = selected_developer_dir(tool.as_os_str(), Duration::from_secs(20)).unwrap_err();
+        assert_eq!(error.id, CheckId::EnvXcodeMissing.id(), "{error:?}");
+        assert!(error.detail.ends_with("failed: exit 1"), "{}", error.detail);
     }
 
     #[test]
@@ -1148,5 +1297,162 @@ mod tests {
                 .starts_with("cargo install wasm-bindgen-cli --version 0.2.105 --locked --root ")
         );
         assert!(command.contains("wasm-bindgen/0.2.105"));
+    }
+
+    /// A JDK home at `dir` whose `bin/java` says it is `version`, on stderr as
+    /// `java -version` does.
+    fn fake_jdk_home(dir: &Path, version: &str) -> PathBuf {
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        crate::process::fake_script(
+            &dir.join("bin"),
+            "java",
+            &format!("echo 'openjdk version \"{version}\"' >&2"),
+        );
+        dir.to_path_buf()
+    }
+
+    /// A JDK home at `dir` whose `bin/java` never answers.
+    fn stalled_jdk_home(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        crate::process::fake_script(&dir.join("bin"), "java", "sleep 30");
+        dir.to_path_buf()
+    }
+
+    #[test]
+    fn a_stalled_java_home_does_not_hide_a_jdk_further_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stalled = stalled_jdk_home(&tmp.path().join("stalled"));
+        let good = fake_jdk_home(&tmp.path().join("good"), "21.0.4");
+        let host = HostConfig {
+            java_home: Some(stalled.display().to_string()),
+            ..HostConfig::default()
+        };
+        let good_path = good.display().to_string();
+        let env = Env::from_pairs(&[("JAVA_HOME", good_path.as_str())], None);
+        // The search ends at the JDK after the stall, so `java_home` (a path
+        // that does not exist here) is never reached.
+        let missing = tmp.path().join("no-such-java_home");
+        let found = jdk_within(&host, &env, true, &missing, Duration::from_millis(300)).unwrap();
+        assert_eq!(found.major, 21);
+        assert_eq!(found.source, "$JAVA_HOME");
+    }
+
+    #[test]
+    fn a_java_home_that_runs_out_of_time_ends_the_search_as_a_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let java_home = crate::process::fake_script(tmp.path(), "java_home", "sleep 30");
+        let error = jdk_within(
+            &HostConfig::default(),
+            &Env::default(),
+            true,
+            &java_home,
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert_eq!(error.id, CheckId::StepTimeout.id(), "{error:?}");
+        assert_eq!(error.exit.code(), 8);
+        assert!(error.detail.contains("-v 17+"), "{}", error.detail);
+        assert!(error.detail.contains("300ms"), "{}", error.detail);
+        assert!(error.fix.summary.contains("-v 17+"), "{error:?}");
+    }
+
+    #[test]
+    fn a_java_home_that_names_a_jdk_is_used() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = fake_jdk_home(&tmp.path().join("jdk21"), "21.0.4");
+        let script = format!(
+            "echo {}",
+            crate::process::shell_quote(&home.display().to_string())
+        );
+        let java_home = crate::process::fake_script(tmp.path(), "java_home", &script);
+        let found = jdk_within(
+            &HostConfig::default(),
+            &Env::default(),
+            true,
+            &java_home,
+            JDK_PROBE_LIMIT,
+        )
+        .unwrap();
+        assert_eq!(found.major, 21);
+        assert_eq!(found.source, JAVA_HOME_V17);
+    }
+
+    /// A version no cache holds, so a test never finds a real CLI.
+    const UNCACHED_BINDGEN: &str = "0.0.0-icm-probe-test";
+
+    #[test]
+    fn a_wasm_bindgen_that_runs_out_of_time_is_a_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = crate::process::fake_script(tmp.path(), "wasm-bindgen", "sleep 30");
+        let error = wasm_bindgen_on(
+            UNCACHED_BINDGEN,
+            &Env::default(),
+            Some(cli),
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert_eq!(error.id, CheckId::StepTimeout.id(), "{error:?}");
+        assert_eq!(error.exit.code(), 8);
+        assert!(
+            error.detail.contains("wasm-bindgen --version"),
+            "{}",
+            error.detail
+        );
+        assert!(error.detail.contains("300ms"), "{}", error.detail);
+    }
+
+    #[test]
+    fn a_wasm_bindgen_that_prints_no_version_says_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = crate::process::fake_script(tmp.path(), "wasm-bindgen", "echo boom >&2; exit 1");
+        let error = wasm_bindgen_on(
+            UNCACHED_BINDGEN,
+            &Env::default(),
+            Some(cli),
+            Duration::from_secs(20),
+        )
+        .unwrap_err();
+        assert_eq!(error.id, CheckId::DepsWasmBindgenCli.id(), "{error:?}");
+        assert!(
+            error.detail.contains("printed no version (boom)"),
+            "{}",
+            error.detail
+        );
+    }
+
+    #[test]
+    fn a_wasm_bindgen_of_another_version_is_a_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli =
+            crate::process::fake_script(tmp.path(), "wasm-bindgen", "echo 'wasm-bindgen 0.2.1'");
+        let error = wasm_bindgen_on(
+            UNCACHED_BINDGEN,
+            &Env::default(),
+            Some(cli),
+            Duration::from_secs(20),
+        )
+        .unwrap_err();
+        assert_eq!(error.id, CheckId::DepsWasmBindgenCli.id(), "{error:?}");
+        assert!(
+            error.detail.contains("is version 0.2.1"),
+            "{}",
+            error.detail
+        );
+    }
+
+    #[test]
+    fn a_wasm_bindgen_of_the_locked_version_is_found_on_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = format!("echo 'wasm-bindgen {UNCACHED_BINDGEN}'");
+        let cli = crate::process::fake_script(tmp.path(), "wasm-bindgen", &script);
+        let found = wasm_bindgen_on(
+            UNCACHED_BINDGEN,
+            &Env::default(),
+            Some(cli.clone()),
+            Duration::from_secs(20),
+        )
+        .unwrap();
+        assert_eq!(found.path, cli);
+        assert_eq!(found.source, "PATH");
     }
 }

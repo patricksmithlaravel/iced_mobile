@@ -259,6 +259,23 @@ fn ends_typing(key: &winit::keyboard::Key) -> bool {
     )
 }
 
+/// Whether a hardware key's press is one the application may answer by
+/// moving the focus, as it may the keyboard's Enter, Tab and Escape: the
+/// redraw after it does not decide the purpose of the focused field (see
+/// `feed`).
+#[cfg(any(
+    all(target_os = "android", feature = "android-native-activity"),
+    test
+))]
+fn yields_turn(key: &winit::keyboard::Key) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+
+    matches!(
+        key,
+        Key::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Escape)
+    )
+}
+
 /// Where `events` press on the window: each finger that touches down, and
 /// the cursor for each mouse button pressed.
 #[cfg(any(
@@ -283,9 +300,9 @@ fn presses(events: &[core::Event], cursor: mouse::Cursor) -> Vec<Point> {
 
 /// An operation that finds where the focused widgets are drawn: their
 /// bounds, moved by the scroll offset of each scrollable around them and cut
-/// to what those scrollables show. Every focused widget counts: a
-/// `text_editor` focused from code keeps the focus when the user taps a
-/// `text_input`.
+/// to what those scrollables show. Every focused widget counts, a
+/// `text_editor` focused from code among them, until a press outside it takes
+/// its focus (on Android and iOS, see the widget).
 #[cfg(any(
     all(target_os = "android", feature = "android-native-activity"),
     test
@@ -1564,6 +1581,25 @@ mod tests {
             Key::Unidentified(NativeKey::Android(0)),
         ] {
             assert!(ends_typing(&key), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn enter_tab_and_escape_yield_the_turn() {
+        use winit::keyboard::{Key, NamedKey};
+
+        for named in [NamedKey::Enter, NamedKey::Tab, NamedKey::Escape] {
+            assert!(yields_turn(&Key::Named(named)), "{named:?}");
+        }
+
+        for key in [
+            Key::Character("a".into()),
+            Key::Named(NamedKey::Space),
+            Key::Named(NamedKey::Backspace),
+            Key::Named(NamedKey::ArrowLeft),
+            Key::Named(NamedKey::Shift),
+        ] {
+            assert!(!yields_turn(&key), "{key:?}");
         }
     }
 

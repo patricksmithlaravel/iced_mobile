@@ -802,10 +802,7 @@ pub(super) fn launch(ctx: &Ctx, adb: &Adb, app_id: &str) -> Result<adb::Started>
             CheckId::AndroidLaunchFailed,
             format!(
                 "am start {component} failed: {}",
-                started
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| outcome.stderr_tail(3))
+                started.error.clone().unwrap_or_else(|| outcome.reason(3))
             ),
         );
         if let Some(log) = &outcome.log {

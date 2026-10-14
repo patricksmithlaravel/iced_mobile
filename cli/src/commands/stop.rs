@@ -582,16 +582,22 @@ fn shutdown_managed(
 /// whose owner cannot be read stays up too
 /// ([`crate::platform::ios_sim::owner`]).
 fn shutdown_simulator(ctx: &Ctx, project: &Project, host: &crate::host::HostConfig) -> Vec<String> {
-    let Ok(xcode) = crate::tools::xcode(&ctx.env) else {
-        return Vec::new();
+    // A probe that runs out of its limit is a WARN (`step.timeout`), so a
+    // simulator left up is never left unexplained. A missing Xcode stays
+    // silent, as it always was: there is no simulator to shut down.
+    let xcode = match crate::tools::xcode(&ctx.env) {
+        Ok(xcode) => xcode,
+        Err(error) => {
+            ctx.warn_if_timeout(error);
+            return Vec::new();
+        }
     };
     let list = |what: &str| -> Option<String> {
         let cmd = xcode
             .xcrun()
             .args(["simctl", "list", "-j", what])
             .timeout(Duration::from_secs(60));
-        ctx.probe(&cmd)
-            .ok()
+        ctx.optional_probe(&cmd)
             .filter(|o| o.success())
             .map(|o| o.stdout_text())
     };

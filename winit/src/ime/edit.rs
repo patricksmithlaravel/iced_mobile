@@ -214,7 +214,9 @@ pub(crate) enum Edit {
 /// when the caret moves some other way too: a tap, a hardware key, or the
 /// application moving it from code ([`Engine::follows_caret`]). Messages
 /// queued before such an event belong before it, so the caller applies
-/// them first, and a composition is committed before the caret moves.
+/// them first, and a composition is committed before the caret moves. It
+/// tells the engine whether the field is a password field
+/// ([`Engine::secure`]), which never gets a preedit.
 #[derive(Debug, Default)]
 pub(crate) struct Engine {
     /// The generation of the last reset; messages of any other are stale.
@@ -226,6 +228,12 @@ pub(crate) struct Engine {
     caret: usize,
     /// The preedit the app shows, and its cursor (a byte offset).
     preedit: Option<(String, usize)>,
+    /// Where that preedit sits in `base`: a byte offset, the composing
+    /// region's start.
+    preedit_at: usize,
+    /// The field is a password field ([`Engine::secure`]): the keyboard's
+    /// composing text is read as typed text.
+    secure: bool,
     /// A [`Request::Forget`] was made and its rebase has not arrived.
     forgetting: bool,
     /// The end of the app's text before the origin, as far as the engine
@@ -275,14 +283,7 @@ impl Engine {
                 }
 
                 self.state(&text, selection, composing, edits);
-
-                if !self.forgetting && joins(&self.context, &self.base) {
-                    self.forgetting = true;
-
-                    Request::Forget
-                } else {
-                    Request::None
-                }
+                self.joined()
             }
             Message::Key { generation, code } => {
                 if generation == self.generation {
@@ -374,6 +375,84 @@ impl Engine {
         self.base.is_empty() && self.preedit.is_none()
     }
 
+    /// The field that asks for the keyboard is a password field, or no
+    /// longer one: the purpose the caller shows the keyboard for, which it
+    /// learns at a redraw.
+    ///
+    /// A password field never shows a composition, which the app would
+    /// draw in clear. From now on, the keyboard's composing text is read as
+    /// typed text, as the Java side reports it for a password field, also
+    /// in the reports it sends before it learns the purpose. A preedit
+    /// shown now (the keyboard composed it under the last purpose: in a
+    /// field the application made secure, or for the field an Enter or Tab
+    /// left, which `feed` held back from the field the focus moved to) is
+    /// committed where it is, as typed text, with the field's caret where
+    /// the keyboard's cursor is in it: the Java side reads its mirror the
+    /// same way once it learns the purpose (it finishes the composition and
+    /// reports the mirror with no composing region), so that report changes
+    /// nothing, and the generation stays, so that nothing the keyboard sent
+    /// meanwhile is dropped.
+    ///
+    /// Returns [`Request::Forget`] when the text committed so starts with a
+    /// character that joins the text before the origin, as [`Engine::apply`]
+    /// does for a report.
+    pub(crate) fn secure(
+        &mut self,
+        secure: bool,
+        edits: &mut Vec<Edit>,
+    ) -> Request {
+        if std::mem::replace(&mut self.secure, secure) || !secure {
+            return Request::None;
+        }
+
+        let Some((text, cursor)) = self.preedit.clone() else {
+            return Request::None;
+        };
+
+        // The report the Java side sends once it finished the composition.
+        let mut at = self.preedit_at.min(self.base.len());
+
+        while !self.base.is_char_boundary(at) {
+            at -= 1;
+        }
+
+        let mut committed = String::with_capacity(self.base.len() + text.len());
+        committed.push_str(&self.base[..at]);
+        committed.push_str(&text);
+        committed.push_str(&self.base[at..]);
+
+        self.read(
+            Report {
+                committed,
+                target: at + cursor,
+                preedit: None,
+            },
+            edits,
+        );
+
+        self.joined()
+    }
+
+    /// The edit that shows the preedit the engine shows, if any.
+    pub(crate) fn preedit(&self) -> Option<Edit> {
+        self.preedit.as_ref().map(|(text, cursor)| {
+            Edit::Preedit(text.clone(), Some(*cursor..*cursor))
+        })
+    }
+
+    /// Asks the Java side to forget its text once the session's text
+    /// starts with a character that joins the cluster before the origin
+    /// ([`Request::Forget`]), unless it was asked already.
+    fn joined(&mut self) -> Request {
+        if !self.forgetting && joins(&self.context, &self.base) {
+            self.forgetting = true;
+
+            Request::Forget
+        } else {
+            Request::None
+        }
+    }
+
     fn state(
         &mut self,
         text: &str,
@@ -381,8 +460,15 @@ impl Engine {
         composing: (i32, i32),
         edits: &mut Vec<Edit>,
     ) {
-        let report = Report::read(text, selection, composing);
+        // A password field's composition is typed text (see
+        // [`Engine::secure`]).
+        let composing = if self.secure { (-1, -1) } else { composing };
 
+        self.read(Report::read(text, selection, composing), edits);
+    }
+
+    /// Applies a report of the mirror.
+    fn read(&mut self, report: Report, edits: &mut Vec<Edit>) {
         let old: Vec<&str> = self.base.graphemes(true).collect();
         let new: Vec<&str> = report.committed.graphemes(true).collect();
 
@@ -433,6 +519,9 @@ impl Engine {
 
         match report.preedit {
             Some(preedit) => {
+                // A composing report's target is its region's start.
+                self.preedit_at = report.target;
+
                 if self.preedit.as_ref() != Some(&preedit) {
                     let (text, cursor) = &preedit;
 
@@ -1491,6 +1580,25 @@ mod tests {
             self.told = ((0, 0), None);
         }
 
+        /// `KeyboardView.show` with another purpose, a password field's or
+        /// no longer one: the composition is finished and the mirror
+        /// reported under the last purpose, then a mirror that holds text is
+        /// rebased, and the keyboard starts over with the new one.
+        fn purpose(&mut self, secure: bool) {
+            if secure == self.secure {
+                return;
+            }
+
+            self.composing = None;
+            self.send_report();
+
+            if !self.units.is_empty() {
+                self.rebase();
+            }
+
+            self.secure = secure;
+        }
+
         /// `Keyboard.forget(generation)` running on the UI thread: the
         /// mirror is rebased once nothing composes, and inside a batch edit
         /// once the batch ends, after its report.
@@ -1639,6 +1747,8 @@ mod tests {
     enum Posted {
         Reset(i32),
         Forget(i32),
+        /// `Keyboard.show` for a password field's purpose, or another.
+        Show(bool),
     }
 
     /// What a run went through, so the random runs show they reach every
@@ -1672,6 +1782,10 @@ mod tests {
         /// engine knows before the origin (a consonant after a virama, a
         /// regional indicator after an unpaired one).
         known_joins: usize,
+        /// Changes of purpose to and from a password field's, and the
+        /// compositions committed as the field became one.
+        purposes: usize,
+        conversions: usize,
     }
 
     impl Seen {
@@ -1690,6 +1804,8 @@ mod tests {
             self.forgets += other.forgets;
             self.batched_forgets += other.batched_forgets;
             self.known_joins += other.known_joins;
+            self.purposes += other.purposes;
+            self.conversions += other.conversions;
         }
 
         /// Each path but the `skipped` ones was taken `at_least` times.
@@ -1727,7 +1843,11 @@ mod tests {
             Self {
                 label: String::from("harness"),
                 mirror: Mirror::new(secure, cap),
-                engine: Engine::new(),
+                // The shell tells the engine a password field's purpose.
+                engine: Engine {
+                    secure,
+                    ..Engine::new()
+                },
                 app: Field::new(before, after),
                 before: graphemes(before),
                 after: graphemes(after),
@@ -1814,6 +1934,15 @@ mod tests {
                         Request::Yield,
                         "{label}: a report yielded"
                     );
+
+                    // A password field's composition is typed text, also
+                    // in a report sent before the keyboard learnt so.
+                    let composing = if self.engine.secure {
+                        (-1, -1)
+                    } else {
+                        composing
+                    };
+
                     self.last = Expected::read(&text, selection, composing);
                     self.check();
 
@@ -2065,6 +2194,37 @@ mod tests {
             self.restart();
         }
 
+        /// The shell learns at a redraw that the field is a password field,
+        /// or no longer one (`Session::enable`), before the Java side does:
+        /// the edits the app got.
+        fn purpose(&mut self, secure: bool) -> Vec<Edit> {
+            let mut edits = Vec::new();
+            let generation = self.engine.generation();
+            let request = self.engine.secure(secure, &mut edits);
+
+            self.app.apply(&edits);
+            self.log.extend(edits.iter().cloned());
+
+            // A composition shown is committed as typed text, where the
+            // keyboard's cursor is in it.
+            if secure && let Some((text, cursor)) = self.last.composing.take() {
+                let target = self.last.target;
+
+                self.last.committed.insert_str(target, &text);
+                self.last.target = target + cursor;
+            }
+
+            self.check();
+
+            if request == Request::Forget {
+                self.posted.push_back(Posted::Forget(generation));
+                self.seen.forgets += 1;
+            }
+
+            self.seen.conversions += usize::from(!edits.is_empty());
+            self.take()
+        }
+
         /// The Java side runs the oldest call the native side posted.
         fn adopt(&mut self) {
             match self.posted.pop_front() {
@@ -2074,6 +2234,7 @@ mod tests {
                 Some(Posted::Forget(generation)) => {
                     self.mirror.forget(generation);
                 }
+                Some(Posted::Show(secure)) => self.mirror.purpose(secure),
                 None => {}
             }
         }
@@ -3911,6 +4072,122 @@ mod tests {
     }
 
     #[test]
+    fn a_composition_shown_when_the_field_becomes_a_password_field_is_typed() {
+        // The keyboard composed for a normal field, and the field it reached
+        // turns out to be a password field (the application focused it
+        // after Enter, or made the field secure): the shell learns so at a
+        // redraw, before the keyboard does.
+        for (before, after) in [("", ""), ("user ", " end")] {
+            let mut harness = Harness::new(before, after);
+
+            assert_eq!(
+                harness.run(|m| m.set_composing_text("pwd", 1)),
+                [preedit("pwd", 3)]
+            );
+            // The keyboard's cursor inside the composition.
+            assert_eq!(
+                harness.run(|m| m.set_selection(2, 2)),
+                [preedit("pwd", 2)]
+            );
+
+            // Committed where it is, the field's caret where the keyboard's
+            // cursor is.
+            assert_eq!(
+                harness.purpose(true),
+                [clear(), commit("pwd"), Edit::Key(Key::Previous)]
+            );
+            assert_eq!(
+                (harness.value(), harness.preedit()),
+                (format!("{before}pwd{after}"), "")
+            );
+            assert_eq!(harness.engine.generation(), 0);
+
+            // Again: nothing more.
+            assert_eq!(harness.purpose(true), []);
+
+            // The keyboard goes on composing for the last purpose until it
+            // learns the new one: typed text too.
+            assert_eq!(
+                harness.run(|m| m.set_composing_text("pwdx", 1)),
+                [Edit::Key(Key::Next), commit("x")]
+            );
+            assert_eq!(
+                harness.run(|m| m.set_composing_text("pwdy", 1)),
+                [deleted(1), vec![commit("y")]].concat()
+            );
+
+            // It learns it: its report changes nothing, and its rebase ends
+            // the session's text where it is. Nothing is doubled or lost.
+            assert_eq!(harness.run(|m| m.purpose(true)), []);
+            assert!(harness.mirror.units.is_empty());
+            assert_eq!(harness.value(), format!("{before}pwdy{after}"));
+
+            assert_eq!(
+                harness.run(|m| m.set_composing_text("z", 1)),
+                [commit("z")]
+            );
+            assert_eq!(
+                (harness.value(), harness.preedit()),
+                (format!("{before}pwdyz{after}"), "")
+            );
+        }
+    }
+
+    #[test]
+    fn a_field_that_is_no_longer_a_password_field_composes_again() {
+        // The application shows the password: the keyboard composed it as
+        // typed text, which stays.
+        let mut harness = Harness::with("", "", true, 4096);
+
+        assert_eq!(
+            harness.run(|m| m.set_composing_text("ab", 1)),
+            [commit("ab")]
+        );
+        assert_eq!(harness.purpose(false), []);
+        assert_eq!(harness.run(|m| m.purpose(false)), []);
+        assert!(harness.mirror.units.is_empty());
+
+        assert_eq!(
+            harness.run(|m| m.set_composing_text("c", 1)),
+            [preedit("c", 1)]
+        );
+        assert_eq!((harness.value().as_str(), harness.preedit()), ("ab", "c"));
+    }
+
+    #[test]
+    fn a_composition_committed_for_a_password_field_is_forgotten_if_it_joins() {
+        // The field holds "क" and the user tapped after it. The keyboard
+        // composes a word that starts with a vowel sign: as a preedit it is
+        // not the field's text, and joins nothing.
+        let mut engine = Engine::new();
+        let mut mirror = Mirror::new(false, 4096);
+        let mut field = Field::new("क", "");
+
+        mirror.set_composing_text("\u{093E}म", 1);
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+
+        // The field becomes a password field: the word is committed, joins
+        // "क", and the Java side is asked to forget.
+        let mut edits = Vec::new();
+        assert_eq!(engine.secure(true, &mut edits), Request::Forget);
+        assert_eq!(edits, [clear(), commit("\u{093E}म")]);
+        field.apply(&edits);
+        field.resegment();
+        assert_eq!(field.text(), "काम");
+
+        // The Java side runs the request, then learns the purpose: one
+        // rebase, once the composition is finished, and nothing changes.
+        mirror.forget(0);
+        mirror.purpose(true);
+        assert_eq!(pump(&mut engine, &mut mirror, &mut field), []);
+        assert!(engine.is_idle());
+        assert_eq!(
+            (field.text().as_str(), field.preedit.clone()),
+            ("काम", None)
+        );
+    }
+
+    #[test]
     fn backspace_on_the_empty_mirror_reaches_the_text_before_it() {
         // AOSP's LatinIME and its forks delete before an empty field with
         // deleteSurroundingText, not with the Backspace key.
@@ -4414,6 +4691,7 @@ mod tests {
         secure: bool,
         cap: usize,
         rtl: bool,
+        flips: bool,
     ) -> Seen {
         let mut rng = Rng::new(seed);
         let before = random_text(&mut rng);
@@ -4437,6 +4715,16 @@ mod tests {
                 }
                 84..=85 => {
                     harness.hardware(rng.pick(&['x', 'ñ', '\u{301}', '好']));
+                }
+                // The field becomes a password field, or no longer one: the
+                // shell learns so at a redraw, then posts the show for it
+                // (`Session::enable`).
+                86..=88 if flips => {
+                    let secure = !harness.engine.secure;
+
+                    let _ = harness.purpose(secure);
+                    harness.posted.push_back(Posted::Show(secure));
+                    harness.seen.purposes += 1;
                 }
                 86..=92 => harness.drain(),
                 _ => harness.adopt(),
@@ -4481,7 +4769,7 @@ mod tests {
         for seed in 0..240 {
             let cap = [4096, 24, 64][seed as usize % 3];
 
-            seen.add(simulate(seed, 400, false, cap, false));
+            seen.add(simulate(seed, 400, false, cap, false, false));
         }
 
         // A request to forget meets an open batch edit more rarely, and a
@@ -4503,7 +4791,7 @@ mod tests {
         for seed in 2000..2060 {
             let cap = [4096, 64][seed as usize % 2];
 
-            seen.add(simulate(seed, 300, false, cap, true));
+            seen.add(simulate(seed, 300, false, cap, true, false));
         }
 
         seen.assert_reached(20, &["batched forgets", "known joins"]);
@@ -4515,7 +4803,7 @@ mod tests {
         let mut seen = Seen::default();
 
         for seed in 1000..1060 {
-            seen.add(simulate(seed, 300, true, 4096, false));
+            seen.add(simulate(seed, 300, true, 4096, false, false));
         }
 
         // A composition reaches the app as typed text, never as a preedit
@@ -4523,5 +4811,26 @@ mod tests {
         assert_eq!(seen.compositions, 0, "{seen:?}");
         seen.assert_reached(20, &["compositions", "known joins"]);
         seen.assert_reached(1, &["compositions"]);
+    }
+
+    #[test]
+    fn random_keyboards_on_a_field_made_secure_keep_the_app_in_step() {
+        // The field turns into a password field and back while the keyboard
+        // types, and the keyboard learns each purpose later than the shell:
+        // a composition shown as the field becomes one is committed as typed
+        // text, and what the keyboard composes meanwhile is typed text too,
+        // without a character lost or doubled.
+        let mut seen = Seen::default();
+
+        for (n, seed) in (3000..3080).enumerate() {
+            let cap = [4096, 64][n % 2];
+
+            seen.add(simulate(seed, 300, n % 4 < 2, cap, false, true));
+        }
+
+        assert!(seen.purposes >= 100, "{seen:?}");
+        assert!(seen.conversions >= 20, "{seen:?}");
+        seen.assert_reached(20, &["batched forgets", "known joins"]);
+        seen.assert_reached(1, &["known joins"]);
     }
 }

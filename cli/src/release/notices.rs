@@ -878,7 +878,7 @@ impl Release {
             self.version,
             self.target.as_str()
         );
-        let toolchain = crate::toolchain::active(self.project.dir())
+        let toolchain = crate::toolchain::active(ctx, self.project.dir())
             .map(|toolchain| RustToolchain {
                 version: Some(toolchain.rustc_version().to_string()).filter(|v| !v.is_empty()),
                 sysroot: Some(toolchain.sysroot),

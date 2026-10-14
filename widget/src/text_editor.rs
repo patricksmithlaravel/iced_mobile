@@ -44,6 +44,7 @@ use crate::core::text::highlighter::{self, Highlighter};
 use crate::core::text::{self, LineHeight, Text, Wrapping};
 use crate::core::theme;
 use crate::core::time::{Duration, Instant};
+use crate::core::touch;
 use crate::core::widget::operation;
 use crate::core::widget::{self, Widget};
 use crate::core::window;
@@ -737,6 +738,7 @@ where
             self.padding,
             cursor,
             self.key_binding.as_deref(),
+            UNFOCUS_ON_TOUCH,
         ) {
             match update {
                 Update::Click(click) => {
@@ -1266,6 +1268,15 @@ impl<Message> Binding<Message> {
     }
 }
 
+/// Whether a finger that presses outside a focused editor unfocuses it, as a
+/// press outside a `text_input` does on every platform. Only on Android and
+/// iOS, where a touch is the only press there is (the shell sends no mouse
+/// button for it): there an editor that ignores touch would keep the focus
+/// while the user taps another field, and the keyboard's text would go to
+/// both. Desktop and wasm keep the mouse's rule alone.
+const UNFOCUS_ON_TOUCH: bool =
+    cfg!(any(target_os = "android", target_os = "ios"));
+
 enum Update<Message> {
     Click(mouse::Click),
     Drag(Point),
@@ -1292,6 +1303,7 @@ impl<Message> Update<Message> {
         padding: Padding,
         cursor: mouse::Cursor,
         key_binding: Option<&dyn Fn(KeyPress) -> Option<Binding<Message>>>,
+        unfocus_on_touch: bool,
     ) -> Option<Self> {
         let binding = |binding| Some(Update::Binding(binding));
 
@@ -1343,6 +1355,15 @@ impl<Message> Update<Message> {
                 }
                 _ => None,
             },
+            Event::Touch(touch::Event::FingerPressed { .. })
+                if unfocus_on_touch =>
+            {
+                if state.focus.is_some() && !cursor.is_over(bounds) {
+                    binding(Binding::Unfocus)
+                } else {
+                    None
+                }
+            }
             Event::InputMethod(event) => match event {
                 input_method::Event::Opened | input_method::Event::Closed => {
                     Some(Update::InputMethod(Ime::Toggle(matches!(
@@ -1607,5 +1628,66 @@ mod tests {
                 assert_eq!(text_order(motion, unidentified), motion);
             }
         }
+    }
+
+    /// A state with the focus or without it, as `TextEditor::state` makes it.
+    fn state(focused: bool) -> State<highlighter::PlainText> {
+        State {
+            focus: focused.then(Focus::now),
+            preedit: None,
+            last_click: None,
+            drag_click: None,
+            partial_scroll: 0.0,
+            last_theme: RefCell::default(),
+            highlighter: RefCell::new(highlighter::PlainText),
+            highlighter_settings: (),
+            highlighter_format_address: 0,
+        }
+    }
+
+    #[test]
+    fn a_touch_outside_a_focused_editor_unfocuses_it_where_touch_is_the_press()
+    {
+        // A finger on a widget brings the cursor with it, as the window does.
+        let tap = |at: Point| {
+            (
+                Event::Touch(touch::Event::FingerPressed {
+                    id: touch::Finger(1),
+                    position: at,
+                }),
+                mouse::Cursor::Available(at),
+            )
+        };
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(100.0, 100.0));
+        let unfocuses = |state: &State<highlighter::PlainText>,
+                         (event, cursor): &(Event, mouse::Cursor),
+                         unfocus_on_touch: bool| {
+            matches!(
+                Update::<()>::from_event(
+                    event,
+                    state,
+                    bounds,
+                    Padding::ZERO,
+                    *cursor,
+                    None,
+                    unfocus_on_touch,
+                ),
+                Some(Update::Binding(Binding::Unfocus))
+            )
+        };
+
+        let outside = tap(Point::new(150.0, 150.0));
+        let inside = tap(Point::new(50.0, 50.0));
+
+        // Where touch is the press (Android and iOS), a press outside takes
+        // the focus, as it does a `text_input`. Elsewhere it keeps the mouse's
+        // rule, and a press outside keeps the focus.
+        assert!(unfocuses(&state(true), &outside, true));
+        assert!(!unfocuses(&state(true), &outside, false));
+
+        // A press inside keeps the focus, and a press on an editor without it
+        // gives up nothing.
+        assert!(!unfocuses(&state(true), &inside, true));
+        assert!(!unfocuses(&state(false), &outside, true));
     }
 }

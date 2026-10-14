@@ -28,6 +28,18 @@ fn build_steps(ctx: &Ctx, project: &Project, release: bool, plan: &mut Plan) -> 
     let bindgen = match &version {
         Some(version) => match crate::tools::wasm_bindgen(version, &ctx.env) {
             Ok(found) => found.path,
+            // Out of its time limit: the build stops with step.timeout (see
+            // `wasm_bindgen_cli`), not with a missing CLI.
+            Err(error) if error.check_id() == Some(CheckId::StepTimeout) => {
+                plan.push(
+                    Step::internal(
+                        "deps.wasm_bindgen_cli",
+                        &format!("{}: the build would stop with step.timeout", error.detail),
+                    )
+                    .gate(CheckId::StepTimeout),
+                );
+                PathBuf::from("wasm-bindgen")
+            }
             Err(_) => {
                 plan.push(
                     Step::internal(

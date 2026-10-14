@@ -49,7 +49,7 @@ pub fn run(ctx: &mut Ctx, args: &CheckArgs) -> Result<()> {
     let builds = config_checks(ctx, &project, &platforms)?;
 
     // 2. toolchain and targets
-    let toolchain = toolchain::active(project.dir())?;
+    let toolchain = toolchain::active(ctx, project.dir())?;
     ctx.rep.set(
         "tools",
         json!({"rustc": toolchain.rustc_version(), "toolchain": toolchain.name}),

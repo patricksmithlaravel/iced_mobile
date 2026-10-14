@@ -15,7 +15,8 @@ the release stops with this id only where codesign failed. The failure keeps
 its own id (`tool.failed`) when the keychain is in the list, when no signing
 keychain is set, when codesign fails for another reason, and when the list
 cannot be read or is empty (icm cannot print the command that puts an empty
-list back).
+list back). A `security list-keychains` that runs out of its 30 s limit also
+WARNs `step.timeout`.
 
 Exit 9: only the owner can put the keychain in the list, and the release
 must run again after it does.

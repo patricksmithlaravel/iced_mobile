@@ -227,23 +227,31 @@ this file in the commit that fixes or finds a limitation.
     it within half a second bring it back once (Android 11 and later): the
     shell cannot tell that hide from a show the system dropped, which it
     shows again.
-  - Password fields (`.secure(true)`) are marked secure to the Android
-    keyboard with the input connection above: it shows its password layout
-    without suggestions and is asked not to learn what is typed, and what
-    it composes there reaches the field as typed text, so it is never drawn
-    in clear. On iOS the view tells UIKit that the field is secure text
-    entry: on the iOS 27.0 Simulator the keyboard then has no emoji or
-    dictation key, and it switches to and from that keyboard as the focus
-    moves between a password field and another (a physical iPhone has not
-    been tried). When the focus moves straight from a password field to
-    another field, with the keyboard up, that field's keyboard can label
-    its numbers key ".?123" instead of "123" until its numbers are shown
-    once or it is hidden and shown again; it types as usual. A keyboard
-    shown while none was up is set up for its field at once, without that
-    label. The iOS keyboard shows no suggestions in any field anyway
-    (above). On both, a `text_editor` focused from code that also takes the
-    keyboard (see `text_editor` below) leaves the keyboard set up for the
-    password field.
+  - Password fields (`.secure(true)`) are marked secure to the Android keyboard
+    with the input connection above: it shows its password layout without
+    suggestions and is asked not to learn what is typed, and what it composes
+    there reaches the field as typed text, so it is never drawn in clear. So
+    does a composition that reaches a password field from another purpose (the
+    field an Enter, Tab or tap moved the focus from, or the field the app
+    focused from code): the shell commits it as typed text at the redraw that
+    tells it the field's purpose, and no field gets a preedit until that
+    decision, which a tap on the field that has the focus or a focus move from
+    code makes, or the end of a short window after an Enter, Tab or Escape (see
+    the bullet below). A field the app makes secure while the keyboard composes
+    gets its composition as typed text at the next redraw. On Android and iOS
+    the window never draws a password field's preedit. On iOS the view tells
+    UIKit that the field is secure text entry: on the iOS 27.0 Simulator the
+    keyboard then has no emoji or dictation key, and it switches to and from
+    that keyboard as the focus moves between a password field and another (a
+    physical iPhone has not been tried). When the focus moves straight from a
+    password field to another field, with the keyboard up, that field's keyboard
+    can label its numbers key ".?123" instead of "123" until its numbers are
+    shown once or it is hidden and shown again; it types as usual. A keyboard
+    shown while none was up is set up for its field at once, without that label.
+    The iOS keyboard shows no suggestions in any field anyway (above). On both,
+    a `text_editor` focused from code gives up its focus when the user taps
+    outside it (see `text_editor` below), so what the keyboard types, a password
+    included, reaches the field that has the focus only.
   - The keyboard covers fields in the lower half of the screen unless the
     root is padded with `SafeArea::padding` from `iced::mobile::safe_area()`,
     whose bottom rises with it, as the template's is. On Android it rises
@@ -251,24 +259,66 @@ this file in the commit that fixes or finds a limitation.
     the top.
   - iOS hardware keyboards deliver typed characters, Return, Tab and
     Backspace only: no arrows, Escape or Cmd shortcuts.
-  - On Android, the keyboard's Enter (its key, its action button, or a
-    commit of a lone line break) reaches the app as the Enter key, after the
-    text typed before it, and submits a `text_input`; its Tab (its key, or a
-    commit of a lone tab) is the Tab key. The app handles Enter, Tab and
-    Escape, builds its view again and runs the widget operations its
-    `update` returns for them before the text the keyboard typed after them
-    reaches a field, also when a tap or an operation comes in between: a
-    field cleared on submit gets that text alone, and the field `on_submit`
-    moves the focus to (`focus_next`) gets it. A key the app handles later,
-    from a subscription (`keyboard::listen`, which is how an app takes Tab:
-    `text_input` ignores it) or a task, comes after that text: what the
-    keyboard sends in the same instant, such as a password a credential
-    keyboard types right after a username and Tab, goes to the field that
-    had the focus. When the key leaves no field with the focus (Escape
-    unfocuses a `text_input` or a `text_editor`, an `on_submit` may remove
-    the field or unfocus it), what the keyboard sent right after it is
-    dropped. A line break or tab inside longer committed text (a
-    suggestion, a paste from the keyboard's clipboard) is dropped.
+  - On Android, the keyboard's Enter (its key, its action button, or a commit of
+    a lone line break) reaches the app as the Enter key, after the text typed
+    before it, and submits a `text_input`; its Tab (its key, or a commit of a
+    lone tab) is the Tab key. The app handles Enter, Tab and Escape, builds its
+    view again and runs the widget operations its `update` returns for them
+    before the text the keyboard typed after them reaches a field, also when a
+    tap or an operation comes in between: a field cleared on submit gets that
+    text alone, and the field `on_submit` moves the focus to (`focus_next`) gets
+    it. When that field is a password field, the keyboard is set up for it only
+    from the next redraw: it typed that text as the last field's keyboard, which
+    may suggest and learn words, and what it composed of it reaches the password
+    field as typed text, never drawn in clear. A hardware keyboard's Enter, Tab
+    and Escape count the same way, and one that waited behind a keyboard key's
+    turn holds even a focus that turn moved, until a tap or until a short settle
+    window closes, since its own message may still move the focus. The app may
+    move the focus after such a key later still, from a subscription
+    (`keyboard::listen`, which is how an app takes Tab: `text_input` ignores it)
+    or a task, and that message arrives after the event loop turned again. So a
+    redraw decides which field a composition belongs to only once that window
+    has closed: 100 milliseconds after the key's turn ends (or after a hardware
+    key). Until then, what the keyboard composes shows in no field, the one that
+    has the focus included, and a redraw inside the window decides nothing. The
+    shell asks for the redraw at the window's end while a composition waits, or
+    at once when the window has closed, so a composition does not wait for an
+    unrelated event. A tap on the field that has the focus, or a focus move from
+    code, lets the next redraw decide at once instead. A focus move from a
+    subscription or a task that arrives after the window has closed is not
+    waited for: a composition the keyboard sends in the gap before the move
+    shows as a preedit in the field that has the focus, and a password it
+    composes there is in clear until the move ends the session, which drops it.
+    A tap, a hardware key or the loss of the window's focus that reaches the
+    app in that gap commits the preedit the field shows to the field that has
+    the focus, as it does for any composition shown (see below), so the move
+    that comes later finds nothing left to drop.
+    The keyboard's session ends the hold with it: a session that starts again
+    for the field, after the app's turn, gives its purpose before the keyboard
+    shows, so the underline appears at once then. What the keyboard commits
+    reaches the field that has the focus at once. A composition the keyboard
+    still has open when the subscription's focus move ends that session is
+    dropped with it, as the focus-move bullet above says: a password it composes
+    after such a Tab is never committed to either field. A password it commits
+    is not: a commit reaches the field that has the focus, where it is drawn in
+    clear and stays until that field is cleared, when the keyboard sent it in
+    the same burst as the Tab, before the focus move arrived. Commits are not
+    held back: holding them would hide the text a field gets after an Enter,
+    which is most of what the keyboard types, and the shell cannot tell a
+    password from other committed text. A tap, a hardware key or the loss of the
+    window's focus that reaches the app while a composition is still held back,
+    or shown since the window closed, commits it to the field that has the
+    focus, as it does for any composition: the press is handled before the field
+    it lands on has the focus, so the shell cannot tell which field the
+    composition was for. So a password composed inside the window after a Tab,
+    or in the gap after it, before the subscription's move arrives, is committed
+    to the username as typed text when the user taps the password field first.
+    Deciding that would need the press's target before the press is handled.
+    When the key leaves no field with the focus (Escape
+    unfocuses a `text_input` or a `text_editor`, an `on_submit` may remove the
+    field or unfocus it), what the keyboard sent right after it is dropped. A
+    line break or tab inside longer committed text (a suggestion, a paste from
+    the keyboard's clipboard) is dropped.
   - On iOS, Return and Tab count only when UIKit inserts them alone, as
     the Return and Tab keys do (`"\r\n"` is one Return). A line break or
     tab inside longer inserted text (dictation, a keyboard suggestion, a
@@ -282,16 +332,13 @@ this file in the commit that fixes or finds a limitation.
   `mouse_area` and `pick_list` take them. There is no momentum. Let text
   fill most of each list row and keep its buttons small, as the template's
   list does, or leave gaps between rows.
-- **`text_editor`, rich-text links and `pick_list` menus ignore touch.** A
-  tap cannot focus a `text_editor` (focusing it from code works), nor take
-  the focus away from one: a `text_editor` focused from code stays focused
-  when the user taps a `text_input`, and both then take what is typed, so
-  a password typed into a secure field shows in clear in the editor. The
-  keyboard is still set up for the password field, so it neither suggests
-  nor learns the password. Move the focus away from the editor from code
-  (`operation::focus` on another widget unfocuses the rest), for example
-  from a Done button. Links in
-  `rich_text` and `markdown` cannot be tapped, and `pick_list` and
+- **`text_editor`, rich-text links and `pick_list` menus ignore touch,
+  except that a touch takes the focus from a `text_editor`.** A tap cannot
+  focus a `text_editor` (focusing it from code works). A `text_editor`
+  focused from code gives up the focus when the user taps anywhere outside
+  it, as a `text_input` does, so what is typed, a password included, goes to
+  the field that has the focus only. A Done button needs no code for it.
+  Links in `rich_text` and `markdown` cannot be tapped, and `pick_list` and
   `combo_box` menus select on touch-down, so a long menu cannot be
   scrolled. Use `text_input`, buttons for links, and short menus.
 - **Hover sticks after a tap.** A touch moves iced's cursor and nothing moves

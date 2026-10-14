@@ -7,14 +7,16 @@ stops at iced 0.14.0.
 
 ## Unreleased
 
-Fixes from the re-verification of `v0.14.1-mobile.2`.
+The changes since `v0.14.1-mobile.2`, among them the fixes from its re-verification.
 
 - **iOS:** `icm run ios-sim` resolves the Rust toolchain before it creates or boots a simulator, and
   runs the Mach-O gates and the bundle's host tools only after the simulator has booted. A first
   boot loads the host so hard that the toolchain's 60 s `rustc` probe could pass its limit, which
   failed `phase2.sh`'s store step in four of its nine CI attempts on 2026-10-12 and 13. Cargo still
-  builds while the simulator boots, and no check changed. `--no-build` checks its previous bundle at
-  the same point, so a run without one stops before any simulator is listed, created or booted.
+  builds while the simulator boots, and no check changed. The probe's limit is unchanged, and a
+  probe that still runs out of it is `step.timeout` (the probe timeouts, below). `--no-build` checks
+  its previous bundle at the same point, so a run without one stops before any simulator is listed,
+  created or booted.
 - `icm run desktop` no longer writes a value the app inherited from icm's environment to the app's
   live files. The app's stdout and stderr go through a log collector (`icm __session desktop`, a
   process of its own, started after the app), which writes `app.stdout` and `app.stderr` with the
@@ -320,23 +322,32 @@ Text input on Android, and secure fields on Android and iOS:
   focus to gets it. None of that text is dropped while a field has the focus, however soon it
   follows; when the key leaves no field with the focus (Escape unfocuses a `text_input` or a
   `text_editor`, an `on_submit` may remove the field), what the keyboard sent right after it is
-  dropped. A key the app handles
-  from a subscription (`keyboard::listen`, how an app takes Tab) or a task comes after that text,
-  which then goes to the field that had the focus. Line breaks and tabs inside longer committed text
-  are dropped. Backspace and Delete reach the field's text
-  before and after what the keyboard typed, also from keyboards that delete with
-  `deleteSurroundingText` (AOSP's keyboard and its forks), and so do the arrow, Home and End keys,
-  without dropping keys sent in quick succession. The keyboard's other keys no longer reach the
-  app, as they did as key events before: its Ctrl and Meta shortcuts (Ctrl+C, X, V and A on
-  keyboards that have a Ctrl key), Page Up and Down, function keys and Insert are dropped, and its
-  keys come without modifiers, its own Shift or one held on a hardware keyboard: its arrows, Home
-  and End move the caret without selecting, and a Ctrl held on a hardware keyboard does not make
-  its deletions delete words. An arrow while the keyboard has selected some of the text it typed
-  (its Select word) ends that selection at its start (Left, Up) or its end (Right, Down) instead,
-  as the field's own arrows end a selection. A hardware keyboard's keys reach the app as key
-  events, as before, unless the input method takes them: while a field asks for the keyboard, one
-  that composes a hardware keyboard's letters (CJK input methods) types them into the field as
-  commits and preedits, not `KeyPressed` events.
+  dropped. A key the app handles from a subscription (`keyboard::listen`, how an app takes Tab) or a
+  task comes after that text, which then goes to the field that had the focus. Since such a message
+  may still move the focus, a word the keyboard composes after an Enter, Tab or Escape, its own or a
+  hardware keyboard's, shows in no field, the one that has the focus included, until a short window
+  closes (100 milliseconds after the key's turn ends): then the first redraw shows it in the field
+  that has the focus, and the shell asks for that redraw itself while a word waits. A tap on the
+  field, or a focus move from code, shows it at the next redraw. A focus move from a subscription
+  that comes after the window is not waited for: a word the keyboard sends before it shows in the
+  field that has the focus until the move ends the session. A tap, a hardware key or the loss of the
+  window's focus in that gap commits the word shown to that field, so the move finds nothing left to
+  drop. The hold ends with the keyboard's
+  session, and the next session gives the field's purpose before the keyboard shows. What it commits
+  reaches the field that has the focus at once. Line breaks and tabs inside longer committed text are
+  dropped. Backspace and Delete reach the field's text before and after what the keyboard typed,
+  also from keyboards that delete with `deleteSurroundingText` (AOSP's keyboard and its forks), and
+  so do the arrow, Home and End keys, without dropping keys sent in quick succession. The keyboard's
+  other keys no longer reach the app, as they did as key events before: its Ctrl and Meta shortcuts
+  (Ctrl+C, X, V and A on keyboards that have a Ctrl key), Page Up and Down, function keys and Insert
+  are dropped, and its keys come without modifiers, its own Shift or one held on a hardware
+  keyboard: its arrows, Home and End move the caret without selecting, and a Ctrl held on a hardware
+  keyboard does not make its deletions delete words. An arrow while the keyboard has selected some
+  of the text it typed (its Select word) ends that selection at its start (Left, Up) or its end
+  (Right, Down) instead, as the field's own arrows end a selection. A hardware keyboard's keys reach
+  the app as key events, as before, unless the input method takes them: while a field asks for the
+  keyboard, one that composes a hardware keyboard's letters (CJK input methods) types them into the
+  field as commits and preedits, not `KeyPressed` events.
 - **Android:** `text::editor::Motion` has two new variants there, `Previous` and `Next`: one
   grapheme cluster back and on in the order of the text, or across a line break, whatever the
   direction of the line, where `Left` and `Right` move on screen. An exhaustive `match` on `Motion`
@@ -394,28 +405,67 @@ Text input on Android, and secure fields on Android and iOS:
 - Password fields (`.secure(true)`) are marked secure to the system keyboard on Android with the
   input connection above, and on iOS: the Android keyboard shows its password layout without
   suggestions. On Android the input type is `TYPE_TEXT_VARIATION_PASSWORD` with
-  `IME_FLAG_NO_PERSONALIZED_LEARNING`, and what a keyboard composes there reaches the field as typed
-  text, never as a preedit drawn in clear. On iOS the vendored winit implements
-  `Window::set_ime_purpose` (`vendor/patches/winit-0003-ios-ime-purpose.patch`): the view answers
-  `isSecureTextEntry` and turns off autocorrection, spell checking, auto-capitalisation and smart
-  punctuation for a password, the terminal purpose turns off the same without secure entry, and a
-  changed purpose reloads the keyboard that is shown. `iced_winit` gives the view a field's
-  purpose before it makes the view the first responder, so a keyboard shown while none was up is
-  set up for its field at once, with no reload. On the iOS 27.0 Simulator the password
-  keyboard has no emoji or dictation key, and the keyboard switches to and from it as the focus
-  moves between a password field and another; a physical iPhone has not been tried. When the
+  `IME_FLAG_NO_PERSONALIZED_LEARNING`, and what a keyboard composes for a password field reaches it
+  as typed text, never as a preedit drawn in clear, also when the keyboard composed it as the last
+  field's keyboard. The shell learns a field's purpose only at a redraw, so what the keyboard
+  composes after the focus moves (the Enter whose `on_submit` focuses the password field, a tap, a
+  focus move from code) shows in no field until a redraw has decided the purpose of the field that
+  has the focus, and in a password field that redraw commits it as typed text. After an Enter, Tab
+  or Escape the redraw decides only once a tap on the field or a focus move from code has come after
+  the key, or the short window after the key's turn (or after a hardware key) has closed, or a
+  keyboard session starts for the field again (above). A field the app makes secure while the
+  keyboard composes gets its composition as typed text at the next redraw, and what the keyboard
+  composes before it is set up for the password field is read as typed text too. On Android and iOS
+  the window never draws a password field's preedit (the desktop and the web draw it as upstream
+  does). What the keyboard commits is not held back: a password it commits in the same burst as a
+  Tab the app takes in a subscription reaches the field that had the focus, in clear. A tap that
+  reaches the app while a composition is held back, or shown since the window closed, commits it to
+  the field that has the focus (`docs/agents/limitations.md`). On an edit of a
+  password field, a `text_input` builds its paragraph from the bullets: the paragraph logs the text
+  it is built from at trace level, which in v0.14.1-mobile.2 was the password. On iOS the vendored
+  winit implements `Window::set_ime_purpose` (`vendor/patches/winit-0003-ios-ime-purpose.patch`):
+  the view answers `isSecureTextEntry` and turns off autocorrection, spell checking,
+  auto-capitalisation and smart punctuation for a password, the terminal purpose turns off the same
+  without secure entry, and a changed purpose reloads the keyboard that is shown. `iced_winit` gives
+  the view a field's purpose before it makes the view the first responder, so a keyboard shown while
+  none was up is set up for its field at once, with no reload. On the iOS 27.0 Simulator the
+  password keyboard has no emoji or dictation key, and the keyboard switches to and from it as the
+  focus moves between a password field and another; a physical iPhone has not been tried. When the
   focus moves straight from a password field to another field, with the keyboard up, the keyboard
-  there can label its numbers key ".?123" instead of "123" until its numbers are shown once or it
-  is hidden and shown again; it types as usual. The iOS keyboard shows no suggestions in any field
-  anyway. Before, the keyboard was not told that a field held a password. When a `text_editor`
-  focused from code also takes the keyboard next to a password field (a tap does not take its
-  focus), the keyboard is set up for the password field: on Android and iOS, `InputMethod::merge`
-  makes the merged request secure when any of the requests is.
+  there can label its numbers key ".?123" instead of "123" until its numbers are shown once or it is
+  hidden and shown again; it types as usual. The iOS keyboard shows no suggestions in any field
+  anyway. Before, the keyboard was not told that a field held a password.
+- On Android and iOS, a `text_editor` focused from code gives up its focus when the user taps
+  outside it, as a `text_input` does. Before, only a mouse press outside it took the focus, and a
+  touch is the only press there, so it kept the focus when the user tapped another field and took
+  the keyboard's text alongside it, a password included, which it showed in clear. While both still
+  ask for the keyboard, `InputMethod::merge` makes the merged request secure there when any of them
+  is, so the keyboard is set up for the password field. A tap still cannot focus a
+  `text_editor`, and the desktop and the web keep upstream's rule.
 - On Android and iOS, `text_editor` draws no placeholder while it shows a preedit, as `text_input`
   does, so a word the Android keyboard composes into an empty editor is not drawn over its
   placeholder (iOS sends no preedit). The desktop and the web draw it as upstream does.
 - The known limitations in an app's `AGENTS.md` describe text input as it now is, and say that the
   iOS keyboard shows no predictions in any field: the app's view takes key input only.
+- `icm` reports a tool probe that runs out of its own time limit as a timeout (`step.timeout`, exit
+  8) that names the command and the limit. Before, a stalled `rustc --print sysroot` (60 s) failed
+  `icm run ios-sim --store`'s preflight as `env.tool_missing` with an empty `failed:` detail (GitHub
+  Actions runs 38299868362 and 38340201153, Phase 2 `store-screenshots`). `xcode-select -p`, the JDK
+  search, `adb devices`, `wasm-bindgen --version` and `--dry-run`'s wasm-bindgen step had the same gap. A stalled
+  `rustup show active-toolchain` (30 s) used to leave the toolchain unnamed without a word: it now
+  WARNs `step.timeout`, and the build still goes on unnamed. A probe with its own fixed limit names that limit and the command to run by hand
+  in its fix, since `--timeout` does not reach it. A stalled JDK candidate no longer hides a JDK
+  further on, and doctor gives a JDK timeout no install fix. A tool that exits non-zero with empty
+  stderr now says its status in each failure detail that quotes its stderr. A program that cannot
+  start is still `env.tool_missing`, except in doctor's simctl listings and the web feature checks,
+  which keep the id they had (`tool.failed`, and a skip). A stalled optional probe now WARNs `step.timeout` where it used to pass
+  silently: the rustc version a build records, `stop --shutdown`'s simulator listing, a release's
+  `wasm-opt --version` and the simulator's app data location a hook gets. Doctor's wasm-bindgen
+  requirement no longer offers `icm doctor web --fix` for a `wasm-bindgen --version` that stalled, and
+  doctor's iOS simctl listings now report a timeout as `step.timeout`, not
+  `tool.failed`. The two `plutil -lint` details and the
+  Android lifecycle step's failure detail say the status when their output is empty.
+  `docs/icm/DESIGN.md` Appendix D item 23.
 - **icm:** signing keychains outside the user's keychain search list. On macOS 26 codesign needs
   the signing keychain (host.toml `signing_keychain` or `ICM_KEYCHAIN`) in the user's keychain
   search list: codesign searches only that list, and `--keychain` only narrows the search, so a
@@ -429,7 +479,8 @@ Text input on Android, and secure fields on Android and iOS:
   before codesign runs, so a codesign that finds the identity outside it (macOS 27) is unaffected.
   Before, the macOS failure was `tool.failed` and the iOS one `ios.sign.no_identity`, with no hint.
   The failure keeps its own id when the keychain is listed, when no keychain is set, when codesign
-  refuses for another reason, and when the list cannot be read or is empty.
+  refuses for another reason, and when the list cannot be read or is empty. A list read that runs
+  out of its 30 s limit also WARNs `step.timeout`, as the other optional probes do.
 
 ## Changes in v0.14.1-mobile.2
 

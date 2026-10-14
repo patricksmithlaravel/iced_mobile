@@ -146,7 +146,7 @@ pub fn read(ctx: &Ctx, xcode: &Xcode) -> Result<DtKeys> {
             xcode,
             format!(
                 "`xcodebuild -version -sdk iphoneos` did not name the iOS SDK ({}): is the iOS platform installed?",
-                outcome.stderr_tail(2).trim()
+                outcome.reason(2).trim()
             ),
         ));
     };

@@ -245,7 +245,7 @@ fn tools_report(ctx: &mut Ctx) -> Result<()> {
 
     record(
         "rust",
-        crate::toolchain::active(&dir).map(|toolchain| {
+        crate::toolchain::active(ctx, &dir).map(|toolchain| {
             json!({
                 "path": toolchain.sysroot,
                 "version": toolchain.rustc_version(),
