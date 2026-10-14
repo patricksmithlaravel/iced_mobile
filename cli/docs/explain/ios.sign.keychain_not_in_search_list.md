@@ -14,8 +14,9 @@ the keychain is not in it. It never checks the list before codesign runs, so
 a Mac whose codesign finds the identity (macOS 27 did) is not affected. The
 failure keeps its own id when the keychain is in the list (`ios.sign.no_identity`),
 when no signing keychain is set, and when the list cannot be read or is
-empty. A codesign failure that does not say `no identity found` keeps
-`ios.sign.verify`, as before.
+empty; a `security list-keychains` that runs out of its 30 s limit also
+WARNs `step.timeout`. A codesign failure that does not say `no identity
+found` keeps `ios.sign.verify`, as before.
 
 Exit 9: only the owner can put the keychain in the list, and the release
 must run again after it does.

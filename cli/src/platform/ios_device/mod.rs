@@ -139,7 +139,7 @@ fn devicectl_json(ctx: &Ctx, xcode: &Xcode, args: &[&str], what: &str) -> Result
             format!(
                 "xcrun devicectl {} failed: {}",
                 args.join(" "),
-                outcome.stderr_tail(4)
+                outcome.reason(4)
             ),
         ));
     }
@@ -371,7 +371,7 @@ fn build_app(
     let bin = project.bin_for(PLATFORM)?;
     let config = project.config.config.clone();
 
-    let toolchain = crate::toolchain::active(package.dir())?;
+    let toolchain = crate::toolchain::active(ctx, package.dir())?;
     for check in crate::toolchain::check_targets(&toolchain, &[TRIPLE.to_string()]) {
         if check.failed() {
             return Err(check.into_error());

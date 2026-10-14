@@ -429,8 +429,7 @@ fn build_deb(
     rel.check(ctx, check);
     rel.tool(
         "dpkg-deb",
-        ctx.probe(&Cmd::new(&dpkg_deb).arg("--version"))
-            .ok()
+        ctx.optional_probe(&Cmd::new(&dpkg_deb).arg("--version"))
             .and_then(|o| o.stdout_text().lines().next().map(str::to_string))
             .unwrap_or_default(),
     );

@@ -27,7 +27,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -317,6 +317,51 @@ impl Outcome {
             End::Interrupted(signal) => format!("interrupted by {}", signals::name(signal)),
         }
     }
+
+    /// Why a failed run failed, for an error's detail: the last `lines`
+    /// lines of stderr, or [`Outcome::describe`] when stderr holds none (a
+    /// detail is never left empty after its colon).
+    pub fn reason(&self, lines: usize) -> String {
+        let tail = self.stderr_tail(lines);
+        if tail.is_empty() {
+            self.describe()
+        } else {
+            tail
+        }
+    }
+
+    /// stdout and stderr, trimmed, for a detail that quotes both; or
+    /// [`Outcome::describe`] when neither holds anything.
+    pub fn output_or_describe(&self) -> String {
+        let text = format!("{}{}", self.stdout_text(), self.stderr_text());
+        let text = text.trim();
+        if text.is_empty() {
+            self.describe()
+        } else {
+            text.to_string()
+        }
+    }
+}
+
+/// Spawns `command`. A test retries a spawn that fails with ETXTBSY (the
+/// exec sees a script busy): a fork in another test thread can hold the write
+/// handle of a script that was just written, until that thread's own exec
+/// closes it. Production spawns once.
+fn spawn_child(command: &mut Command) -> io::Result<Child> {
+    const ATTEMPTS: u32 = 50;
+    if !cfg!(test) {
+        return command.spawn();
+    }
+    let mut attempt = 1;
+    loop {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && attempt < ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Runs a command to completion (or its time limit, or a signal).
@@ -372,7 +417,7 @@ pub fn run(
         .stderr(Stdio::from(stderr_file.try_clone()?))
         .process_group(0);
 
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = spawn_child(&mut command).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!("cannot start `{}`: {error}", cmd.program.to_string_lossy()),
@@ -757,6 +802,23 @@ fn padding_len(bytes: &[u8], at: usize) -> usize {
         }
     }
     end - at
+}
+
+/// A fake tool for the tests: an executable shell script named `name` in
+/// `dir` that runs `body`. Its path is what a test passes as the tool.
+#[cfg(test)]
+pub(crate) fn fake_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    // Written, synced and closed before the first spawn: a script still open
+    // for writing cannot be exec'd (see `spawn_child`, which retries that).
+    let mut file = File::create(&path).unwrap();
+    file.write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
+        .unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
 }
 
 /// Base64 as a test writes it: standard or URL-safe, padded or not. The
@@ -1731,6 +1793,31 @@ mod tests {
 
     fn sh(script: &str) -> Cmd {
         Cmd::new("/bin/sh").arg("-c").arg(script)
+    }
+
+    #[test]
+    fn output_or_describe_quotes_the_output_or_says_the_status() {
+        let silent = run(&sh("exit 1"), None, None).unwrap();
+        assert_eq!(silent.output_or_describe(), "exit 1");
+        let quiet_stdout = run(&sh("echo only-out; exit 2"), None, None).unwrap();
+        assert_eq!(quiet_stdout.output_or_describe(), "only-out");
+        let loud = run(&sh("echo out; echo err >&2; exit 3"), None, None).unwrap();
+        assert_eq!(loud.output_or_describe(), "out\nerr");
+    }
+
+    #[test]
+    fn reason_says_the_status_when_stderr_is_silent() {
+        let silent = run(&sh("exit 1"), None, None).unwrap();
+        assert_eq!(silent.reason(3), "exit 1");
+        let loud = run(&sh("echo first >&2; echo boom >&2; exit 2"), None, None).unwrap();
+        assert_eq!(loud.reason(1), "boom");
+        let timed = run(
+            &sh("sleep 30").timeout(Duration::from_millis(300)),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(timed.reason(3), "timed out after 300ms");
     }
 
     #[test]

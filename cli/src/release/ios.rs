@@ -326,7 +326,7 @@ fn prepare(ctx: &mut Ctx, rel: &mut Release) -> Result<Prepared> {
         },
     );
 
-    let toolchain = crate::toolchain::active(rel.package.dir())?;
+    let toolchain = crate::toolchain::active(ctx, rel.package.dir())?;
     for check in crate::toolchain::check_targets(&toolchain, &[TRIPLE.to_string()]) {
         if check.failed() {
             return Err(check.into_error());
@@ -1100,7 +1100,7 @@ fn build(ctx: &mut Ctx, rel: &mut Release, prepared: Prepared) -> Result<()> {
         } else {
             Check::fail(
                 CheckId::IosSignVerify,
-                format!("codesign --verify failed: {}", outcome.stderr_tail(4)),
+                format!("codesign --verify failed: {}", outcome.reason(4)),
             )
             .evidence(Evidence::file(outcome.log.as_deref().unwrap_or(&app)))
         },
@@ -1209,7 +1209,7 @@ fn ipa_checks(ctx: &Ctx, ipa_path: &Path, scratch: &Path) -> Result<Vec<Check>> 
             CheckId::IosIpaSignature,
             format!(
                 "the app extracted from the .ipa does not verify: {}",
-                outcome.stderr_tail(4)
+                outcome.reason(4)
             ),
         )
         .evidence(Evidence::file(ipa_path))

@@ -264,7 +264,7 @@ pub fn read_plist(ctx: &Ctx, path: &Path) -> Result<Map<String, Value>> {
             format!(
                 "plutil cannot read {}: {}",
                 crate::paths::display(path),
-                outcome.stderr_tail(3)
+                outcome.reason(3)
             ),
         ));
     }
@@ -461,10 +461,12 @@ fn gates(ctx: &Ctx, app: &Path, executable: &Path, info: &Map<String, Value>) ->
             .timeout(Duration::from_secs(30)),
     )?;
     if !outcome.success() {
-        let text = format!("{}{}", outcome.stdout_text(), outcome.stderr_text());
         return Err(IcmError::new(
             CheckId::IosPlistLint,
-            format!("plutil -lint rejected the bundle's plists: {}", text.trim()),
+            format!(
+                "plutil -lint rejected the bundle's plists: {}",
+                outcome.output_or_describe()
+            ),
         )
         .evidence(Evidence::file(&info_path)));
     }

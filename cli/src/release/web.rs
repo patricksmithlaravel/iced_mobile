@@ -160,15 +160,20 @@ fn chrome(ctx: &mut Ctx) -> Result<Found> {
     })
 }
 
-/// `wasm-opt --version`, e.g. `wasm-opt version 133 (version_133)`.
+/// The time limit of `wasm-opt --version`.
+const WASM_OPT_VERSION_LIMIT: Duration = Duration::from_secs(30);
+
+/// `wasm-opt --version`, e.g. `wasm-opt version 133 (version_133)`. `None`
+/// when it cannot be read, which leaves the record at the pinned version; a
+/// probe that runs out of its limit also WARNs `step.timeout`.
 fn wasm_opt_version(ctx: &Ctx, wasm_opt: &Path) -> Option<String> {
-    let outcome = ctx
-        .probe(
-            &Cmd::new(wasm_opt)
-                .arg("--version")
-                .timeout(Duration::from_secs(30)),
-        )
-        .ok()?;
+    wasm_opt_version_within(ctx, wasm_opt, WASM_OPT_VERSION_LIMIT)
+}
+
+/// [`wasm_opt_version`] with the limit of its probe (a test passes a fake
+/// that runs out of time).
+fn wasm_opt_version_within(ctx: &Ctx, wasm_opt: &Path, limit: Duration) -> Option<String> {
+    let outcome = ctx.optional_probe(&Cmd::new(wasm_opt).arg("--version").timeout(limit))?;
     let text = outcome.stdout_text();
     let line = text.lines().next()?.trim();
     Some(line.strip_prefix("wasm-opt ").unwrap_or(line).to_string())
@@ -584,6 +589,18 @@ impl Pipeline for Web {
                     );
                     found.path
                 }
+                // Out of its time limit: the release stops with step.timeout
+                // (see `wasm_bindgen_cli`), not with a missing CLI.
+                Err(error) if error.check_id() == Some(CheckId::StepTimeout) => {
+                    plan.push(
+                        Step::internal(
+                            "deps.wasm_bindgen_cli",
+                            &format!("{}: the release would stop with step.timeout", error.detail),
+                        )
+                        .gate(CheckId::StepTimeout),
+                    );
+                    PathBuf::from("wasm-bindgen")
+                }
                 Err(_) => {
                     plan.push(
                         Step::internal(
@@ -712,7 +729,7 @@ impl Pipeline for Web {
     fn preconditions(&self, ctx: &mut Ctx, rel: &mut Release) -> Result<()> {
         let project = rel.project.clone();
         // The wasm32 target on the toolchain the project resolves.
-        let toolchain = crate::toolchain::active(project.dir())?;
+        let toolchain = crate::toolchain::active(ctx, project.dir())?;
         for check in crate::toolchain::check_targets(&toolchain, &[TRIPLE.to_string()]) {
             if check.failed() {
                 return Err(check.into_error());
@@ -954,17 +971,18 @@ impl Pipeline for Web {
             rel.check(ctx, check);
         }
         match web::iced_features(ctx, &rel.package.manifest_path) {
-            Some(features) => {
+            Ok(Some(features)) => {
                 let check = web::renderer_check(&features);
                 rel.check(ctx, check);
             }
-            None => rel.check(
+            Ok(None) => rel.check(
                 ctx,
                 Check::skip(
                     CheckId::WebRendererFallback,
                     "cannot resolve iced's features for wasm32 (cargo metadata --offline failed)",
                 ),
             ),
+            Err(error) => rel.check(ctx, Check::from_error(error, crate::error::Status::Skip)),
         }
         if let Some(size) = &size {
             let path = rel.dist.join(SIZE);
@@ -1089,6 +1107,33 @@ impl Pipeline for Web {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wasm_opt_version_that_runs_out_of_time_warns_and_is_left_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wasm_opt = crate::process::fake_script(tmp.path(), "wasm-opt", "sleep 30");
+        let ctx = crate::context::test_ctx();
+        let version = wasm_opt_version_within(&ctx, &wasm_opt, Duration::from_millis(300));
+        assert_eq!(version, None);
+        assert_eq!(
+            ctx.rep.warning_ids(),
+            vec![CheckId::StepTimeout.id().to_string()]
+        );
+    }
+
+    #[test]
+    fn a_wasm_opt_version_is_the_first_line_without_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wasm_opt = crate::process::fake_script(
+            tmp.path(),
+            "wasm-opt",
+            "echo 'wasm-opt version 133 (version_133)'",
+        );
+        let ctx = crate::context::test_ctx();
+        let version = wasm_opt_version_within(&ctx, &wasm_opt, Duration::from_secs(10));
+        assert_eq!(version.as_deref(), Some("version 133 (version_133)"));
+        assert!(ctx.rep.warning_ids().is_empty());
+    }
 
     #[test]
     fn bases_are_read_from_pages() {

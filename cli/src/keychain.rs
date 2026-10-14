@@ -21,7 +21,10 @@
 //! Every other outcome keeps the failure's own id: codesign failing for
 //! another reason, a list that cannot be read, and an empty list. icm prints
 //! the restore command from the paths it read, so an empty list has no
-//! command to give, and icm does not guess one.
+//! command to give, and icm does not guess one. A list read that runs out of
+//! its limit also WARNs `step.timeout` (`Ctx::optional_probe`, design
+//! Appendix D item 23), so a stalled `security` is not taken for a list that
+//! could not be read.
 
 use crate::catalogue::CheckId;
 use crate::context::Ctx;
@@ -33,12 +36,16 @@ use std::time::Duration;
 /// codesign's message when none of the keychains it searches holds the identity.
 const NO_IDENTITY: &str = "no identity found";
 
+/// How long `security list-keychains` may take. `--timeout` does not reach
+/// it, so its timeout names this limit (`context::probe_end_error`).
+const LIST_LIMIT: Duration = Duration::from_secs(30);
+
 /// `security list-keychains -d user`: the user's keychain search list. icm
 /// only reads it; it never runs `-s`, which changes the list.
 fn list_cmd() -> Cmd {
     Cmd::tool("security")
         .args(["list-keychains", "-d", "user"])
-        .timeout(Duration::from_secs(30))
+        .timeout(LIST_LIMIT)
 }
 
 /// The paths `security list-keychains` prints: one quoted path per line.
@@ -55,9 +62,17 @@ fn parse_list(text: &str) -> Vec<PathBuf> {
 /// The user's keychain search list, with at least one path. `None` when
 /// `security` fails or its listing has no quoted path, an empty list
 /// included: icm cannot then say that a keychain is outside it, so the
-/// failure keeps its own id.
+/// failure keeps its own id. A `security` that runs out of its limit is
+/// `None` too, and WARNs `step.timeout` with the command and the limit
+/// ([`Ctx::optional_probe`]).
 fn search_list(ctx: &Ctx) -> Option<Vec<PathBuf>> {
-    let outcome = ctx.probe(&list_cmd()).ok()?;
+    search_list_from(ctx, &list_cmd())
+}
+
+/// [`search_list`] with the command that lists it (a test passes a fake one
+/// that runs out of time).
+fn search_list_from(ctx: &Ctx, cmd: &Cmd) -> Option<Vec<PathBuf>> {
+    let outcome = ctx.optional_probe(cmd)?;
     if !outcome.success() {
         return None;
     }
@@ -152,8 +167,10 @@ fn not_listed(
         "Append the keychain to the user's keychain search list (the first command), run the release again, then put the list back (the last command). icm never changes the list itself.",
         &[append.as_str(), restore.as_str()],
     );
+    // The excerpt is codesign's last stderr line, or its status when stderr
+    // is empty (`Outcome::reason`), so it is never blank.
     if let Some(log) = &outcome.log {
-        error = error.evidence(Evidence::file(log).with_excerpt(outcome.stderr_tail(1)));
+        error = error.evidence(Evidence::file(log).with_excerpt(outcome.reason(1)));
     }
     error
 }
@@ -191,6 +208,55 @@ mod tests {
         // listing is never taken for a list that lacks the keychain.
         assert!(parse_list("login.keychain-db\n\n   \n").is_empty());
         assert!(parse_list("    \"\"\n").is_empty());
+    }
+
+    /// `security list-keychains -d user` run by a fake `security` whose
+    /// script body is `body`, with a limit short enough for a test.
+    fn fake_list(dir: &Path, body: &str) -> Cmd {
+        let tool = crate::process::fake_script(dir, "security", body);
+        Cmd::new(&tool)
+            .args(["list-keychains", "-d", "user"])
+            .timeout(Duration::from_millis(300))
+    }
+
+    #[test]
+    fn a_list_read_that_answers_gives_its_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = crate::context::test_ctx();
+        let cmd = fake_list(tmp.path(), &format!("printf '%s' '{LIST}'"));
+        assert_eq!(search_list_from(&ctx, &cmd), Some(parse_list(LIST)));
+        assert!(ctx.rep.warning_ids().is_empty());
+    }
+
+    #[test]
+    fn a_list_read_that_runs_out_of_time_warns_and_lists_nothing() {
+        // codesign's failure then keeps its own id (the caller gets None),
+        // and the stall shows as a timeout, never as a list that could not
+        // be read.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = crate::context::test_ctx();
+        let cmd = fake_list(tmp.path(), "sleep 30");
+        assert_eq!(search_list_from(&ctx, &cmd), None);
+        assert_eq!(
+            ctx.rep.warning_ids(),
+            vec![CheckId::StepTimeout.id().to_string()]
+        );
+    }
+
+    #[test]
+    fn a_list_read_that_fails_or_lists_nothing_is_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = crate::context::test_ctx();
+        let refused = fake_list(tmp.path(), "echo 'cannot read the list' >&2; exit 1");
+        assert_eq!(search_list_from(&ctx, &refused), None);
+        let empty = tempfile::tempdir().unwrap();
+        let empty = fake_list(empty.path(), "exit 0");
+        assert_eq!(search_list_from(&ctx, &empty), None);
+        let missing = Cmd::new(tmp.path().join("no-such-security"))
+            .args(["list-keychains", "-d", "user"])
+            .timeout(Duration::from_millis(300));
+        assert_eq!(search_list_from(&ctx, &missing), None);
+        assert!(ctx.rep.warning_ids().is_empty());
     }
 
     #[test]
@@ -281,6 +347,25 @@ mod tests {
             ]
         );
         assert_eq!(error.evidence.len(), 1);
+        assert_eq!(
+            error.evidence[0].excerpt.as_deref(),
+            Some("3333333333333333333333333333333333333333: no identity found")
+        );
+
+        // codesign that says it on stdout only: the excerpt gives its status.
+        let quiet = failed(
+            "3333333333333333333333333333333333333333: no identity found\n",
+            "",
+            Some(Path::new("/run/codesign.log")),
+        );
+        let error = not_listed(
+            CheckId::MacosSignKeychainNotInSearchList,
+            keychain,
+            "3333333333333333333333333333333333333333",
+            &list,
+            &quiet,
+        );
+        assert_eq!(error.evidence[0].excerpt.as_deref(), Some("exit 1"));
     }
 
     #[test]

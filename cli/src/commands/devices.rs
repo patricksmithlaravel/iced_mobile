@@ -152,7 +152,7 @@ fn ios_sim(ctx: &mut Ctx) -> Result<(String, Value, String)> {
     if !outcome.success() {
         return Err(IcmError::new(
             CheckId::ToolFailed,
-            format!("simctl list failed: {}", outcome.stderr_tail(3)),
+            format!("simctl list failed: {}", outcome.reason(3)),
         ));
     }
     let mut devices = crate::simctl::parse_devices(&outcome.stdout_text())

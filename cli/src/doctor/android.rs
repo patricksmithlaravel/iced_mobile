@@ -6,9 +6,9 @@
 use super::{Fix, Probe, Requirement, find_tool};
 use crate::catalogue::{By, CheckId};
 use crate::cli::Platform;
-use crate::error::{Check, Evidence, Status};
+use crate::error::{Check, Evidence, IcmError, Status};
 use crate::managed;
-use crate::tools::{self, AndroidSdk};
+use crate::tools::{self, AndroidSdk, Env};
 use std::path::{Path, PathBuf};
 
 const PLATFORM: Option<Platform> = Some(Platform::Android);
@@ -43,47 +43,9 @@ pub(super) fn gather(probe: &Probe<'_>) -> Vec<Requirement> {
     };
 
     // The JDK every SDK Java tool needs (Appendix C item 2).
-    let jdk_ok = match tools::jdk(probe.host, probe.env, true) {
-        Ok(jdk) => {
-            out.push(Requirement::new(
-                "android.jdk",
-                PLATFORM,
-                Check::pass(
-                    CheckId::EnvJdkMissing,
-                    format!(
-                        "Java {} at {} ({}); passed to Android tools as JAVA_HOME",
-                        jdk.version,
-                        jdk.home.display(),
-                        jdk.source
-                    ),
-                ),
-            ));
-            true
-        }
-        Err(error) => {
-            let check = Check::from_error(error, Status::Fail);
-            let requirement = if find_tool(probe.env, "brew").is_some() {
-                Requirement::new("android.jdk", PLATFORM, check).with_fixes(
-                    vec![Fix::Brew {
-                        formula: "openjdk@21".to_string(),
-                    }],
-                    probe.env,
-                )
-            } else {
-                let mut check = check;
-                check.error = check
-                    .error
-                    .fix(
-                        "Install a JDK 17 or newer and set JAVA_HOME (or `java_home` in ~/.config/icm/host.toml).",
-                        &[],
-                    )
-                    .by(By::Owner);
-                Requirement::new("android.jdk", PLATFORM, check)
-            };
-            out.push(requirement);
-            false
-        }
-    };
+    let (jdk_requirement, jdk_ok) =
+        jdk_requirement(tools::jdk(probe.host, probe.env, true), probe.env);
+    out.push(jdk_requirement);
 
     // sdkmanager and avdmanager come with the command-line tools, which
     // only the owner can install (they bootstrap sdkmanager itself).
@@ -467,5 +429,107 @@ fn avd(
             check.error.fix.commands = vec!["icm doctor android --fix --yes".to_string()];
             Requirement::new(key, PLATFORM, check)
         }
+    }
+}
+
+/// The `android.jdk` requirement for a JDK search's result, and whether a JDK
+/// was found. A search that ran out of its time limit keeps that timeout
+/// (`step.timeout`) and gets no fix: a JDK may well be installed, so neither
+/// `brew install openjdk@21` nor the owner's "install a JDK" remedy applies.
+fn jdk_requirement(found: Result<tools::Jdk, IcmError>, env: &Env) -> (Requirement, bool) {
+    match found {
+        Ok(jdk) => (
+            Requirement::new(
+                "android.jdk",
+                PLATFORM,
+                Check::pass(
+                    CheckId::EnvJdkMissing,
+                    format!(
+                        "Java {} at {} ({}); passed to Android tools as JAVA_HOME",
+                        jdk.version,
+                        jdk.home.display(),
+                        jdk.source
+                    ),
+                ),
+            ),
+            true,
+        ),
+        Err(error) if error.check_id() == Some(CheckId::StepTimeout) => (
+            Requirement::new(
+                "android.jdk",
+                PLATFORM,
+                Check::from_error(error, Status::Fail),
+            ),
+            false,
+        ),
+        Err(error) => {
+            let check = Check::from_error(error, Status::Fail);
+            let requirement = if find_tool(env, "brew").is_some() {
+                Requirement::new("android.jdk", PLATFORM, check).with_fixes(
+                    vec![Fix::Brew {
+                        formula: "openjdk@21".to_string(),
+                    }],
+                    env,
+                )
+            } else {
+                let mut check = check;
+                check.error = check
+                    .error
+                    .fix(
+                        "Install a JDK 17 or newer and set JAVA_HOME (or `java_home` in ~/.config/icm/host.toml).",
+                        &[],
+                    )
+                    .by(By::Owner);
+                Requirement::new("android.jdk", PLATFORM, check)
+            };
+            (requirement, false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An environment in which `brew` is found: `ICM_TOOL_BREW` names a file
+    /// that exists.
+    fn env_with_brew(dir: &Path) -> Env {
+        let brew = dir.join("brew");
+        std::fs::write(&brew, "").unwrap();
+        Env::from_pairs(&[("ICM_TOOL_BREW", brew.to_str().unwrap())], None)
+    }
+
+    #[test]
+    fn a_jdk_search_that_runs_out_of_time_keeps_its_timeout_and_gets_no_fix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = env_with_brew(tmp.path());
+        let error = IcmError::new(
+            CheckId::StepTimeout,
+            "step java -version exceeded its 20s limit",
+        );
+        let (requirement, found) = jdk_requirement(Err(error), &env);
+        assert!(!found);
+        assert_eq!(requirement.key, "android.jdk");
+        assert_eq!(requirement.check.id(), CheckId::StepTimeout.id());
+        assert_eq!(requirement.check.error.exit.code(), 8);
+        assert!(requirement.check.error.detail.contains("20s"));
+        assert!(requirement.fixes.is_empty(), "{:?}", requirement.fixes);
+    }
+
+    #[test]
+    fn a_missing_jdk_still_gets_brew_when_brew_is_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = env_with_brew(tmp.path());
+        let error = IcmError::new(CheckId::EnvJdkMissing, "no JDK 17 or newer found");
+        let (requirement, found) = jdk_requirement(Err(error), &env);
+        assert!(!found);
+        assert!(
+            matches!(
+                requirement.fixes.as_slice(),
+                [Fix::Brew { formula }] if formula == "openjdk@21"
+            ),
+            "{:?}",
+            requirement.fixes
+        );
     }
 }

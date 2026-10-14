@@ -912,6 +912,18 @@ pub fn redact(value: &mut Value) {
 }
 
 #[cfg(test)]
+impl Reporter {
+    /// The ids of the warnings reported so far (for tests).
+    pub fn warning_ids(&self) -> Vec<String> {
+        self.lock()
+            .warnings
+            .iter()
+            .map(|error| error.id.to_string())
+            .collect()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::catalogue::CheckId;

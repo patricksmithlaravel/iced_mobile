@@ -450,9 +450,14 @@ mod tests {
     }
 
     fn script(dir: &Path, name: &str, body: &str, executable: bool) {
+        use std::io::Write;
         let path = dir.join(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, body).unwrap();
+        // Synced and closed before the first spawn (see process::fake_script).
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(body.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
         let mode = if executable { 0o755 } else { 0o644 };
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
