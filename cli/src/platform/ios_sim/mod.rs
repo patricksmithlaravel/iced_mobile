@@ -3,15 +3,24 @@
 //!
 //! `run`:
 //! 1. Prelude: macOS host, Xcode (exit 9 when missing), the project's Rust
-//!    target (exit 4), the simulator runtime and device (exit 4 / 7).
+//!    toolchain and simulator target (exit 4; a probe that runs out of its
+//!    limit is `step.timeout`, exit 8), then the simulator runtime and
+//!    device (exit 4 / 7; created when missing). The toolchain comes
+//!    first, so nothing is created or booted before its probes: a first
+//!    boot loads the host so hard that a probe's 60 s limit can pass during
+//!    it (Appendix D, "iOS Simulator"). `--no-build` checks its previous
+//!    bundle at that point instead (exit 2), so it stops before any
+//!    simulator is listed, created or booted too.
 //! 2. Build: `IPHONEOS_DEPLOYMENT_TARGET=<min_os> cargo build --bin <bin>
 //!    --target aarch64-apple-ios-sim` (a changed `min_os` relinks the app,
-//!    Appendix C item 6), then the Mach-O gates.
-//! 3. Bundle: Info.plist with the scene manifest, actool AppIcon,
-//!    PrivacyInfo, resources, plist gates, ad-hoc codesign ([`bundle`]).
+//!    Appendix C item 6), while the simulator boots.
+//! 3. Once the simulator has booted: the Mach-O gates, then the bundle
+//!    (Info.plist with the scene manifest, actool AppIcon, PrivacyInfo,
+//!    resources, plist gates, ad-hoc codesign, [`bundle`]). These run short
+//!    host tools, so none of them runs during a boot.
 //! 4. Simulator: icm's managed `icm-<type>-ios-<version>` (created when
-//!    missing; `--runtime min` tests the lowest runtime), booted while
-//!    cargo builds; install.
+//!    missing; `--runtime min` tests the lowest runtime), booted at the
+//!    start of step 2 and waited for before step 3; install.
 //! 5. Launch with `SIMCTL_CHILD_ICM_EVENTS=1`, after starting a detached
 //!    `log stream` collector for `icm logs` (Appendix C item 26). Ready is
 //!    `ICM_EVENT ready` in the app's stderr; without events, `launchctl
@@ -56,6 +65,7 @@ use crate::plan::{Plan, Step};
 use crate::process::{self, Cmd};
 use crate::procid::{self, Identity, Verdict};
 use crate::screen::Screen;
+use crate::toolchain::Toolchain;
 use crate::tools::Xcode;
 use bundle::Bundle;
 use serde_json::{Map, Value, json};
@@ -145,22 +155,20 @@ fn set_tools(ctx: &Ctx, xcode: &Xcode, rustc: Option<&str>, runtime: Option<Stri
 
 // ---- build ---------------------------------------------------------------------------------
 
-/// What `build_app` produced.
+/// What `package_app` produced.
 struct Built {
     bundle: Bundle,
     bin: String,
-    /// `1.98.0`, when this run built.
-    rustc: Option<String>,
 }
 
-/// `cargo build` for the simulator, the Mach-O gates, the bundle.
-fn build_app(ctx: &mut Ctx, project: &Project, xcode: &Xcode, release: bool) -> Result<Built> {
-    let profile = profile_name(release);
-    let package = project.package_for(PLATFORM)?.clone();
-    let bin = project.bin_for(PLATFORM)?;
+/// The package's Rust toolchain, with the simulator target checked. `build`
+/// makes these probes before it compiles, and `run` before it creates or
+/// boots a simulator: they are `rustc` runs with a 60 s limit, and a first
+/// boot loads the host so hard that one can pass it (Appendix D, "iOS
+/// Simulator").
+fn resolve_toolchain(ctx: &mut Ctx, project: &Project, xcode: &Xcode) -> Result<Toolchain> {
+    let package = project.package_for(PLATFORM)?;
     let triple = crate::toolchain::ios_sim_triple();
-    let min_os = project.config.config.ios.min_os.clone();
-
     let toolchain = crate::toolchain::active(ctx, package.dir())?;
     for check in crate::toolchain::check_targets(&toolchain, &[triple.to_string()]) {
         if check.failed() {
@@ -168,8 +176,25 @@ fn build_app(ctx: &mut Ctx, project: &Project, xcode: &Xcode, release: bool) -> 
         }
         ctx.rep.check(check);
     }
-    let rustc = toolchain.rustc_version().to_string();
-    set_tools(ctx, xcode, Some(&rustc), None);
+    set_tools(ctx, xcode, Some(toolchain.rustc_version()), None);
+    Ok(toolchain)
+}
+
+/// The simulator executable `compile_app` built.
+struct Compiled {
+    exe: PathBuf,
+    bin: String,
+}
+
+/// `cargo build` for the simulator, with the deployment target it needs.
+/// Cargo is the only long step of a build, so it is the one `run` lets
+/// overlap a simulator's boot (see [`package_app`]).
+fn compile_app(ctx: &mut Ctx, project: &Project, release: bool) -> Result<Compiled> {
+    let profile = profile_name(release);
+    let package = project.package_for(PLATFORM)?.clone();
+    let bin = project.bin_for(PLATFORM)?;
+    let triple = crate::toolchain::ios_sim_triple();
+    let min_os = project.config.config.ios.min_os.clone();
 
     let prepared = ctx.deployment_target(project, &package.name, Some(triple), profile, &min_os)?;
     let mut env = Vec::new();
@@ -200,14 +225,29 @@ fn build_app(ctx: &mut Ctx, project: &Project, xcode: &Xcode, release: bool) -> 
             crate::paths::display(&exe)
         )));
     }
-    macho_gates(ctx, &exe, &min_os)?;
+    Ok(Compiled { exe, bin })
+}
 
-    let bundle = bundle::assemble(ctx, project, xcode, &exe, &bin, profile)?;
+/// The Mach-O gates and the bundle of a compiled simulator executable. Their
+/// host tools (plutil, xattr, codesign, actool) have limits of 30 to 180 s,
+/// so `run` calls this only once the simulator has booted: a first boot
+/// starves short commands of the host as it starved the probes.
+fn package_app(
+    ctx: &mut Ctx,
+    project: &Project,
+    xcode: &Xcode,
+    compiled: Compiled,
+    release: bool,
+) -> Result<Built> {
+    let profile = profile_name(release);
+    let min_os = project.config.config.ios.min_os.clone();
+    macho_gates(ctx, &compiled.exe, &min_os)?;
+
+    let bundle = bundle::assemble(ctx, project, xcode, &compiled.exe, &compiled.bin, profile)?;
     ctx.rep.artifact("bundle", &bundle.app);
     Ok(Built {
         bundle,
-        bin,
-        rustc: Some(rustc),
+        bin: compiled.bin,
     })
 }
 
@@ -296,7 +336,6 @@ fn previous_bundle(project: &Project, release: bool) -> Result<Built> {
             info: Map::new(),
         },
         bin,
-        rustc: None,
     })
 }
 
@@ -312,7 +351,9 @@ pub fn build(ctx: &mut Ctx, args: &BuildArgs) -> Result<()> {
         return Ok(());
     }
     let _lock = ctx.lock_platform(PLATFORM)?;
-    let built = build_app(ctx, &project, &xcode, args.release)?;
+    resolve_toolchain(ctx, &project, &xcode)?;
+    let compiled = compile_app(ctx, &project, args.release)?;
+    let built = package_app(ctx, &project, &xcode, compiled, args.release)?;
     ctx.rep.summary(format!(
         "built {} for the iOS Simulator",
         crate::paths::display(&built.bundle.app)
@@ -1320,6 +1361,15 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
     }
 
     let lock = ctx.lock_platform(PLATFORM)?;
+    // Before any simulator is listed, created or booted, the run must be able
+    // to finish: a build needs its toolchain's probes to pass, and
+    // `--no-build` needs a previous bundle to reuse.
+    let (rustc, previous) = if args.no_build {
+        (None, Some(previous_bundle(&project, args.release)?))
+    } else {
+        let toolchain = resolve_toolchain(ctx, &project, &xcode)?;
+        (Some(toolchain.rustc_version().to_string()), None)
+    };
     let target = choose_target(ctx, &project, &xcode, args)?;
     ctx.rep.set("device", target.json());
     // Boot while cargo builds.
@@ -1332,20 +1382,29 @@ pub fn run(ctx: &mut Ctx, args: &RunArgs) -> Result<()> {
                 .timeout(Duration::from_secs(30)),
         );
     }
-
-    let built = if args.no_build {
-        previous_bundle(&project, args.release)?
-    } else {
-        build_app(ctx, &project, &xcode, args.release)?
-    };
     set_tools(
         ctx,
         &xcode,
-        built.rustc.as_deref(),
+        rustc.as_deref(),
         Some(format!("iOS {} ({})", target.os, target.runtime_build)),
     );
 
+    let compiled = if args.no_build {
+        None
+    } else {
+        Some(compile_app(ctx, &project, args.release)?)
+    };
     finish_boot(ctx, &xcode, &target.device)?;
+    // The Mach-O gates and the bundle run once the boot is over (`package_app`).
+    let built = match (compiled, previous) {
+        (Some(compiled), None) => package_app(ctx, &project, &xcode, compiled, args.release)?,
+        (None, Some(previous)) => previous,
+        _ => {
+            return Err(internal(
+                "run: a build or a previous bundle, not both or neither",
+            ));
+        }
+    };
     ctx.rep.check(Check::pass(
         CheckId::IosSimBootFailed,
         format!("{} (iOS {}) is booted", target.device.name, target.os),

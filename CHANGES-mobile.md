@@ -9,6 +9,14 @@ stops at iced 0.14.0.
 
 The changes since `v0.14.1-mobile.2`, among them the fixes from its re-verification.
 
+- **iOS:** `icm run ios-sim` resolves the Rust toolchain before it creates or boots a simulator, and
+  runs the Mach-O gates and the bundle's host tools only after the simulator has booted. A first
+  boot loads the host so hard that the toolchain's 60 s `rustc` probe could pass its limit, which
+  failed `phase2.sh`'s store step in four of its nine CI attempts on 2026-10-12 and 13. Cargo still
+  builds while the simulator boots, and no check changed. The probe's limit is unchanged, and a
+  probe that still runs out of it is `step.timeout` (the probe timeouts, below). `--no-build` checks
+  its previous bundle at the same point, so a run without one stops before any simulator is listed,
+  created or booted.
 - `icm run desktop` no longer writes a value the app inherited from icm's environment to the app's
   live files. The app's stdout and stderr go through a log collector (`icm __session desktop`, a
   process of its own, started after the app), which writes `app.stdout` and `app.stderr` with the
