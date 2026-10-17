@@ -22,7 +22,7 @@ all-features = true
 maintenance = { status = "actively-developed" }
 
 [features]
-default = ["wgpu", "tiny-skia", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11", "wayland", "android-native-activity", "mobile-logger", "mobile-fira-sans", "mobile-system-fonts"]
+default = ["wgpu", "tiny-skia", "crisp", "web-colors", "thread-pool", "x11", "wayland", "android-native-activity", "mobile-logger", "mobile-fira-sans", "mobile-system-fonts"]
 # Enables the `wgpu` GPU-accelerated renderer with all its default features (Vulkan, Metal, DX12, OpenGL, and WebGPU)
 wgpu = ["wgpu-bare", "iced_renderer/wgpu"]
 # Enables the `wgpu` GPU-accelerated renderer with the minimum required features (no backends!)
@@ -83,8 +83,6 @@ strict-assertions = ["iced_renderer/strict-assertions"]
 unconditional-rendering = ["iced_winit/unconditional-rendering"]
 # Enables support for the `sipper` library
 sipper = ["iced_runtime/sipper"]
-# Enables Linux system theme detection
-linux-theme-detection = ["iced_winit/linux-theme-detection"]
 # Enables the Unix X11 backend
 x11 = ["iced_renderer/x11", "iced_winit/x11"]
 # Enables the Unix Wayland backend
@@ -279,7 +277,6 @@ lilt = "0.8"
 log = "0.4"
 lyon = "1.0"
 lyon_path = "1.0"
-mundy = { version = "0.2", default-features = false }
 ndk-context = "0.1.1"
 nom = "8"
 num-traits = "0.2"

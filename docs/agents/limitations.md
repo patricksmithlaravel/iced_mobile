@@ -355,6 +355,9 @@ this file in the commit that fixes or finds a limitation.
   `platform/android/res` so the launch window and icons stay light. On
   iOS the status bar always follows the system's mode, also when the app
   forces the other one.
+- **Linux reports no system light or dark mode.** `iced::system::theme()` answers `None` there and
+  `iced::system::theme_changes()` reports nothing, so without `.theme(..)` the app draws the light
+  theme on Linux. Force a theme to look the same on every desktop.
 - **Two lifecycle channels, with different timing.**
   `iced::mobile::lifecycle()` delivers an `iced::mobile::LifecycleEvent`
   (`Foreground`, `Active`, `Inactive`, `Background` and `MemoryWarning`;
