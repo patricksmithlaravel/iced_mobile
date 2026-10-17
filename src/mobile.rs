@@ -264,18 +264,20 @@
 //!   notch is not reported.
 //!
 //! The first value arrives when the window opens, then one per change:
-//! rotation, a new display cutout, the keyboard showing or hiding. On
-//! Android a change can take a few tenths of a second to settle: the shell
-//! reads again while the system bars settle, and every quarter of a second
-//! while a text input has the focus, since the keyboard sends no event of
-//! its own when the app draws edge to edge. A turn from one landscape to
-//! the other resizes nothing either: the shell compares the display's
-//! rotation after a redraw, which Android asks for then. A keyboard counts
-//! only while a text input of the app has the focus (and for the second it
-//! takes to slide away), so the keyboard another app left up does not
-//! raise the bottom when the app comes back. On iOS the window can report
+//! rotation, a new display cutout, the keyboard showing or hiding. After
+//! the window opens, resumes or changes size, the platform can take a few
+//! tenths of a second to settle: on Android and iOS the shell reads again
+//! for 600 ms, every tenth of a second. On Android it also reads every
+//! quarter of a second while a text input has the focus, since the keyboard
+//! sends no event of its own when the app draws edge to edge. A turn from
+//! one landscape to the other resizes nothing either: the shell compares the
+//! display's rotation after a redraw, which Android asks for then. A keyboard
+//! counts only while a text input of the app has the focus (and for the
+//! second it takes to slide away), so the keyboard another app left up does
+//! not raise the bottom when the app comes back. On iOS the window can report
 //! zero insets for a frame, under the launch screen, before it is in its
-//! scene. On phones every window fills the screen, so they share one safe
+//! scene; the reads of the 600 ms after it opens pick up the insets once it
+//! is. On phones every window fills the screen, so they share one safe
 //! area.
 //!
 //! [`SafeArea::keyboard`] is measured from the bottom edge, so it covers the

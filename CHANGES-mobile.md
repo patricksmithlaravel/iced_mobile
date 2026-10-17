@@ -4,6 +4,15 @@ What changed in each release of the fork, newest first. A release is one tag, `v
 for the framework and `icm` together. [CHANGELOG.md](CHANGELOG.md) is upstream's and stops at
 iced 0.14.0.
 
+## Unreleased
+
+The changes since `v0.14.1-mobile.2`: one fix to the iOS safe area.
+
+- **iOS:** the shell reads the safe area again every 100 ms for 600 ms after the window opens,
+  resumes or changes size, as Android does. Before, it read at the turns of the event loop only, so
+  a value that UIKit reported after the first read stayed unpublished until something else woke the
+  loop.
+
 ## Changes in v0.14.1-mobile.2
 
 ```sh
