@@ -15,6 +15,7 @@ on:
       - "winit/**"
       - "vendor/**"
       - ".github/workflows/icm-android.yml"
+      - ".github/ci/evidence.sh"
   pull_request:
     paths:
       - "cli/**"
@@ -23,6 +24,7 @@ on:
       - "winit/**"
       - "vendor/**"
       - ".github/workflows/icm-android.yml"
+      - ".github/ci/evidence.sh"
   workflow_dispatch:
 
 permissions:
@@ -37,14 +39,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      ICM_CACHE_DIR: ${{ github.workspace }}/../icm-cache
-      ICM_HOST_CONFIG: ${{ github.workspace }}/../icm-host/host.toml
-      ANDROID_USER_HOME: ${{ github.workspace }}/../android-home
-      ANDROID_AVD_HOME: ${{ github.workspace }}/../android-home/avd
-      DEMO: ${{ github.workspace }}/../demo
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
+
+      # What the job writes outside the checkout lives in the runner's
+      # temporary directory: the demo app (outside the fork's workspace),
+      # icm's cache and host.toml, and Android's per-user files with the
+      # managed AVD. Shell steps read these from GITHUB_ENV. An expression
+      # cannot: `env.DEMO` is empty, since only the shell sees GITHUB_ENV
+      # writes, so the expressions name ${{ runner.temp }}/demo themselves.
+      # A job's `env` cannot name runner.temp either, and upload-artifact
+      # refuses a path through `..`.
+      - name: Paths
+        run: |
+          {
+            echo "ICM_CACHE_DIR=$RUNNER_TEMP/icm-cache"
+            echo "ICM_HOST_CONFIG=$RUNNER_TEMP/icm-host/host.toml"
+            echo "ANDROID_USER_HOME=$RUNNER_TEMP/android-home"
+            echo "ANDROID_AVD_HOME=$RUNNER_TEMP/android-home/avd"
+            echo "DEMO=$RUNNER_TEMP/demo"
+          } >> "$GITHUB_ENV"
 
       # The emulator needs hardware acceleration: the runner's /dev/kvm,
       # opened to the runner user.
@@ -59,6 +74,22 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # The image's command-line tools are 12.0 (2023). On the first runs
+      # its avdmanager did not create the managed AVD from the android-36
+      # image its sdkmanager had just installed ("Package path is not
+      # valid. Valid system image paths are: null"). icm's Android support
+      # was verified with 22.0. sdkmanager installs that (its archive
+      # checked against Google's repository) beside the image's, whose
+      # `latest` then leaves the SDK, so icm takes the newest versioned
+      # directory, as it does in an SDK without `latest`.
+      - name: Android command-line tools 22.0
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --install "cmdline-tools;22.0" </dev/null
+          mv "$ANDROID_HOME/cmdline-tools/latest" "$RUNNER_TEMP/cmdline-tools-image"
+          "$ANDROID_HOME/cmdline-tools/22.0/bin/sdkmanager" --version
+          # The hardware profile of icm's managed AVD.
+          "$ANDROID_HOME/cmdline-tools/22.0/bin/avdmanager" list device -c | grep -x pixel_9
+
       - name: Install icm from this checkout
         run: |
           cargo install --locked --path cli --root "$RUNNER_TEMP/icm"
@@ -67,34 +98,39 @@ jobs:
       - name: New app from the template
         run: |
           mkdir -p "$ICM_CACHE_DIR" "$(dirname "$ICM_HOST_CONFIG")" "$ANDROID_AVD_HOME"
-          icm new "$DEMO" --id dev.ci.demo --framework "path:$GITHUB_WORKSPACE" --json -q | tee new.json
-          jq -e '.ok' new.json
+          icm new "$DEMO" --id dev.ci.demo --framework "path:$GITHUB_WORKSPACE" --json -q | tee "$RUNNER_TEMP/new.json"
+          jq -e '.ok' "$RUNNER_TEMP/new.json"
 
       # The runner image's Android SDK has its licences accepted, so
       # `--fix --yes` may install the NDK, the platform, the emulator, the
       # x86_64 system image and bundletool (pinned, sha256-checked). A
       # runner image without accepted licences needs the owner's decision
       # here (`sdkmanager --licenses`), which this workflow does not make.
+      # It also installs the Rust toolchain the template pins. When a step
+      # fails, it prints the files its result names as evidence.
       - name: Doctor
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: |
           icm doctor android --fix --yes --json -q | tee "$RUNNER_TEMP/doctor.json"
-          jq -e '.exit == 0' "$RUNNER_TEMP/doctor.json"
+          jq -e '.exit == 0' "$RUNNER_TEMP/doctor.json" ||
+            { "$GITHUB_WORKSPACE/.github/ci/evidence.sh" "$RUNNER_TEMP/doctor.json"; exit 1; }
 
       - name: Run on the managed emulator (x86_64 image)
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: |
           icm run android --timeout 30m --json -q | tee "$RUNNER_TEMP/run.json"
-          jq -e '.ok and .process.ready.source == "icm_event"' "$RUNNER_TEMP/run.json"
+          jq -e '.ok and .process.ready.source == "icm_event"' "$RUNNER_TEMP/run.json" ||
+            { "$GITHUB_WORKSPACE/.github/ci/evidence.sh" "$RUNNER_TEMP/run.json"; exit 1; }
 
       - name: Lifecycle suite
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: |
           icm test --on android --lifecycle --timeout 15m --json -q | tee "$RUNNER_TEMP/lifecycle.json"
-          jq -e '.ok and .lifecycle.failed == 0' "$RUNNER_TEMP/lifecycle.json"
+          jq -e '.ok and .lifecycle.failed == 0' "$RUNNER_TEMP/lifecycle.json" ||
+            { "$GITHUB_WORKSPACE/.github/ci/evidence.sh" "$RUNNER_TEMP/lifecycle.json"; exit 1; }
 
       - name: Unsigned release with a universal APK
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: |
           # Not the template's placeholder icon: a plain 1024 px square.
           python3 - <<'EOF'
@@ -108,12 +144,13 @@ jobs:
           open("assets/icon.png", "wb").write(png)
           EOF
           icm release android --sign none --apk --allow-dirty --timeout 45m --json -q | tee "$RUNNER_TEMP/release-unsigned.json"
-          jq -e '.ok and (.artifacts.aab | endswith("-unsigned.aab"))' "$RUNNER_TEMP/release-unsigned.json"
+          jq -e '.ok and (.artifacts.aab | endswith("-unsigned.aab"))' "$RUNNER_TEMP/release-unsigned.json" ||
+            { "$GITHUB_WORKSPACE/.github/ci/evidence.sh" "$RUNNER_TEMP/release-unsigned.json"; exit 1; }
 
       # A throwaway upload key: its password is random and lives only in
       # this step's environment.
       - name: Signed release with a throwaway upload key
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: |
           ICM_TEST_STOREPASS="$(openssl rand -hex 16)"
           export ICM_TEST_STOREPASS
@@ -121,7 +158,8 @@ jobs:
             -validity 365 -dname CN=test -storepass:env ICM_TEST_STOREPASS -keypass:env ICM_TEST_STOREPASS </dev/null
           printf '\n[android.signing]\nupload = { keystore = "%s", alias = "upload", store_pass_env = "ICM_TEST_STOREPASS" }\n' "$RUNNER_TEMP/up.jks" >> icm.toml
           icm release android --apk --allow-dirty --timeout 45m --json -q | tee "$RUNNER_TEMP/release.json"
-          jq -e '.ok and .release.signed and ((.checks.failed | length) == 0)' "$RUNNER_TEMP/release.json"
+          jq -e '.ok and .release.signed and ((.checks.failed | length) == 0)' "$RUNNER_TEMP/release.json" ||
+            { "$GITHUB_WORKSPACE/.github/ci/evidence.sh" "$RUNNER_TEMP/release.json"; exit 1; }
           icm verify android --json -q | tee "$RUNNER_TEMP/verify.json"
           jq -e '.ok' "$RUNNER_TEMP/verify.json"
           if grep -rqF "$ICM_TEST_STOREPASS" target/icm "$RUNNER_TEMP"/*.json; then
@@ -133,9 +171,11 @@ jobs:
 
       - name: Stop everything
         if: always()
-        working-directory: ${{ env.DEMO }}
+        working-directory: ${{ runner.temp }}/demo
         run: icm stop --all --shutdown --json -q || true
 
+      # Every path is absolute and free of `..`, which upload-artifact
+      # refuses. The run directories' logs include a failed fix's.
       - name: Keep the results
         if: always()
         uses: actions/upload-artifact@v4
@@ -143,8 +183,10 @@ jobs:
           name: icm-android
           path: |
             ${{ runner.temp }}/*.json
-            ${{ env.DEMO }}/target/icm/latest/
-            ${{ env.DEMO }}/target/icm/runs/*/*.png
-            ${{ env.DEMO }}/target/icm/dist/latest/android/UPLOAD.md
-            ${{ env.DEMO }}/target/icm/dist/latest/android/artifacts.json
+            ${{ runner.temp }}/demo/target/icm/latest/
+            ${{ runner.temp }}/demo/target/icm/runs/*/*.png
+            ${{ runner.temp }}/demo/target/icm/runs/*/*.log
+            ${{ runner.temp }}/demo/target/icm/runs/*/steps/*.log
+            ${{ runner.temp }}/demo/target/icm/dist/latest/android/UPLOAD.md
+            ${{ runner.temp }}/demo/target/icm/dist/latest/android/artifacts.json
           if-no-files-found: ignore

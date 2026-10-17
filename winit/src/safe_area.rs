@@ -10,8 +10,9 @@
 //!   they cannot be read (`safe_area/android.rs`). A turn of the display by
 //!   half a circle changes no size and no configuration, so a redraw makes
 //!   the shell compare the display's rotation as well.
-//! - iOS: winit's safe-area frame against the window's bounds, and the
-//!   keyboard's frame from UIKit's notification (`safe_area/ios.rs`).
+//! - iOS: winit's safe-area frame against the window's bounds, read at every
+//!   turn of the loop and again for 600 ms after a change, and the keyboard's
+//!   frame from UIKit's notification (`safe_area/ios.rs`).
 //! - Elsewhere: [`SafeArea::ZERO`], once.
 use crate::Control;
 use crate::core::theme;
@@ -25,7 +26,7 @@ pub use crate::runtime::safe_area::{SafeArea, safe_area};
 
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 use crate::core::Padding;
-#[cfg(any(target_os = "android", test))]
+#[cfg(any(target_os = "android", target_os = "ios", test))]
 use crate::core::time::{Duration, Instant};
 
 #[cfg(target_os = "android")]
@@ -52,13 +53,14 @@ pub(crate) fn reset() {
 /// The shell's side: reads the safe area when something may have changed
 /// it, and publishes it when it did.
 pub(crate) struct Shell {
-    /// What each window reported last.
-    windows: Vec<(winit::window::WindowId, SafeArea)>,
-    /// What was published last.
-    published: Option<SafeArea>,
+    /// What each window reported last, and what was published last.
+    areas: Areas<winit::window::WindowId>,
     /// Android: when to read again.
     #[cfg(target_os = "android")]
     polls: Polls,
+    /// iOS: when to read again after a change.
+    #[cfg(target_os = "ios")]
+    settle: Settle,
 }
 
 /// The application ends: its Activity is let go of.
@@ -75,18 +77,21 @@ impl Shell {
         ios::observe_keyboard();
 
         Self {
-            windows: Vec::new(),
-            published: None,
+            areas: Areas::default(),
             #[cfg(target_os = "android")]
             polls: Polls::default(),
+            #[cfg(target_os = "ios")]
+            settle: Settle::default(),
         }
     }
 
     /// Reads the safe area of `window`, which was just opened, resized or
     /// given a new native window, and publishes it if it changed.
     ///
-    /// On Android it is read again over the next 600 ms: the system bars
-    /// and the content rect settle after the event that announced them.
+    /// On Android and iOS it is read again over the next 600 ms, since the
+    /// platform's values settle after the event that announced them: the
+    /// system bars and the content rect on Android, and the safe area of a
+    /// window that UIKit has only just put in its scene on iOS.
     pub(crate) fn refresh<P, C>(&mut self, window: &Window<P, C>)
     where
         P: Program,
@@ -109,6 +114,11 @@ impl Shell {
                 let _ = self.polls.rotated(rotation);
             }
         }
+
+        #[cfg(target_os = "ios")]
+        {
+            self.settle.changed(Instant::now());
+        }
     }
 
     /// Android: a window is about to be drawn.
@@ -130,7 +140,9 @@ impl Shell {
     /// - iOS: every window, at every turn. These are a few property reads,
     ///   and UIKit may change the safe area without resizing the window (as
     ///   it moves it into its scene), or announce the keyboard's frame in a
-    ///   notification that only wakes the loop.
+    ///   notification that only wakes the loop. After a change
+    ///   ([`refresh`](Self::refresh)) the loop is asked to turn every 100 ms
+    ///   for 600 ms, since nothing may wake it when UIKit lays the window out.
     /// - Android: when a poll is due: over the 600 ms after a change, and
     ///   every 250 ms while a window asks for the keyboard and for a second
     ///   after, since the keyboard moves no window and sends no event once
@@ -152,11 +164,24 @@ impl Shell {
     {
         #[cfg(target_os = "ios")]
         {
-            let _ = control;
+            use winit::event_loop::ControlFlow;
+
+            let now = Instant::now();
+
             self.forget_closed(windows);
+
+            // Every turn reads, settling or not. `due` moves the settle on,
+            // so that its next read is never a time already past.
+            let _ = self.settle.due(now);
 
             for (_id, window) in windows.iter_mut() {
                 self.read(window);
+            }
+
+            if let Some(at) = self.settle.next() {
+                let _ = control.start_send(Control::ChangeFlow(
+                    ControlFlow::WaitUntil(at),
+                ));
             }
         }
 
@@ -230,7 +255,7 @@ impl Shell {
             .map(|(_id, window)| window.raw.id())
             .collect();
 
-        self.windows.retain(|(id, _area)| open.contains(id));
+        self.areas.retain(|id| open.contains(id));
     }
 
     /// Reads the safe area of `window`, and publishes it if it is new for
@@ -258,23 +283,58 @@ impl Shell {
             area.with_keyboard(0.0)
         };
 
-        let id = window.raw.id();
+        let Some(area) = self.areas.read(window.raw.id(), area) else {
+            return;
+        };
 
+        log::debug!("Safe area: {area:?}");
+
+        crate::icm::safe_area(area.insets, area.keyboard);
+        runtime::safe_area::publish(area);
+    }
+}
+
+/// What the shell read of each window last, and what it published last.
+#[derive(Debug)]
+struct Areas<Id> {
+    /// Each window's last reading, in logical pixels.
+    windows: Vec<(Id, SafeArea)>,
+    /// What was published last.
+    published: Option<SafeArea>,
+}
+
+impl<Id> Default for Areas<Id> {
+    fn default() -> Self {
+        Self {
+            windows: Vec::new(),
+            published: None,
+        }
+    }
+}
+
+impl<Id: Copy + PartialEq> Areas<Id> {
+    /// Window `id` reads `area`: the area to publish, if it is new for that
+    /// window and not what was published last.
+    fn read(&mut self, id: Id, area: SafeArea) -> Option<SafeArea> {
         match self.windows.iter_mut().find(|(known, _area)| *known == id) {
-            Some((_id, last)) if *last == area => return,
+            Some((_id, last)) if *last == area => return None,
             Some((_id, last)) => *last = area,
             None => self.windows.push((id, area)),
         }
 
         if self.published == Some(area) {
-            return;
+            return None;
         }
 
-        log::debug!("Safe area: {area:?}");
-
         self.published = Some(area);
-        crate::icm::safe_area(area.insets, area.keyboard);
-        runtime::safe_area::publish(area);
+
+        Some(area)
+    }
+
+    /// Forgets the windows that are not `open`.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    fn retain(&mut self, open: impl Fn(&Id) -> bool) {
+        self.windows.retain(|(known, _area)| open(known));
     }
 }
 
@@ -429,13 +489,59 @@ fn android_area(
     })
 }
 
+/// When the safe area is read again after a change, while the platform
+/// settles: every 100 ms, for 600 ms. On Android the system bars and the
+/// content rect settle after the event that announced them; on iOS the safe
+/// area of a window does once UIKit has laid it out in its scene.
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+#[derive(Debug, Default)]
+struct Settle {
+    /// The next read, and the last one.
+    reads: Option<(Instant, Instant)>,
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+impl Settle {
+    /// How often to read while the platform settles, after a change.
+    const EVERY: Duration = Duration::from_millis(100);
+    /// For how long, after a change.
+    const FOR: Duration = Duration::from_millis(600);
+
+    /// Something changed at `now`: read again while it settles.
+    fn changed(&mut self, now: Instant) {
+        self.reads = Some((now + Self::EVERY, now + Self::FOR));
+    }
+
+    /// Whether a read is due at `now`. A read that is due moves on to the
+    /// next one, or ends the settle.
+    fn due(&mut self, now: Instant) -> bool {
+        let Some((next, last)) = self.reads else {
+            return false;
+        };
+
+        if next > now {
+            return false;
+        }
+
+        let next = now + Self::EVERY;
+        self.reads = (next <= last).then_some((next, last));
+
+        true
+    }
+
+    /// When the next read is due, if one is.
+    fn next(&self) -> Option<Instant> {
+        self.reads.map(|(next, _last)| next)
+    }
+}
+
 /// Android: when the shell reads the safe area again, beside the events that
 /// announce a change.
 #[cfg(any(target_os = "android", test))]
 #[derive(Debug, Default)]
 struct Polls {
-    /// After a change: the next read, and the last one.
-    settle: Option<(Instant, Instant)>,
+    /// After a change: when to read again.
+    settle: Settle,
     /// For the keyboard: the next read.
     keyboard: Option<Instant>,
     /// Whether a window asks for the keyboard.
@@ -452,10 +558,6 @@ struct Polls {
 
 #[cfg(any(target_os = "android", test))]
 impl Polls {
-    /// How often to read while the system bars settle, after a change.
-    const SETTLE_EVERY: Duration = Duration::from_millis(100);
-    /// For how long, after a change.
-    const SETTLE_FOR: Duration = Duration::from_millis(600);
     /// How often to read while a window asks for the keyboard.
     const KEYBOARD_EVERY: Duration = Duration::from_millis(250);
     /// For how long after the last window let it go: it slides away.
@@ -465,7 +567,7 @@ impl Polls {
 
     /// Something changed at `now`: read again while it settles.
     fn changed(&mut self, now: Instant) {
-        self.settle = Some((now + Self::SETTLE_EVERY, now + Self::SETTLE_FOR));
+        self.settle.changed(now);
     }
 
     /// Whether a window asks for the keyboard, at `now`.
@@ -478,7 +580,7 @@ impl Polls {
 
         if typing {
             self.typed_until = None;
-            self.keyboard = Some(now + Self::SETTLE_EVERY);
+            self.keyboard = Some(now + Settle::EVERY);
         } else {
             self.typed_until = Some(now + Self::KEYBOARD_AFTER);
             self.keyboard = self.keyboard.or(Some(now + Self::KEYBOARD_EVERY));
@@ -488,16 +590,7 @@ impl Polls {
     /// Whether a read is due at `now`. Each poll that is due moves on to its
     /// next read, or ends.
     fn due(&mut self, now: Instant) -> bool {
-        let mut due = false;
-
-        if let Some((next, last)) = self.settle
-            && next <= now
-        {
-            due = true;
-
-            let next = now + Self::SETTLE_EVERY;
-            self.settle = (next <= last).then_some((next, last));
-        }
+        let mut due = self.settle.due(now);
 
         if let Some(next) = self.keyboard
             && next <= now
@@ -555,9 +648,7 @@ impl Polls {
 
     /// When the next read or comparison is due, if one is.
     fn next(&self) -> Option<Instant> {
-        let settle = self.settle.map(|(next, _last)| next);
-
-        [settle, self.keyboard, self.turn]
+        [self.settle.next(), self.keyboard, self.turn]
             .into_iter()
             .flatten()
             .min()
@@ -792,5 +883,55 @@ mod tests {
         // Asking again starts over.
         polls.typing(true, at(2000));
         assert_eq!(polls.next(), Some(at(2100)));
+    }
+
+    /// iOS: a window can report no inset when it opens (an iPhone SE showed
+    /// none on cold launches). The loop turns again while the safe area
+    /// settles, so the 20-point inset reported a moment later is read and
+    /// published, and the settle ends after 600 ms.
+    #[test]
+    fn ios_a_late_inset_is_read_again_and_published() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut settle = Settle::default();
+        let mut areas = Areas::default();
+        let mut shown = Vec::new();
+
+        // The window opens, and its first reading has no inset yet.
+        settle.changed(start);
+        shown.extend(areas.read(1, Physical::default().to_logical(2.0)));
+
+        // The iPhone SE's top inset as icm's headless harness gives it: 20
+        // points, which is 40 pixels at a scale factor of 2. UIKit reports
+        // it 300 ms after the window opens.
+        let inset = Physical {
+            insets: [40.0, 0.0, 0.0, 0.0],
+            keyboard: 0.0,
+        };
+
+        // The loop turns at each read the settle asks for.
+        while let Some(next) = settle.next() {
+            assert!(settle.due(next));
+
+            let reading = if next < at(300) {
+                Physical::default()
+            } else {
+                inset
+            };
+
+            shown.extend(areas.read(1, reading.to_logical(2.0)));
+        }
+
+        assert_eq!(
+            shown,
+            [SafeArea::ZERO, SafeArea::new(Padding::ZERO.top(20.0))]
+        );
+
+        // Nothing more is asked for after 600 ms; a later change starts it
+        // again.
+        assert_eq!(settle.next(), None);
+
+        settle.changed(at(1000));
+        assert_eq!(settle.next(), Some(at(1100)));
     }
 }

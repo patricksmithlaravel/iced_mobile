@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # CI's release job for one desktop target (design §17 item 11 and §18 phase
-# 5): a new app from the template, pinned to this checkout by path, released
-# with `--sign none`, verified, and installed or started the way a user
-# would. Nothing is signed, notarized or sent anywhere: icm never does that,
-# and the owner runs the release's UPLOAD.md.
+# 5): a new app from the template, pinned to this checkout by path, made
+# ready the way an owner does (`icm check desktop` resolves its Cargo.lock,
+# and the app is committed with it, so the release is built from a clean
+# commit), released with `--sign none`, verified, and installed or started
+# the way a user would. Nothing is signed, notarized or sent anywhere: icm
+# never does that, and the owner runs the release's UPLOAD.md.
 #
 #   .github/ci/release.sh <macos|windows|linux> <work dir>
 #
@@ -77,7 +79,9 @@ one_file() {
 release() {
     local name=$1
     shift
-    icm_json "$name" release "$target" --sign none --allow-dirty --yes "$@"
+    # No --allow-dirty: the app is committed, so `release.dirty_tree`
+    # passes, and a release that changed a tracked file fails here.
+    icm_json "$name" release "$target" --sign none --yes "$@"
     dist=$(result_path "$name" '.release.dist')
     [ -d "$dist" ] || fail "the release reported no dist directory"
     echo "dist: $dist"
@@ -99,7 +103,9 @@ smoke_macos() {
     *) fail "$exe has no $(uname -m) slice ($archs)" ;;
     esac
     want=$(toml_key desktop.macos min_os)
-    minos=$(vtool -show-build "$exe" | awk '$1 == "minos" { print $2; exit }')
+    # The LC_BUILD_VERSION's minos, read as phase5.sh reads it (its otool
+    # step has passed on a runner). vtool was used nowhere else here.
+    minos=$(otool -l "$exe" | awk '/cmd LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }')
     echo "minos: $minos ([desktop.macos] min_os = $want)"
     [ "$minos" = "$want" ] || fail "minos $minos is not [desktop.macos] min_os $want"
 
@@ -155,6 +161,17 @@ smoke_linux() {
     chmod +x "$appimage"
     Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >"$results/xvfb.log" 2>&1 &
     xvfb=$!
+    # The app opens the display as it starts: wait until Xvfb listens.
+    local waited=0
+    while [ ! -S /tmp/.X11-unix/X99 ]; do
+        if ! kill -0 "$xvfb" 2>/dev/null; then
+            cat "$results/xvfb.log"
+            fail "Xvfb exited before it listened on :99"
+        fi
+        [ "$waited" -lt 30 ] || fail "Xvfb did not listen on :99 within 30s"
+        sleep 1
+        waited=$((waited + 1))
+    done
     # No FUSE in a container: the runtime extracts itself and runs AppRun.
     # setsid gives the app its own process group, ended as a whole below
     # (--wait keeps $! alive as long as the app, should setsid fork); both
@@ -166,7 +183,15 @@ smoke_linux() {
     wait_ready "$results/app.stderr" "$pid" 60 || rc=1
     kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
     kill "$xvfb" 2>/dev/null || true
-    wait 2>/dev/null || true
+    # A process that ignores TERM would hold the waits below until the job's
+    # timeout, so KILL the group and Xvfb after a grace period. Neither pid
+    # has been reaped yet (wait_ready only polls it), so the group id cannot
+    # have been reused in the meantime. Then wait for exactly these two pids.
+    sleep 2
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    kill -KILL "$xvfb" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    wait "$xvfb" 2>/dev/null || true
     [ "$rc" = 0 ] || fail "the AppImage did not reach its first frame"
 }
 
@@ -177,6 +202,24 @@ cd "$app"
 group "icm doctor desktop --fix --yes"
 # The template's toolchain, and on Linux the pinned appimagetool.
 icm_json doctor doctor desktop --fix --yes
+
+group "icm check desktop (resolves Cargo.lock)"
+# A new app has no Cargo.lock until its first cargo call, and a release
+# builds the committed lock with --locked (`release.lock_missing`). This is
+# the fix that check names: `icm check desktop` resolves the lock (and
+# compiles the app).
+icm_json check check desktop
+[ -f Cargo.lock ] || fail "icm check desktop left no Cargo.lock in $(native "$app")"
+
+group "git commit (the app and its Cargo.lock)"
+# Then the owner commits it (icm new made the repository), so the release
+# names the commit that rebuilds it. A throwaway identity, and no signing
+# or hooks from the machine's git configuration.
+git add -A
+git -c user.name="icm CI" -c user.email="ci@icm.invalid" -c commit.gpgsign=false \
+    commit --no-verify -q -m "A new app from the template, with its Cargo.lock"
+git ls-files --error-unmatch Cargo.lock >/dev/null
+git log --oneline -1
 
 case "$target" in
 macos)

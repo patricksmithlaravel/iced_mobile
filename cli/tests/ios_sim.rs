@@ -44,6 +44,33 @@ fn write_json(path: &Path, value: &Value) {
     std::fs::write(path, value.to_string()).unwrap();
 }
 
+/// Writes `path`, an executable that appends `<name> <arguments>` to the
+/// state's xcrun.log, runs the shell `before` (which may exit), then runs
+/// `fixture` with the same arguments.
+fn logging_tool(path: &Path, name: &str, fixture: &Path, before: &str) {
+    let script = format!(
+        "#!/bin/sh\necho \"{name} $*\" >> \"$ICM_FAKE_STATE/xcrun.log\"\n{before}exec \"{}\" \"$@\"\n",
+        fixture.display()
+    );
+    std::fs::write(path, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Asserts that every needle occurs in `log` (the run's timeline), each one
+/// after the needle before it, so the lines are in that order.
+fn assert_in_order(log: &str, needles: &[&str]) {
+    let mut from = 0;
+    for needle in needles {
+        match log[from..].find(needle) {
+            Some(found) => from += found + needle.len(),
+            None => panic!(
+                "`{needle}` is missing, or runs before the one before it (after byte {from} of the log):\n{log}"
+            ),
+        }
+    }
+}
+
 impl Fake {
     fn new() -> Fake {
         let root = tempfile::tempdir().unwrap();
@@ -83,6 +110,27 @@ impl Fake {
             std::fs::set_permissions(state.join("adb"), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
         }
+        // The tools whose calls the ordering tests read from xcrun.log, the
+        // one timeline of the run's host commands: each logs its arguments
+        // there, then does what its fixture does.
+        let fakes = fixtures().join("fake-ios");
+        logging_tool(
+            &state.join("rustc"),
+            "rustc",
+            &fakes.join("rustc"),
+            "if [ -n \"$ICM_FAKE_RUSTC_MISSING\" ]; then\n  echo \"error: toolchain '1.98.0-aarch64-apple-darwin' is not installed\" >&2\n  exit 1\nfi\n",
+        );
+        logging_tool(&state.join("xattr"), "xattr", &fakes.join("ok"), "");
+        logging_tool(&state.join("codesign"), "codesign", &fakes.join("ok"), "");
+        // cargo and the real plutil log too: the boot overlaps cargo, and
+        // the bundle's plutil runs after `bootstatus`.
+        logging_tool(&state.join("cargo"), "cargo", &fakes.join("cargo"), "");
+        logging_tool(
+            &state.join("plutil"),
+            "plutil",
+            Path::new("/usr/bin/plutil"),
+            "",
+        );
 
         let iphone = |name: &str| {
             json!({"name": name, "productFamily": "iPhone",
@@ -161,12 +209,13 @@ impl Fake {
                 self.state.join("Xcode.app/Contents/Developer"),
             )
             .env("ICM_TOOL_XCRUN", fakes.join("xcrun"))
-            .env("ICM_TOOL_CARGO", fakes.join("cargo"))
-            .env("ICM_TOOL_RUSTC", fakes.join("rustc"))
+            .env("ICM_TOOL_CARGO", self.state.join("cargo"))
+            .env("ICM_TOOL_RUSTC", self.state.join("rustc"))
             .env("ICM_TOOL_RUSTUP", fakes.join("rustup"))
             .env("ICM_TOOL_XCODEBUILD", fakes.join("xcodebuild"))
-            .env("ICM_TOOL_CODESIGN", fakes.join("ok"))
-            .env("ICM_TOOL_XATTR", fakes.join("ok"))
+            .env("ICM_TOOL_CODESIGN", self.state.join("codesign"))
+            .env("ICM_TOOL_XATTR", self.state.join("xattr"))
+            .env("ICM_TOOL_PLUTIL", self.state.join("plutil"))
             // `stop --all` also asks Android: an adb with no device online,
             // so no test reaches the host's real adb.
             .env("ICM_TOOL_ADB", self.state.join("adb"))
@@ -884,4 +933,99 @@ fn a_run_claims_the_simulator_it_boots() {
         "{stop}"
     );
     assert!(fake.xcrun_log().contains("simctl shutdown FAKE-UDID"));
+}
+
+/// The run's host commands, in order. The toolchain is probed before any
+/// simulator is listed, created or booted. cargo runs between the boot and
+/// `bootstatus`, so it overlaps the boot. Then the bundle's host tools and
+/// the install run. A first boot starves short host commands (Appendix D,
+/// "iOS Simulator"), so the bundle's tools must not run while it is going.
+#[test]
+fn the_toolchain_is_probed_first_and_the_bundle_waits_for_the_boot() {
+    let fake = Fake::new();
+    let run = fake.result("ok", &["run", "ios-sim", "--json", "-q"]);
+    assert_eq!(run["exit"], 0, "{run}");
+    assert_in_order(
+        &fake.xcrun_log(),
+        &[
+            "rustc --print sysroot",
+            "simctl create ",
+            "simctl boot FAKE-UDID",
+            "cargo build",
+            "simctl bootstatus FAKE-UDID",
+            "actool ",
+            "plutil -lint",
+            "xattr -cr",
+            "codesign --force",
+            "simctl install FAKE-UDID",
+        ],
+    );
+}
+
+/// A toolchain that is not installed stops the run before any simulator is
+/// listed, created or booted, and before anything is compiled: the probe is
+/// what decides, and it runs first.
+#[test]
+fn a_missing_toolchain_stops_the_run_before_any_simulator_is_made() {
+    let fake = Fake::new();
+    let run = fake.result_with(
+        "ok",
+        &["run", "ios-sim", "--json", "-q"],
+        &[("ICM_FAKE_RUSTC_MISSING", "1")],
+    );
+    assert_eq!(run["exit"], 4, "{run}");
+    assert_eq!(
+        run["errors"][0]["id"], "env.rust_toolchain_missing",
+        "{run}"
+    );
+    let log = fake.xcrun_log();
+    assert!(!log.contains("simctl"), "{log}");
+    assert!(!log.contains("cargo build"), "{log}");
+}
+
+/// `--no-build` without a previous build is a usage error, and the run stops
+/// before any simulator is listed, created or booted: the previous bundle is
+/// checked first, as the toolchain is for a build.
+#[test]
+fn a_missing_previous_bundle_stops_no_build_before_any_simulator_is_made() {
+    let fake = Fake::new();
+    let run = fake.result("ok", &["run", "ios-sim", "--no-build", "--json", "-q"]);
+    assert_eq!(run["exit"], 2, "{run}");
+    assert_eq!(run["errors"][0]["id"], "usage.bad_args", "{run}");
+    let log = fake.xcrun_log();
+    assert!(!log.contains("simctl"), "{log}");
+    assert!(!log.contains("cargo build"), "{log}");
+}
+
+/// `--no-build` after a build reuses that bundle: the run installs it on the
+/// booted simulator with no cargo, no rustc probe and no bundle step.
+#[test]
+fn no_build_reuses_the_previous_bundle() {
+    let fake = Fake::new();
+    let first = fake.result("ok", &["run", "ios-sim", "--json", "-q"]);
+    assert_eq!(first["exit"], 0, "{first}");
+    let bundle = fake.path(&first["artifacts"]["bundle"]);
+    let stopped = fake.result("ok", &["stop", "ios-sim", "--json", "-q"]);
+    assert_eq!(stopped["exit"], 0, "{stopped}");
+
+    let before = fake.xcrun_log().len();
+    let second = fake.result("ok", &["run", "ios-sim", "--no-build", "--json", "-q"]);
+    assert_eq!(second["exit"], 0, "{second}");
+    let log = fake.xcrun_log();
+    let run_log = &log[before..];
+    assert!(!run_log.contains("cargo build"), "{run_log}");
+    assert!(!run_log.contains("rustc"), "{run_log}");
+    assert!(!run_log.contains("actool"), "{run_log}");
+    assert_in_order(
+        run_log,
+        &[
+            "simctl boot FAKE-UDID",
+            "simctl bootstatus FAKE-UDID",
+            &format!("simctl install FAKE-UDID {}", bundle.display()),
+        ],
+    );
+    assert_eq!(
+        second["process"]["ready"]["source"], "icm_event",
+        "{second}"
+    );
 }

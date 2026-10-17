@@ -27,7 +27,12 @@
 # deleted at the end) and a fake App Store profile for ICMTEST001 in a CMS
 # envelope signed by a throwaway key. The release signs and gates the app
 # with them and ends with exit 9, since no Apple service trusts that
-# certificate.
+# certificate. Only on a throwaway machine that sets
+# ICM_ACCEPT_KEYCHAIN_SEARCH=1 (the CI workflow does) does that keychain
+# join the end of the search list, for the signed release only, since the
+# macOS 26 runner's codesign finds no identity outside the list (lib.sh,
+# join_search_list); the list is then put back, and the final step still
+# compares it with the list from before the run.
 #
 # Owner steps (never run here; printed as SKIP):
 #   - a signed release with the owner's id, team, App Store profile and
@@ -77,6 +82,7 @@ echo "keychain: $ICM_KEYCHAIN; profiles: $ICM_PROVISIONING_PROFILES"
 # project's runs would pick, and ask Android to shut down icm's emulator:
 # devices the run never booted, which another process may be using.
 cleanup() {
+    restore_search_list || true
     if [ -f "$DEMO/icm.toml" ] && command -v icm >/dev/null; then
         (cd "$DEMO" && icm stop ios-sim --shutdown --json -q >"$ACCEPT/cleanup.json" 2>&1) || true
         (cd "$DEMO" && icm stop ios-device --json -q >"$ACCEPT/cleanup-ios-device.json" 2>&1) || true
@@ -382,8 +388,9 @@ release_test_signed() {
     sha1=$(sed -n 's/^sha1=//p' "$ACCEPT/keys/identity.txt")
     cp icm.toml "$ACCEPT/icm.toml.signed.bak"
     cp assets/icon.png "$ACCEPT/icon.png.signed.bak"
-    # Steps run in a subshell: its exit puts the app back.
-    trap 'cp "$ACCEPT/icm.toml.signed.bak" "$DEMO/icm.toml"; cp "$ACCEPT/icon.png.signed.bak" "$DEMO/assets/icon.png"' EXIT
+    # Steps run in a subshell: its exit puts the app back, and the search
+    # list if the test keychain joined it.
+    trap 'cp "$ACCEPT/icm.toml.signed.bak" "$DEMO/icm.toml"; cp "$ACCEPT/icon.png.signed.bak" "$DEMO/assets/icon.png"; restore_search_list' EXIT
     # Not the template's placeholders and unanswered questions: those
     # would stop the release before the build.
     sed -i '' 's/^id = "com.example.demo"/id = "dev.accept.ios"/' icm.toml
@@ -393,8 +400,11 @@ release_test_signed() {
     grep -q "^distribution = { identity = \"$sha1\"" icm.toml
     sips --rotate 90 assets/icon.png --out "$ACCEPT/icon-turned.png" >/dev/null
     cp "$ACCEPT/icon-turned.png" assets/icon.png
+    join_search_list "$TEST_KC"
     ICM_KEYCHAIN=$TEST_KC ICM_PROVISIONING_PROFILES=$TEST_PROFILES \
         icm release ios --allow-dirty --json -q >"$ACCEPT/s.json" || true
+    restore_search_list
+    test "$(security list-keychains -d user)" = "$SEARCH_LIST_BEFORE"
     jqe '.exit == 9 and ([.errors[].id] == ["ios.sign.no_identity"]) and (.errors[0].detail | test("CSSMERR_TP_NOT_TRUSTED"))' "$ACCEPT/s.json"
     # The owner's item is the only failed check.
     jqe '.checks.failed == ["ios.sign.no_identity"] and .release.uploadable == false and (.artifacts.ipa | test("\\.ipa$"))' "$ACCEPT/s.json"

@@ -4,6 +4,27 @@ What changed in each release of the fork, newest first. A release is one tag, `v
 for the framework and `icm` together. [CHANGELOG.md](CHANGELOG.md) is upstream's and stops at
 iced 0.14.0.
 
+## Changes in v0.14.1-mobile.3
+
+```sh
+cargo install --locked --git https://github.com/patricksmithlaravel/iced_mobile --tag v0.14.1-mobile.3 icm
+```
+
+`v0.14.1-mobile.3` is `v0.14.1-mobile.2` plus one fix to the iOS safe area, and nothing else in
+the framework: the public API is unchanged. To move an app from `v0.14.1-mobile.2`, put the new tag
+on every iced line of its `Cargo.toml`, build it once with `icm check --all` and commit the
+updated `Cargo.lock`.
+
+- **iOS:** the shell reads the safe area again every 100 ms for 600 ms after the window opens,
+  resumes or changes size, as Android does. Before, it read at the turns of the event loop only, so
+  a value that UIKit reported after the first read stayed unpublished until something else woke the
+  loop. This is the change meant for the zero insets an iPhone SE (3rd generation, iOS 18.3) showed
+  on cold launches. Its cause is not isolated, and the change has not run on a device or a
+  simulator, so whether it fixes them is not yet shown.
+- **icm and CI:** the icm tool and the CI carry fixes ported from main (doctor toolchain checks,
+  the iOS simulator probe, release lock files, and the CI scripts), with no change to the iced,
+  winit or other framework crates beyond the safe-area fix.
+
 ## Changes in v0.14.1-mobile.2
 
 ```sh

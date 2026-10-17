@@ -187,6 +187,10 @@ jobs:
     timeout-minutes: 60
     env:
       DEBIAN_FRONTEND: noninteractive
+      # Rust lives in root's home, named for every step: GitHub sets HOME to
+      # /github/home in a container, not root's /root.
+      CARGO_HOME: /root/.cargo
+      RUSTUP_HOME: /root/.rustup
     steps:
       - name: Build tools, packaging tools and what the smoke test runs
         run: |
@@ -204,11 +208,14 @@ jobs:
           # icm's build script reads the checkout's git metadata.
           git config --global --add safe.directory '*'
       - uses: actions/checkout@v7
+      # The installer runs with root's own HOME: with GitHub's /github/home it
+      # takes the difference from root's passwd home for sudo and prints
+      # errors (`$HOME differs from euid-obtained home directory`).
       - name: rustup
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
-              sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
-          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+              HOME=/root sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          echo "$CARGO_HOME/bin" >>"$GITHUB_PATH"
       - run: .github/ci/toolchain.sh pinned
       - run: .github/ci/build-icm.sh "$RUNNER_TEMP/icm"
       - id: release

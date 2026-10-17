@@ -15,7 +15,7 @@ every app instead. Its source is [examples/app/AGENTS.md](examples/app/AGENTS.md
 - `main` is the only development branch. `tawara/0.14-mobile` is kept as it is for the Tawara
   wallet's pin. Do not commit to it.
 - Releases are tags `v0.14.x-mobile.N`, and one tag releases the framework and `icm` together.
-  The current release is `v0.14.1-mobile.2`. `CHANGES-mobile.md` says what changed in each one.
+  The current release is `v0.14.1-mobile.3`. `CHANGES-mobile.md` says what changed in each one.
 
 ## Layout
 
@@ -82,7 +82,10 @@ the template on every platform, tests on macOS, Linux and Windows, the `rust-ver
 `.github/workflows/icm.yml` (icm's checks, the `cargo install --git` check, a fresh resolve of a new
 app, the desktop releases with `--sign none`, and the tag check). The jobs' logic is in
 `.github/ci/*.sh`, which run locally too. `cli/tests/ci.rs` fails when the workflows stop running a
-command listed above, so change both together. `icm-ios.yml`, `icm-android.yml`, `icm-web.yml` and
+command listed above, so change both together. On macOS it also fails when a bash step of a macOS
+job, a `.github/ci` script or an acceptance script does not parse under `/bin/bash`: macOS runners
+have only that bash 3.2, which cannot parse a `case` inside `$(...)`.
+`icm-ios.yml`, `icm-android.yml`, `icm-web.yml` and
 `icm-desktop.yml` run each platform's acceptance and real-host jobs when `cli/` or the template
 changes; the Windows jobs wait for the repository variable `ICM_WINDOWS_HOST`, since icm does not
 build on Windows yet. Actions has not run on the fork yet: the owner enables workflows on its Actions
@@ -135,7 +138,9 @@ stop only the platforms they drive and leave the other platforms' devices alone
     `ICM_KEYCHAIN` names a keychain file that does not exist and `ICM_PROVISIONING_PROFILES` an
     empty directory in `$ACCEPT`. The test identity lives in a temporary keychain made by
     `test-identity.sh`, which never joins the search list (a step checks it) and is deleted at the
-    end; the profile is a CMS envelope signed by a throwaway key.
+    end; the profile is a CMS envelope signed by a throwaway key. As in phase5.sh, only a throwaway
+    machine's `ICM_ACCEPT_KEYCHAIN_SEARCH=1` (the CI job sets it) lets that keychain join the list
+    for the signed release (`join_search_list` in `lib.sh`); the list is put back and checked.
   - It creates the managed `icm-iphone-<n>-pro-max-ios-<version>` simulator when it is missing and
     shuts it down. The owner's signed release, upload and a physical iPhone are SKIP
     (`ICM_ACCEPT_DEVICE=1` runs on a connected, provisioned iPhone).
@@ -156,7 +161,10 @@ stop only the platforms they drive and leave the other platforms' devices alone
   - macOS: an unsigned release and its DMG, which it mounts and verifies, and the app launched. A
     release signed with a throwaway self-signed identity (`test-identity.sh`) in a temporary
     keychain, which never joins the user's search list (the script checks the list is unchanged)
-    and is deleted at the end. The owner's notarization steps are SKIP.
+    and is deleted at the end. The owner's notarization steps are SKIP. Only on a throwaway
+    machine, `ICM_ACCEPT_KEYCHAIN_SEARCH=1` (the CI job sets it) lets that keychain join the list
+    for the signed release, since codesign's `--keychain` only narrows a search of the list and
+    macOS 26's codesign finds no identity outside it; the list is put back and checked.
   - Linux: the `.deb` and the AppImage (`--sign none`), `linux.glibc_floor`, `icm verify linux`,
     `dpkg -i` and `dpkg -r` (as root, or with `ICM_ACCEPT_INSTALL=1` and passwordless sudo), and
     the AppImage's first frame under `xvfb-run` or the session's display.

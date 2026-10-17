@@ -50,15 +50,23 @@ jobs:
       - name: The template's toolchain
         run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)".*/\1/p' examples/app/rust-toolchain.toml)" --profile minimal
       - name: Phase 5 acceptance
+        # The runner is throwaway: the test keychain may join its search
+        # list for the signed release, which codesign needs on macOS 26
+        # (phase5.sh's header). The list is put back and checked.
+        env:
+          ICM_ACCEPT_KEYCHAIN_SEARCH: "1"
         run: ACCEPT="$RUNNER_TEMP/accept" cli/tests/accept/phase5.sh
       - name: Keep the release
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: icm-macos-release
+          # The run directories hold each tool's log (codesign's included).
           path: |
             ${{ runner.temp }}/accept/demo/target/icm/dist
+            ${{ runner.temp }}/accept/demo/target/icm/runs
             ${{ runner.temp }}/accept/log
+            ${{ runner.temp }}/accept/*.json
           if-no-files-found: ignore
 
   linux:
@@ -82,9 +90,12 @@ jobs:
             libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 \
             libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libgl1 libegl1 mesa-vulkan-drivers
       - uses: actions/checkout@v4
+      # The installer runs with root's own HOME: with GitHub's /github/home it
+      # takes the difference from root's passwd home for sudo and prints
+      # errors (`$HOME differs from euid-obtained home directory`).
       - name: Rust
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | HOME=/root sh -s -- -y --profile minimal --default-toolchain stable
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - name: icm's desktop release tests (the real dpkg-deb)
         working-directory: cli
@@ -99,6 +110,18 @@ jobs:
           grep -A1 '^\[desktop.linux\]$' icm.toml
           icm doctor desktop --fix --yes --json -q || true
           icm check desktop --json -q | jq -e '.ok'
+      # As .github/ci/release.sh does: the app and its Cargo.lock are
+      # committed, so the release names a clean tree (without a commit,
+      # release.dirty_tree is only a WARN, and this job would release a
+      # different precondition from icm.yml's Linux job).
+      - name: Commit the app and its Cargo.lock
+        working-directory: /tmp/demo
+        run: |
+          git add -A
+          git -c user.name="icm CI" -c user.email="ci@icm.invalid" -c commit.gpgsign=false \
+            commit --no-verify -q -m "A new app from the template, with its Cargo.lock"
+          git ls-files --error-unmatch Cargo.lock >/dev/null
+          git log --oneline -1
       - name: Release (unsigned; downloads the pinned appimagetool with --yes)
         working-directory: /tmp/demo
         run: |
@@ -115,18 +138,27 @@ jobs:
           test -f /usr/share/applications/dev.icm.ci.desktop
           desktop-file-validate /usr/share/applications/dev.icm.ci.desktop
           dpkg -r demo
+      # Ubuntu 22.04's xvfb-run runs the app with `2>&1`, so its ICM_EVENT
+      # lines (stderr) come out on stdout: both go to one file. setsid gives the
+      # run its own process group, ended as a whole once the app is ready
+      # or has exited (--wait keeps $! alive as long as xvfb-run).
       - name: The AppImage draws its first frame under Xvfb
         working-directory: /tmp/demo
+        shell: bash
         run: |
           appimage=$(jq -r .artifacts.appimage /tmp/linux.json)
           chmod +x "$appimage"
-          ( ICM_EVENTS=1 APPIMAGE_EXTRACT_AND_RUN=1 timeout 60 xvfb-run -a "$appimage" 2> /tmp/appimage.err || true ) &
+          ICM_EVENTS=1 APPIMAGE_EXTRACT_AND_RUN=1 setsid --wait xvfb-run -a "$appimage" > /tmp/appimage.log 2>&1 &
+          pid=$!
           for _ in $(seq 1 120); do
-            if grep -q '^ICM_EVENT .*"kind":"ready"' /tmp/appimage.err 2>/dev/null; then break; fi
+            if grep -q '^ICM_EVENT .*"kind":"ready"' /tmp/appimage.log; then break; fi
+            kill -0 "$pid" 2>/dev/null || break
             sleep 0.5
           done
-          pkill -f "$(basename "$appimage")" || true
-          grep '^ICM_EVENT .*"kind":"ready"' /tmp/appimage.err
+          kill -- "-$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          tail -n 40 /tmp/appimage.log
+          grep '^ICM_EVENT .*"kind":"ready"' /tmp/appimage.log
       - name: icm verify linux
         working-directory: /tmp/demo
         run: icm verify linux --json -q | jq -e '.ok'

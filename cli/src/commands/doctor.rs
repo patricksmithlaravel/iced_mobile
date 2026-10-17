@@ -8,7 +8,12 @@
 //! wasm-bindgen-cli matching the app's lock). Each fix is printed before it
 //! runs and is a step with its own log; afterwards everything is probed
 //! again, up to three rounds, since some fixes enable others (a system
-//! image, then the AVD that uses it).
+//! image, then the AVD that uses it). A project that did not resolve for a
+//! reason a fix repairs (its toolchain was not installed, so `cargo
+//! metadata` failed) is resolved again after each round, and the checks
+//! that need it (the lock and its wasm-bindgen, the AVD's API level) join
+//! the next probe. A missing toolchain is reported once, by the
+//! `rust.toolchain` requirement with its fix.
 //!
 //! The exit code (§4.4): 4 while anything `icm doctor --fix [--yes]` could
 //! fix remains, else 9 while owner items remain, else the exit of any other
@@ -23,7 +28,7 @@ use crate::exit::Exit;
 use crate::plan::{Plan, Step};
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// How many times fixes run before doctor gives up and reports.
 const FIX_ROUNDS: usize = 3;
@@ -36,7 +41,7 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
     // The project, when there is one. A broken icm.toml is reported and
     // the machine is still checked.
     let mut config_problem: Option<IcmError> = None;
-    let project: Option<Project> =
+    let mut project: Option<Project> =
         if crate::config::locate(ctx.global.config.as_deref(), &cwd).is_ok() {
             match ctx.project() {
                 Ok(project) => Some(project.clone()),
@@ -51,10 +56,12 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
     if project.is_none() {
         let _ = ctx.rep.attach(&crate::paths::cache_dir());
     }
-    let dir = project
-        .as_ref()
-        .map(|p| p.dir().to_path_buf())
-        .unwrap_or_else(|| cwd.clone());
+    let project_dir = |project: Option<&Project>| {
+        project
+            .map(|p| p.dir().to_path_buf())
+            .unwrap_or_else(|| cwd.clone())
+    };
+    let mut dir = project_dir(project.as_ref());
 
     let explicit = !args.platforms.is_empty();
     let mut platforms = if explicit {
@@ -68,19 +75,19 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
     let env = ctx.env.clone();
     let downloads = ctx.global.yes && !ctx.global.offline;
 
-    let gather = |ctx: &Ctx| -> Vec<Requirement> {
+    let gather = |ctx: &Ctx, project: Option<&Project>, dir: &Path| -> Vec<Requirement> {
         let probe = Probe {
             ctx,
             host: &host,
             env: &env,
-            project: project.as_ref(),
-            dir: &dir,
+            project,
+            dir,
             explicit,
         };
         doctor::gather(&probe, &platforms)
     };
 
-    let mut requirements = gather(ctx);
+    let mut requirements = gather(ctx, project.as_ref(), &dir);
 
     if ctx.dry_run() {
         let mut plan = Plan::new();
@@ -131,14 +138,41 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
                     }
                 }
             }
-            requirements = gather(ctx);
+            // A project that failed for a reason a fix repairs (`cargo
+            // metadata` with the project's toolchain not installed) is
+            // resolved again: until it resolves, the checks that need it
+            // (its ABIs, target_sdk and lock) are skipped, and its failure
+            // would outlive the fix.
+            if project.is_none()
+                && config_problem
+                    .as_ref()
+                    .is_some_and(|problem| matches!(problem.fix.by, By::Doctor | By::DoctorYes))
+            {
+                match ctx.project() {
+                    Ok(resolved) => {
+                        project = Some(resolved.clone());
+                        dir = project_dir(project.as_ref());
+                        config_problem = None;
+                    }
+                    Err(error) => config_problem = Some(error),
+                }
+            }
+            requirements = gather(ctx, project.as_ref(), &dir);
         }
     }
 
-    // Report.
+    // Report. The `rust.toolchain` requirement reports a missing toolchain
+    // with its fix, so the project's failure to resolve because of it is
+    // not reported a second time.
     if let Some(problem) = &config_problem {
-        ctx.rep
-            .check(Check::from_error(problem.clone(), Status::Fail));
+        let reported = toolchain_missing(Some(problem))
+            && requirements
+                .iter()
+                .any(|r| r.key == "rust.toolchain" && r.failing());
+        if !reported {
+            ctx.rep
+                .check(Check::from_error(problem.clone(), Status::Fail));
+        }
     }
     let mut remaining: Vec<IcmError> = Vec::new();
     for requirement in &requirements {
@@ -156,10 +190,10 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
         }
         if !args.fix && !requirement.fixes.is_empty() && requirement.failing() {
             check.error.likely_causes.push(format!(
-                "`icm doctor {} --fix{}` repairs it",
+                "`icm doctor {}--fix{}` repairs it",
                 requirement
                     .platform
-                    .map(Platform::as_str)
+                    .map(|p| format!("{} ", p.as_str()))
                     .unwrap_or_default(),
                 if requirement.by() == By::DoctorYes {
                     " --yes"
@@ -269,6 +303,11 @@ pub fn run(ctx: &mut Ctx, args: &DoctorArgs) -> Result<()> {
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+/// Whether the project did not resolve because its toolchain is missing.
+fn toolchain_missing(problem: Option<&IcmError>) -> bool {
+    problem.is_some_and(|error| error.id == CheckId::EnvRustToolchainMissing.id())
 }
 
 /// The fixes to run this round: those of failing requirements, allowed by
