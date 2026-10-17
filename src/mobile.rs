@@ -280,9 +280,11 @@
 //! input of the app has the focus (and for the second it takes to slide
 //! away), so the keyboard another app left up does not raise the bottom when
 //! the app comes back. On iOS the window can report zero insets for a frame,
-//! under the launch screen, before it is in its scene; the reads of the 600 ms
-//! after it opens pick up the insets once it is. On phones every window fills
-//! the screen, so they share one safe area.
+//! under the launch screen, before it is in its scene. The reads of the 600 ms
+//! after it opens, resumes or changes size may pick up the insets once they
+//! are reported. Whether they do on an iPhone SE is not yet shown on a device,
+//! since the cause of its zero insets is not isolated. On phones every window
+//! fills the screen, so they share one safe area.
 //!
 //! [`SafeArea::keyboard`] is measured from the bottom edge, so it covers the
 //! bottom inset: [`SafeArea::padding`] takes the larger of the two.
