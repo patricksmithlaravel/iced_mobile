@@ -3,9 +3,8 @@
 //! winit reports no system or window theme on either platform and never
 //! sends `ThemeChanged`. The runner reads the mode where the platform keeps
 //! it when the event loop turns (`NewEvents` and `AboutToWait`), and hands a
-//! change to the instance, which treats it as Linux's theme stream does
-//! (`system::Action::NotifyTheme`): the default theme, `system::theme` and
-//! `system::theme_changes` follow it.
+//! change to the instance as `system::Action::NotifyTheme`: the default
+//! theme, `system::theme` and `system::theme_changes` follow it.
 //!
 //! A switch wakes the event loop on both platforms, so the next turn sees
 //! it. iOS reads at every turn: two property reads. Android reads through
