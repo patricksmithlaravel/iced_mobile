@@ -16,8 +16,8 @@ template, then checks, builds, runs, screenshots, logs and tests it on the deskt
 Simulator and Android. `icm release` builds and checks what the App Store, Google Play, a web host
 and desktop installers take; the owner signs, uploads and publishes it.
 
-**Status: experimental.** The current release is `v0.14.1-mobile.3`, and
-[CHANGES-mobile.md](CHANGES-mobile.md) lists what changed since `v0.14.1-mobile.2`. This is an
+**Status: experimental.** The current release is `v0.14.1-mobile.4`, and
+[CHANGES-mobile.md](CHANGES-mobile.md) lists what changed since `v0.14.1-mobile.3`. This is an
 independent fork of [iced-rs/iced](https://github.com/iced-rs/iced), not endorsed by the iced
 project. Upstream has declined mobile support
 ([iced-rs/iced#302](https://github.com/iced-rs/iced/issues/302)), so the mobile work lives here.
@@ -40,7 +40,7 @@ The full list, with workarounds, is in [docs/agents/limitations.md](docs/agents/
 
 ```sh
 # needs Rust 1.89 or newer
-cargo install --locked --git https://github.com/patricksmithlaravel/iced_mobile --tag v0.14.1-mobile.3 icm
+cargo install --locked --git https://github.com/patricksmithlaravel/iced_mobile --tag v0.14.1-mobile.4 icm
 
 icm new hello && cd hello       # the template app, pinned to this release
 icm doctor --fix --yes          # check the machine and install what is missing (downloads)
@@ -111,10 +111,10 @@ Different spellings of the source make Cargo build two copies of iced:
 
 ```toml
 [dependencies]
-iced = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.3" }
+iced = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.4" }
 
 [dev-dependencies]
-iced_test = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.3" }
+iced_test = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.4" }
 ```
 
 `src/lib.rs` runs the app, and defines Android's entry point:

@@ -4,7 +4,16 @@ What changed in each release of the fork, newest first. A release is one tag, `v
 for the framework and `icm` together. [CHANGELOG.md](CHANGELOG.md) is upstream's and stops at
 iced 0.14.0.
 
-## Unreleased
+## Changes in v0.14.1-mobile.4
+
+```sh
+cargo install --locked --git https://github.com/patricksmithlaravel/iced_mobile --tag v0.14.1-mobile.4 icm
+```
+
+`v0.14.1-mobile.4` is `v0.14.1-mobile.3` with Linux's system theme detection removed, and nothing else
+in the framework. To move an app from `v0.14.1-mobile.3`, put the new tag on every iced line of its
+`Cargo.toml`, remove `linux-theme-detection` from any iced feature list, build it once with
+`icm check --all` and commit the updated `Cargo.lock`.
 
 - **Linux no longer reads the system's light or dark mode.** The `linux-theme-detection` feature and
   its `mundy` dependency are gone, so `iced::system::theme()` answers `None` on Linux and
