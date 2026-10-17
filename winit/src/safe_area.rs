@@ -332,7 +332,7 @@ impl<Id: Copy + PartialEq> Areas<Id> {
     }
 
     /// Forgets the windows that are not `open`.
-    #[cfg(any(target_os = "android", target_os = "ios", test))]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     fn retain(&mut self, open: impl Fn(&Id) -> bool) {
         self.windows.retain(|(known, _area)| open(known));
     }
