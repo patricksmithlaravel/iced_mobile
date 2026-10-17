@@ -16,8 +16,8 @@ template, then checks, builds, runs, screenshots, logs and tests it on the deskt
 Simulator and Android. `icm release` builds and checks what the App Store, Google Play, a web host
 and desktop installers take; the owner signs, uploads and publishes it.
 
-**Status: experimental.** The current release is `v0.14.1-mobile.3`, and
-[CHANGES-mobile.md](CHANGES-mobile.md) lists what changed since `v0.14.1-mobile.2`. This is an
+**Status: experimental.** The current release is `v0.14.1-mobile.4`, and
+[CHANGES-mobile.md](CHANGES-mobile.md) lists what changed since `v0.14.1-mobile.3`. This is an
 independent fork of [iced-rs/iced](https://github.com/iced-rs/iced), not endorsed by the iced
 project. Upstream has declined mobile support
 ([iced-rs/iced#302](https://github.com/iced-rs/iced/issues/302)), so the mobile work lives here.
@@ -27,7 +27,7 @@ Report problems with this fork here (see [Contributing](#contributing)), not ups
 
 | Platform | What works | Main limitations |
 |---|---|---|
-| Desktop (macOS, Linux, Windows) | Behaves as upstream iced on its 0.14 branch. `icm run desktop` builds, launches, screenshots and reads logs on macOS and Linux hosts. `icm release macos` builds a signed, hardened `.app`, its zip for notarization and then a DMG. `icm release linux` builds a `.deb` and an AppImage, and `icm release windows` an `.msi` and an NSIS installer; each runs on its own OS. | icm does not run on Windows hosts yet, so Windows installers wait for that. The owner notarizes macOS releases (icm prints the commands). |
+| Desktop (macOS, Linux, Windows) | Behaves as upstream iced on its 0.14 branch, except that Linux reports no system light or dark mode (`iced::system::theme()` is `None`). `icm run desktop` builds, launches, screenshots and reads logs on macOS and Linux hosts. `icm release macos` builds a signed, hardened `.app`, its zip for notarization and then a DMG. `icm release linux` builds a `.deb` and an AppImage, and `icm release windows` an `.msi` and an NSIS installer; each runs on its own OS. | icm does not run on Windows hosts yet, so Windows installers wait for that. The owner notarizes macOS releases (icm prints the commands). |
 | Web (wasm32) | Behaves as upstream iced. `icm run web` builds with wasm-bindgen, serves the app locally and drives it in headless Chrome (screenshots, console logs, input). `icm release web` builds a size-optimized static site (wasm-opt, content-hashed modules, `_headers`, icons, licence notices), checks it and loads it once in headless Chrome; `icm verify web --url` checks the deployed site. | icm does not deploy: the owner runs the host's command from `UPLOAD.md`. |
 | iOS (iPhone) | UIKit scene life cycle (required with the iOS 27 SDK), the safe area with the keyboard's height (`iced::mobile::safe_area()`), the system's dark mode, the clipboard (`UIPasteboard`), a lifecycle subscription that reaches `update` (`iced::mobile::lifecycle()`) beside the suspend/resume hook, logging to the unified log, Fira Sans by default with fallback to system fonts. `icm run ios-sim` builds the `.app`, installs and launches it on a managed simulator, screenshots it and reads its logs. `icm release ios` builds a signed, store-checked `.ipa` with its dSYM and the owner's upload commands; `icm run ios-device` installs and launches on an iPhone through `devicectl`. | Device runs and signed releases need the owner's certificates and profiles, and device runs are tested with stand-in tools only so far. No input on a physical iPhone. No tap, swipe, text, key or rotate input on the simulator yet (appearance, font scale, background and foreground work), so test the UI with `.ice` flows and `icm ui --headless`. Hardware keyboards send no modifier keys, so no Cmd shortcuts. The status bar follows the system's mode even when the app forces a theme. No iPad. |
 | Android | `NativeActivity` (no Java code), the safe area with the keyboard's height (`iced::mobile::safe_area()`), the system's dark mode, the clipboard (`ClipboardManager`, and Ctrl+C, X, V and A in text fields from a hardware keyboard), a lifecycle subscription that reaches `update` (`iced::mobile::lifecycle()`) beside the suspend/resume hook, a destroyed Activity (the app starts over in the next one), logging to logcat, Fira Sans with system-font fallback. `icm run android` builds and signs a debug APK and runs it on a managed emulator or a device connected over adb, with screenshots, logs and tap, swipe, text and key input. `icm release android` builds, signs (with the owner's upload key, passwords from environment variables), gates and smoke-tests the Google Play `.aab`, and `icm test --on android --lifecycle` checks rotation, dark mode, font scale, Home, Back and a process kill. | Text input gets key events only (no composition). One window. A dark-mode switch keeps the launch theme's bar icons until the next launch, and with edge-to-edge drawing the keyboard's height arrives up to a quarter of a second late. |
@@ -40,7 +40,7 @@ The full list, with workarounds, is in [docs/agents/limitations.md](docs/agents/
 
 ```sh
 # needs Rust 1.89 or newer
-cargo install --locked --git https://github.com/patricksmithlaravel/iced_mobile --tag v0.14.1-mobile.3 icm
+cargo install --locked --git https://github.com/patricksmithlaravel/iced_mobile --tag v0.14.1-mobile.4 icm
 
 icm new hello && cd hello       # the template app, pinned to this release
 icm doctor --fix --yes          # check the machine and install what is missing (downloads)
@@ -111,10 +111,10 @@ Different spellings of the source make Cargo build two copies of iced:
 
 ```toml
 [dependencies]
-iced = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.3" }
+iced = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.4" }
 
 [dev-dependencies]
-iced_test = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.3" }
+iced_test = { git = "https://github.com/patricksmithlaravel/iced_mobile", tag = "v0.14.1-mobile.4" }
 ```
 
 `src/lib.rs` runs the app, and defines Android's entry point:

@@ -18,7 +18,6 @@ default = ["x11", "wayland"]
 debug = ["iced_debug/enable"]
 sysinfo = ["dep:sysinfo"]
 unconditional-rendering = []
-linux-theme-detection = ["dep:mundy", "mundy/async-io", "mundy/color-scheme"]
 x11 = ["winit/x11", "window_clipboard/x11"]
 wayland = ["winit/wayland", "winit/wayland-dlopen", "winit/wayland-csd-adwaita", "window_clipboard/wayland"]
 # Android: run in `android.app.NativeActivity` (winit's `android-native-activity`).
@@ -63,7 +62,3 @@ objc2-ui-kit.features = ["UIGeometry", "UIInterface", "UIPasteboard", "UIRespond
 web-sys.workspace = true
 web-sys.features = ["Document", "Window", "HtmlCanvasElement", "Location", "console"]
 wasm-bindgen-futures.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-mundy.workspace = true
-mundy.optional = true
