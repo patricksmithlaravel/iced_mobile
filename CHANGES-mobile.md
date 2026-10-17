@@ -4,6 +4,22 @@ What changed in each release of the fork, newest first. A release is one tag, `v
 for the framework and `icm` together. [CHANGELOG.md](CHANGELOG.md) is upstream's and stops at
 iced 0.14.0.
 
+## Unreleased
+
+- **Linux no longer reads the system's light or dark mode.** The `linux-theme-detection` feature and
+  its `mundy` dependency are gone, so `iced::system::theme()` answers `None` on Linux and
+  `iced::system::theme_changes()` reports nothing there. An application without `.theme(..)` draws the
+  light theme on Linux. An application that forces a theme is drawn as before. One that forces a theme
+  and then lets the system decide keeps the forced mode as its default, since no later change of the
+  system's mode reaches it. macOS, Windows, Android, iOS and the web are unchanged.
+- **Why:** on Linux `mundy` reached `zbus` 5, and `cargo deny` rejects that chain of unmaintained
+  crates (RUSTSEC-2026-0370, RUSTSEC-2026-0371 and RUSTSEC-2026-0372: `zvariant`, `zbus_names` and
+  `zvariant_derive`). The owner decided on 2026-10-17 to drop `mundy` rather than ignore the advisories.
+- **An application that enabled the feature** must remove `linux-theme-detection` from its iced feature
+  lists. Cargo rejects an unknown feature, so the build fails until the name goes.
+- **Cargo.lock:** the framework's lock drops `mundy` and the crates only it used. No other package
+  changes version.
+
 ## Changes in v0.14.1-mobile.3
 
 ```sh

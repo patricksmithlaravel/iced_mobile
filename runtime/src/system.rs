@@ -55,11 +55,15 @@ pub fn information() -> Task<Information> {
 }
 
 /// Returns the current system theme.
+///
+/// Linux reports none, so this answers `theme::Mode::None` there.
 pub fn theme() -> Task<theme::Mode> {
     task::oneshot(|sender| crate::Action::System(Action::GetTheme(sender)))
 }
 
 /// Subscribes to system theme changes.
+///
+/// Linux reports none, so this subscription yields nothing there.
 pub fn theme_changes() -> Subscription<theme::Mode> {
     #[derive(Hash)]
     struct ThemeChanges;

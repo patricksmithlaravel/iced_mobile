@@ -897,7 +897,7 @@ async fn run_instance<P>(
     is_daemon: bool,
     graphics_settings: graphics::Settings,
     default_fonts: Vec<Cow<'static, [u8]>>,
-    mut _system_theme: oneshot::Receiver<theme::Mode>,
+    mut system_theme_receiver: oneshot::Receiver<theme::Mode>,
 ) where
     P: Program + 'static,
     P::Theme: theme::Base,
@@ -920,38 +920,11 @@ async fn run_instance<P>(
     let mut user_interfaces = ManuallyDrop::new(FxHashMap::default());
     let mut clipboard = Clipboard::unconnected();
 
-    #[cfg(all(feature = "linux-theme-detection", target_os = "linux"))]
-    let mut system_theme = {
-        let to_mode = |color_scheme| match color_scheme {
-            mundy::ColorScheme::NoPreference => theme::Mode::None,
-            mundy::ColorScheme::Light => theme::Mode::Light,
-            mundy::ColorScheme::Dark => theme::Mode::Dark,
-        };
-
-        runtime.run(
-            mundy::Preferences::stream(mundy::Interest::ColorScheme)
-                .map(move |preferences| {
-                    Action::System(system::Action::NotifyTheme(to_mode(
-                        preferences.color_scheme,
-                    )))
-                })
-                .boxed(),
-        );
-
-        runtime
-            .enter(|| {
-                mundy::Preferences::once_blocking(
-                    mundy::Interest::ColorScheme,
-                    core::time::Duration::from_millis(200),
-                )
-            })
-            .map(|preferences| to_mode(preferences.color_scheme))
-            .unwrap_or_default()
-    };
-
-    #[cfg(not(all(feature = "linux-theme-detection", target_os = "linux")))]
-    let mut system_theme =
-        _system_theme.try_recv().ok().flatten().unwrap_or_default();
+    let mut system_theme = system_theme_receiver
+        .try_recv()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
 
     log::info!("System theme: {system_theme:?}");
 

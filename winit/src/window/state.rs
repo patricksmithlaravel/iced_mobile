@@ -253,18 +253,17 @@ where
 }
 
 /// Whether every window is told each change of the system's light or dark
-/// mode, whatever theme the application forces: Linux by mundy's stream, and
-/// Android and iOS by the runner's reads (`appearance`), both through
-/// `NotifyTheme`. A window's default theme is then always the system's.
+/// mode, whatever theme the application forces: Android and iOS, by the
+/// runner's reads (`appearance`), through `NotifyTheme`. A window's default
+/// theme is then always the system's.
 ///
 /// Elsewhere winit reports the window's own theme, which follows a forced
 /// one, and after `set_theme(None)` sends `ThemeChanged` only when the
-/// system's mode differs from the forced one.
-const TOLD_EVERY_SYSTEM_CHANGE: bool = cfg!(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "ios"
-));
+/// system's mode differs from the forced one. Linux reports no system mode
+/// (`Mode::None`), so a window there keeps the mode it was forced to as its
+/// default once the application lets the system decide.
+const TOLD_EVERY_SYSTEM_CHANGE: bool =
+    cfg!(any(target_os = "android", target_os = "ios"));
 
 /// What a window does when the application stops forcing a theme of mode
 /// `forced` and lets the system decide, while its default theme has mode
@@ -299,8 +298,9 @@ mod tests {
             (theme::Mode::Light, None)
         );
 
-        // macOS or Windows: the window followed the forced Dark, so Dark is
-        // the guess until winit reports the system's mode.
+        // macOS, Windows or Linux: the window followed the forced Dark, so
+        // Dark is the guess until winit reports the system's mode, which on
+        // Linux it never does.
         assert_eq!(
             release(theme::Mode::Dark, theme::Mode::Light, false),
             (theme::Mode::None, Some(theme::Mode::Dark))
