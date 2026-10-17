@@ -848,8 +848,7 @@
 //! # Dark mode
 //!
 //! On Android and iOS the shell reads the system's light or dark mode when
-//! the application starts and whenever the user switches it, as the desktop
-//! does:
+//! the application starts and whenever the user switches it:
 //!
 //! - An application without `.theme(..)` draws iced's default theme for the
 //!   mode, `Theme::Light` or `Theme::Dark`, from its first frame, and
