@@ -52,6 +52,10 @@ The changes since `v0.14.1-mobile.2`, among them the fixes from its re-verificat
   Tab as keys, beside typed characters and Backspace, where they said typed characters and
   Backspace only.
 - **Android:** the safe area is published again when the app changes its own scale factor.
+- **iOS:** the shell reads the safe area again every 100 ms for 600 ms after the window opens,
+  resumes or changes size, as Android does. Before, it read at the turns of the event loop only, so
+  a value that UIKit reported after the first read stayed unpublished until something else woke the
+  loop.
 - **Android:** the on-screen keyboard shows on Android 16 (API 36). iced_winit requires
   android-activity 0.6.1, and the fork's `Cargo.lock` holds it: 0.6.0 asked Android to show the
   keyboard for a view that is not the served one there, so tapping a `text_input` showed none. An
