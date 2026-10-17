@@ -15,7 +15,7 @@ every app instead. Its source is [examples/app/AGENTS.md](examples/app/AGENTS.md
 - `main` is the only development branch. `tawara/0.14-mobile` is kept as it is for the Tawara
   wallet's pin. Do not commit to it.
 - Releases are tags `v0.14.x-mobile.N`, and one tag releases the framework and `icm` together.
-  The current release is `v0.14.1-mobile.2`. `CHANGES-mobile.md` says what changed in each one.
+  The current release is `v0.14.1-mobile.3`. `CHANGES-mobile.md` says what changed in each one.
 
 ## Layout
 
