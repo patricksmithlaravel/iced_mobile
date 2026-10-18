@@ -100,8 +100,8 @@ impl App {
 
                 Task::none()
             }
-            // The default theme follows the system already; the state keeps
-            // the mode only to show it.
+            // The default theme follows the system, except on Linux, which
+            // reports no mode; the state keeps the mode only to show it.
             Message::AppearanceChanged(appearance) => {
                 self.appearance = appearance;
 
@@ -337,7 +337,8 @@ pub fn application()
     iced::application(App::default, App::update, App::view)
         .title("App")
         // No `.theme(..)`: the default theme follows the system's light or
-        // dark mode, as icm's Android window and bar icons do.
+        // dark mode, as icm's Android window and bar icons do. Linux reports
+        // no mode, so there the default is the light theme.
         .subscription(App::subscription)
         // Embedded by the `fira-sans` feature: every platform, the headless
         // renderer included, draws the same glyphs.
